@@ -9,8 +9,8 @@ from sqlalchemy import func, case
 from datetime import datetime, timedelta
 from models import db, Project, ProjectStatus, Task, TaskStatus
 from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args, APIException
-from app.auth import optional_token_auth
-from app.github_config import require_auth, get_current_user
+from core.auth import optional_token_auth
+from core.github_config import require_auth, get_current_user
 
 # 创建蓝图
 projects_bp = Blueprint('projects', __name__)

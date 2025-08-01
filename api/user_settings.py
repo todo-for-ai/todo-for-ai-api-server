@@ -6,7 +6,7 @@
 """
 
 from flask import Blueprint, request, jsonify
-from app.github_config import require_auth, get_current_user
+from core.github_config import require_auth, get_current_user
 from api.base import api_response, api_error, handle_api_error
 from models.user_settings import UserSettings
 from models.user import User

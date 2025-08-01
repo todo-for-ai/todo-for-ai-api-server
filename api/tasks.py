@@ -8,8 +8,8 @@ from datetime import datetime
 from flask import Blueprint, request
 from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
 from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args
-from app.auth import optional_token_auth
-from app.github_config import require_auth, get_current_user
+from core.auth import optional_token_auth
+from core.github_config import require_auth, get_current_user
 
 # 创建蓝图
 tasks_bp = Blueprint('tasks', __name__)

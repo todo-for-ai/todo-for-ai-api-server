@@ -10,8 +10,8 @@ from flask import Blueprint, request, jsonify, redirect, url_for, session
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, User
 from .base import api_response, api_error, handle_api_error
-from app.github_config import github_service, require_auth, get_current_user
-from app.google_config import google_service
+from core.github_config import github_service, require_auth, get_current_user
+from core.google_config import google_service
 
 # 创建蓝图
 auth_bp = Blueprint('auth', __name__)

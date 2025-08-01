@@ -19,7 +19,7 @@ sys.path.insert(0, str(project_root))
 
 from flask import Flask
 from models import db, Project, Task, ContextRule, TaskHistory, ActionType, ProjectStatus, TaskStatus, TaskPriority, RuleType
-from app.config import config
+from core.config import config
 
 
 def create_app():

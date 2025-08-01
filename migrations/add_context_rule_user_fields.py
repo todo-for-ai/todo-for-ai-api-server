@@ -9,7 +9,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from sqlalchemy import create_engine, text
-from app.config import config
+from core.config import config
 
 
 def upgrade():

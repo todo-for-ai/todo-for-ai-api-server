@@ -7,7 +7,7 @@
 from flask import Blueprint, request
 from models import db, ContextRule, Project
 from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args
-from app.github_config import require_auth, get_current_user
+from core.github_config import require_auth, get_current_user
 
 # 创建蓝图
 context_rules_bp = Blueprint('context_rules', __name__)

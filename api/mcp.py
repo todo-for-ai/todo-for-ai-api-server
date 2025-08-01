@@ -7,7 +7,7 @@ import asyncio
 from flask import Blueprint, request, jsonify, g
 from models import db, Project, Task, TaskStatus, ContextRule, ApiToken
 from api.base import handle_api_error
-from app.github_config import require_auth
+from core.github_config import require_auth
 from datetime import datetime, timedelta
 from functools import wraps
 import html

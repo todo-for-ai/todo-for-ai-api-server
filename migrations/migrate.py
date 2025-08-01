@@ -21,7 +21,7 @@ sys.path.insert(0, str(project_root))
 
 from flask import Flask
 from models import db
-from app.config import config
+from core.config import config
 
 
 class MigrationManager:

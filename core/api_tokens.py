@@ -9,7 +9,7 @@ import hashlib
 from datetime import datetime, timedelta
 
 from models import db, ApiToken, User
-from app.auth import require_auth
+from core.auth import require_auth
 
 api_tokens_bp = Blueprint('api_tokens', __name__, url_prefix='/todo-for-ai/api/v1/api-tokens')
 

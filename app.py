@@ -16,10 +16,10 @@ from flask_migrate import Migrate
 
 # 导入模型和配置
 from models import db
-from app.config import config
-from app.middleware import setup_all_middleware
-from app.github_config import github_service
-from app.google_config import google_service
+from core.config import config
+from core.middleware import setup_all_middleware
+from core.github_config import github_service
+from core.google_config import google_service
 
 
 def create_app(config_name=None):

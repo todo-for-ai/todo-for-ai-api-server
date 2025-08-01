@@ -4,7 +4,7 @@
 
 from flask import Blueprint, request, jsonify, g
 from models import db, UserProjectPin, Project
-from app.github_config import require_auth, get_current_user
+from core.github_config import require_auth, get_current_user
 from .base import api_response, api_error, handle_api_error
 
 pins_bp = Blueprint('pins', __name__, url_prefix='/api/pins')

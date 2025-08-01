@@ -4,8 +4,8 @@ API Token管理接口
 
 from flask import Blueprint, request, jsonify, g
 from models import db, ApiToken, User
-from app.auth import token_required, get_current_token
-from app.github_config import require_auth, get_current_user
+from core.auth import token_required, get_current_token
+from core.github_config import require_auth, get_current_user
 from api.base import handle_api_error
 
 tokens_bp = Blueprint('tokens', __name__)
