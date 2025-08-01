@@ -188,6 +188,11 @@ class GitHubService:
         try:
             from models import UserSettings, db
 
+            # 防止递归调用
+            if hasattr(user, '_creating_settings'):
+                return
+            user._creating_settings = True
+
             # 检查用户是否已有设置
             existing_settings = UserSettings.query.filter_by(user_id=user.id).first()
             if existing_settings:
@@ -212,6 +217,10 @@ class GitHubService:
             current_app.logger.error(f"创建默认用户设置失败: {str(e)}")
             from models import db
             db.session.rollback()
+        finally:
+            # 清理递归标记
+            if hasattr(user, '_creating_settings'):
+                delattr(user, '_creating_settings')
 
     def _detect_user_language(self, user, request=None):
         """检测用户的语言偏好"""

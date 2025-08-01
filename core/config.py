@@ -52,6 +52,13 @@ class Config:
     # Flask 基础配置
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
 
+    # Session 配置 (解决OAuth state不匹配问题)
+    SESSION_TYPE = 'filesystem'
+    SESSION_PERMANENT = False
+    SESSION_USE_SIGNER = True
+    SESSION_KEY_PREFIX = 'todo-for-ai:'
+    SESSION_FILE_DIR = '/tmp/flask-sessions'
+
     
     # 数据库配置
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \

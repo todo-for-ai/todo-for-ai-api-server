@@ -36,6 +36,10 @@ def create_app(config_name=None):
     # 初始化扩展
     db.init_app(app)
 
+    # 初始化Session存储 (解决OAuth state不匹配问题)
+    session_dir = app.config.get('SESSION_FILE_DIR', '/tmp/flask-sessions')
+    os.makedirs(session_dir, exist_ok=True)
+
     # 初始化CORS（开发环境必需，生产环境可选）
     CORS(app,
          origins=app.config['CORS_ORIGINS'],
@@ -95,6 +99,26 @@ def register_blueprints(app):
             'status': 'healthy',
             'database': db_status,
             'timestamp': 'now'
+        })
+
+    @app.route('/todo-for-ai/api/v1/health')
+    def api_health_check():
+        """API健康检查 - 标准路径"""
+        try:
+            # 测试数据库连接
+            with db.engine.connect() as connection:
+                connection.execute(db.text('SELECT 1'))
+            db_status = 'connected'
+        except Exception as e:
+            db_status = f'error: {str(e)}'
+
+        return jsonify({
+            'status': 'healthy',
+            'service': 'Todo for AI API',
+            'version': '1.0.0',
+            'database': db_status,
+            'timestamp': 'now',
+            'environment': app.config.get('ENV', 'development')
         })
     
     # 注册API蓝图
