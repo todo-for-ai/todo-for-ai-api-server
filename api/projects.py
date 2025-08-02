@@ -27,11 +27,9 @@ def list_projects():
         # 构建查询
         query = Project.query
 
-        # 用户权限控制
+        # 用户权限控制 - 所有用户（包括管理员）只能看到自己的项目
         if current_user:
-            if not current_user.is_admin():
-                # 普通用户只能看到自己的项目
-                query = query.filter_by(owner_id=current_user.id)
+            query = query.filter_by(owner_id=current_user.id)
         else:
             # 未登录用户不能访问项目列表
             return api_error("Authentication required", 401)

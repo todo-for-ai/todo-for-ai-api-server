@@ -26,11 +26,9 @@ def list_tasks():
         # 构建查询
         query = Task.query
 
-        # 用户权限控制
+        # 用户权限控制 - 所有用户（包括管理员）只能看到自己项目的任务
         if current_user:
-            if not current_user.is_admin():
-                # 普通用户只能看到自己相关的任务
-                query = query.join(Project).filter(Project.owner_id == current_user.id)
+            query = query.join(Project).filter(Project.owner_id == current_user.id)
         else:
             # 未登录用户不能访问任务列表
             return api_error("Authentication required", 401)
@@ -136,8 +134,8 @@ def create_task():
         if not project:
             return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
 
-        # 验证用户是否有权限在该项目中创建任务
-        if not current_user.is_admin() and project.owner_id != current_user.id:
+        # 验证用户是否有权限在该项目中创建任务 - 只能在自己的项目中创建任务
+        if project.owner_id != current_user.id:
             return api_error("Permission denied", 403, "PERMISSION_DENIED")
         
         # 处理日期字段
@@ -251,8 +249,8 @@ def update_task(task_id):
         if not task:
             return api_error("Task not found", 404, "TASK_NOT_FOUND")
 
-        # 验证用户是否有权限更新该任务
-        if not current_user.is_admin() and task.project.owner_id != current_user.id:
+        # 验证用户是否有权限更新该任务 - 只能更新自己项目的任务
+        if task.project.owner_id != current_user.id:
             return api_error("Permission denied", 403, "PERMISSION_DENIED")
         
         # 验证请求数据
