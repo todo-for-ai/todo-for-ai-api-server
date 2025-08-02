@@ -191,7 +191,10 @@ def create_task():
             creator_id=current_user.id,  # 设置创建者ID
             created_by=current_user.email  # 设置创建者邮箱
         )
-        
+
+        # 更新项目最后活动时间
+        project.last_activity_at = datetime.utcnow()
+
         db.session.commit()
 
         # 记录历史
@@ -321,7 +324,11 @@ def update_task(task_id):
                 if old_value != new_value:
                     changes.append((field, old_value, new_value))
                     setattr(task, field, new_value)
-        
+
+        # 更新项目最后活动时间
+        if changes:  # 只有在有实际更改时才更新项目活跃时间
+            task.project.last_activity_at = datetime.utcnow()
+
         db.session.commit()
 
         # 记录变更历史

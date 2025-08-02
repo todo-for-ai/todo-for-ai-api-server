@@ -45,12 +45,12 @@ class ApiToken(BaseModel):
     @staticmethod
     def _get_encryption_key():
         """获取加密密钥"""
-        # 从环境变量获取密钥，如果没有则生成一个
+        # 从环境变量获取密钥，如果没有则使用默认密钥
         key = os.environ.get('TOKEN_ENCRYPTION_KEY')
         if not key:
-            # 生成一个新密钥（在生产环境中应该设置环境变量）
-            key = Fernet.generate_key().decode()
-            os.environ['TOKEN_ENCRYPTION_KEY'] = key
+            # 使用固定的默认密钥，确保在Docker环境中的一致性
+            # 在生产环境中应该设置环境变量 TOKEN_ENCRYPTION_KEY
+            key = '2_e0DDiXi8afz4S1PIBTTHEUJkzxWbFWFtS-CMUGoY0='
 
         # 确保密钥是bytes格式
         if isinstance(key, str):

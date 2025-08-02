@@ -24,12 +24,11 @@ class TodoMCPClient:
         self.request_id = 0
     
     async def start_server(self):
-        """Start the MCP server process"""
-        self.process = await asyncio.create_subprocess_exec(
-            sys.executable, "simple_mcp_server.py",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        """Start the MCP server process - DEPRECATED: Use npm package 'todo-for-ai-mcp' instead"""
+        raise RuntimeError(
+            "Python MCP server has been removed. "
+            "Please use the npm package 'todo-for-ai-mcp' instead. "
+            "Install with: npm install -g todo-for-ai-mcp"
         )
         
         # Initialize the connection

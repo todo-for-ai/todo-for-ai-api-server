@@ -99,7 +99,8 @@ def list_projects():
         elif sort_by == 'updated_at':
             order_column = Project.updated_at
         elif sort_by == 'last_activity_at':
-            order_column = Project.last_activity_at
+            # 使用 COALESCE 确保 NULL 值被替换为一个很早的时间，这样在倒序排序时会排在最后
+            order_column = func.coalesce(Project.last_activity_at, datetime(1970, 1, 1))
         elif sort_by == 'total_tasks':
             # 按任务总数排序
             query = query.outerjoin(Task).group_by(Project.id)
@@ -119,7 +120,8 @@ def list_projects():
             ).group_by(Project.id)
             order_column = func.count(Task.id)
         else:
-            order_column = Project.last_activity_at
+            # 默认按最后活跃时间排序，NULL 值排在最后
+            order_column = func.coalesce(Project.last_activity_at, datetime(1970, 1, 1))
 
         if sort_order == 'desc':
             query = query.order_by(order_column.desc())
@@ -180,12 +182,18 @@ def create_project():
             return api_error("Project name already exists", 409, "DUPLICATE_NAME")
 
         # 创建项目
+        current_time = datetime.utcnow()
         project = Project.create(
             name=data['name'],
             description=data.get('description', ''),
             color=data.get('color', '#1890ff'),
             owner_id=current_user.id,
-            created_by=current_user.email
+            created_by=current_user.email,
+            github_url=data.get('github_url', ''),
+            local_url=data.get('local_url', ''),
+            production_url=data.get('production_url', ''),
+            project_context=data.get('project_context', ''),
+            last_activity_at=current_time  # 设置最后活跃时间为创建时间
         )
         
         db.session.commit()
@@ -259,14 +267,17 @@ def update_project(project_id):
         
         # 更新项目
         project.update_from_dict(data)
-        
+
         # 处理状态更新
         if 'status' in data:
             try:
                 project.status = ProjectStatus(data['status'])
             except ValueError:
                 return api_error(f"Invalid status: {data['status']}", 400)
-        
+
+        # 更新项目最后活动时间
+        project.last_activity_at = datetime.utcnow()
+
         db.session.commit()
         
         return api_response(
