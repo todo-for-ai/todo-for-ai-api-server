@@ -222,18 +222,25 @@ def create_task():
 
 
 @tasks_bp.route('/<int:task_id>', methods=['GET'])
+@require_auth
 def get_task(task_id):
     """获取单个任务详情"""
     try:
+        current_user = get_current_user()
+
         task = Task.query.get(task_id)
         if not task:
             return api_error("Task not found", 404, "TASK_NOT_FOUND")
-        
+
+        # 权限检查 - 只能访问自己项目中的任务
+        if task.project.owner_id != current_user.id:
+            return api_error("Access denied: You can only access tasks from your own projects", 403, "PERMISSION_DENIED")
+
         return api_response(
             task.to_dict(include_project=True, include_stats=True),
             "Task retrieved successfully"
         )
-        
+
     except Exception as e:
         return api_error(f"Failed to retrieve task: {str(e)}", 500)
 
