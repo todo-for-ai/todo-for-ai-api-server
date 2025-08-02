@@ -7,7 +7,7 @@ import requests
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import request, jsonify, g, current_app
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity
 from authlib.integrations.flask_client import OAuth
 from models import User
 
@@ -120,8 +120,9 @@ class GoogleService:
             return None
     
     def generate_tokens(self, user):
-        """为用户生成JWT令牌"""
+        """为用户生成JWT令牌（包括access token和refresh token）"""
         try:
+            # 生成access token
             access_token = create_access_token(
                 identity=user.id,
                 additional_claims={
@@ -131,7 +132,23 @@ class GoogleService:
                     'provider': 'google'
                 }
             )
-            return access_token
+
+            # 生成refresh token
+            refresh_token = create_refresh_token(
+                identity=user.id,
+                additional_claims={
+                    'username': user.username,
+                    'email': user.email,
+                    'google_id': user.google_id,
+                    'provider': 'google'
+                }
+            )
+
+            return {
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'token_type': 'Bearer'
+            }
         except Exception as e:
             current_app.logger.error(f"生成Google用户令牌失败: {str(e)}")
             return None

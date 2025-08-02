@@ -156,12 +156,60 @@ def get_pin_stats():
     try:
         user_id = get_current_user().id
         pin_count = UserProjectPin.get_user_pin_count(user_id)
-        
+
         return jsonify({
             'pin_count': pin_count,
             'max_pins': 10,
             'remaining': max(0, 10 - pin_count)
         })
-    
+
+    except Exception as e:
+        return handle_api_error(e)
+
+
+@pins_bp.route('/task-counts', methods=['GET'])
+@require_auth
+def get_pinned_projects_task_counts():
+    """获取Pin项目的待执行任务数量"""
+    try:
+        user_id = get_current_user().id
+
+        # 获取用户的Pin项目
+        pins = UserProjectPin.query.filter_by(user_id=user_id, is_active=True)\
+            .join(Project)\
+            .order_by(UserProjectPin.pin_order.asc(), UserProjectPin.created_at.asc())\
+            .all()
+
+        if not pins:
+            return api_response({
+                'task_counts': [],
+                'total_pins': 0
+            })
+
+        # 批量查询每个项目的待执行任务数量
+        from models.task import Task, TaskStatus
+
+        result = []
+        for pin in pins:
+            project = pin.project
+            if project:
+                # 查询待执行任务数量（todo, in_progress, review）
+                pending_count = Task.query.filter_by(project_id=project.id).filter(
+                    Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW])
+                ).count()
+
+                result.append({
+                    'project_id': project.id,
+                    'project_name': project.name,
+                    'project_color': project.color,
+                    'pending_tasks': pending_count,
+                    'pin_order': pin.pin_order
+                })
+
+        return api_response({
+            'task_counts': result,
+            'total_pins': len(result)
+        })
+
     except Exception as e:
         return handle_api_error(e)

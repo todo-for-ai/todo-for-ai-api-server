@@ -7,7 +7,7 @@ import requests
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import request, jsonify, g, current_app
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity
 from authlib.integrations.flask_client import OAuth
 from models import User
 
@@ -49,8 +49,12 @@ class GitHubService:
         
         # 初始化 JWT
         self.jwt_manager = JWTManager(app)
-        app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'your-secret-key')
-        app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
+        # JWT配置已在config.py中设置，这里不再覆盖
+        # 确保JWT_ACCESS_TOKEN_EXPIRES使用timedelta对象
+        if isinstance(app.config.get('JWT_ACCESS_TOKEN_EXPIRES'), int):
+            app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(seconds=app.config['JWT_ACCESS_TOKEN_EXPIRES'])
+        if isinstance(app.config.get('JWT_REFRESH_TOKEN_EXPIRES'), int):
+            app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(seconds=app.config['JWT_REFRESH_TOKEN_EXPIRES'])
         
         self._register_jwt_handlers()
     
@@ -139,16 +143,35 @@ class GitHubService:
             return None
     
     def generate_tokens(self, user):
+        """为用户生成JWT令牌（包括access token和refresh token）"""
         try:
+            # 生成access token
             access_token = create_access_token(
                 identity=user.id,
                 additional_claims={
                     'username': user.username,
                     'email': user.email,
-                    'github_id': user.github_id
+                    'github_id': user.github_id,
+                    'provider': 'github'
                 }
             )
-            return access_token
+
+            # 生成refresh token
+            refresh_token = create_refresh_token(
+                identity=user.id,
+                additional_claims={
+                    'username': user.username,
+                    'email': user.email,
+                    'github_id': user.github_id,
+                    'provider': 'github'
+                }
+            )
+
+            return {
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'token_type': 'Bearer'
+            }
         except Exception as e:
             current_app.logger.error(f"生成令牌失败: {str(e)}")
             return None

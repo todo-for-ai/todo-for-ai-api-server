@@ -138,15 +138,24 @@ def github_callback():
             return api_error("Failed to create or update user", 500)
 
         # 生成JWT令牌
-        access_token = github_service.generate_tokens(user)
+        tokens = github_service.generate_tokens(user)
+        if not tokens:
+            return api_error("Failed to generate tokens", 500)
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
         default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
-        # 重定向到前端，并在URL中包含令牌
-        return redirect(f"{redirect_url}?token={access_token}")
+        # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
+        import urllib.parse
+        params = {
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
+        }
+        query_string = urllib.parse.urlencode(params)
+        return redirect(f"{redirect_url}?{query_string}")
 
     except Exception as e:
         return handle_api_error(e)
@@ -173,15 +182,24 @@ def google_callback():
             return api_error("Failed to create or update user", 500)
 
         # 生成JWT令牌
-        access_token = google_service.generate_tokens(user)
+        tokens = google_service.generate_tokens(user)
+        if not tokens:
+            return api_error("Failed to generate tokens", 500)
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
         default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
-        # 重定向到前端，并在URL中包含令牌
-        return redirect(f"{redirect_url}?token={access_token}")
+        # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
+        import urllib.parse
+        params = {
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
+        }
+        query_string = urllib.parse.urlencode(params)
+        return redirect(f"{redirect_url}?{query_string}")
 
     except Exception as e:
         return handle_api_error(e)
@@ -290,12 +308,15 @@ def refresh():
         if not user or not user.is_active():
             return api_error("User not found or inactive", 404)
         
-        # 生成新的访问令牌
-        new_token = github_service.generate_tokens(user)
-        
+        # 生成新的访问令牌和刷新令牌
+        tokens = github_service.generate_tokens(user)
+        if not tokens:
+            return api_error("Failed to generate tokens", 500)
+
         return api_response({
-            'access_token': new_token,
-            'token_type': 'Bearer'
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
         })
         
     except Exception as e:
