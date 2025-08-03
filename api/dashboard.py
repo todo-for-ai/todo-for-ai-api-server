@@ -7,14 +7,14 @@ from sqlalchemy import func, and_
 from datetime import datetime, date, timedelta
 
 from models import db, User, Project, Task, TaskStatus, UserActivity
-from .auth import require_auth, get_current_user
-from .base import api_response, api_error
+from core.auth import unified_auth_required, get_current_user
+from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 
-dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/dashboard')
+dashboard_bp = Blueprint('dashboard', __name__)
 
 
 @dashboard_bp.route('/stats', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_dashboard_stats():
     """获取仪表盘统计数据（用户隔离）"""
     try:
@@ -79,7 +79,7 @@ def get_dashboard_stats():
         # 用户活跃度统计（最近30天）
         activity_stats = UserActivity.get_user_activity_stats(current_user.id, days=30)
         
-        return api_response({
+        return ApiResponse.success({
             'projects': {
                 'total': total_projects,
                 'active': active_projects,
@@ -95,14 +95,14 @@ def get_dashboard_stats():
             'recent_projects': [p.to_dict() for p in recent_projects],
             'recent_tasks': [t.to_dict(include_project=True) for t in recent_tasks],
             'activity_stats': activity_stats,
-        })
-        
+        }, "Dashboard stats retrieved successfully").to_response()
+
     except Exception as e:
-        return api_error(f"Failed to get dashboard stats: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to get dashboard stats: {str(e)}", 500).to_response()
 
 
 @dashboard_bp.route('/activity-heatmap', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_activity_heatmap():
     """获取用户活跃度热力图数据"""
     try:
@@ -111,18 +111,18 @@ def get_activity_heatmap():
         # 获取最近365天的活跃度数据
         heatmap_data = UserActivity.get_user_activity_heatmap(current_user.id, days=365)
         
-        return api_response({
+        return ApiResponse.success({
             'heatmap_data': heatmap_data,
             'user_id': current_user.id,
             'generated_at': datetime.utcnow().isoformat()
-        })
-        
+        }, "Activity heatmap retrieved successfully").to_response()
+
     except Exception as e:
-        return api_error(f"Failed to get activity heatmap: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to get activity heatmap: {str(e)}", 500).to_response()
 
 
 @dashboard_bp.route('/activity-summary', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_activity_summary():
     """获取活跃度摘要统计"""
     try:
@@ -142,7 +142,7 @@ def get_activity_summary():
             .order_by(UserActivity.total_activity_count.desc())\
             .first()
         
-        return api_response({
+        return ApiResponse.success({
             'stats_7d': stats_7d,
             'stats_30d': stats_30d,
             'stats_90d': stats_90d,
@@ -152,10 +152,10 @@ def get_activity_summary():
                 'date': most_active_day.activity_date.isoformat() if most_active_day else None,
                 'count': most_active_day.total_activity_count if most_active_day else 0
             }
-        })
-        
+        }, "Activity summary retrieved successfully").to_response()
+
     except Exception as e:
-        return api_error(f"Failed to get activity summary: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to get activity summary: {str(e)}", 500).to_response()
 
 
 def _get_consecutive_active_days(user_id):

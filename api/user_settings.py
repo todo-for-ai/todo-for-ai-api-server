@@ -6,8 +6,8 @@
 """
 
 from flask import Blueprint, request, jsonify
-from core.github_config import require_auth, get_current_user
-from api.base import api_response, api_error, handle_api_error
+from core.auth import unified_auth_required, get_current_user
+from api.base import ApiResponse, handle_api_error
 from models.user_settings import UserSettings
 from models.user import User
 
@@ -16,7 +16,7 @@ user_settings_bp = Blueprint('user_settings', __name__)
 
 
 @user_settings_bp.route('', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_user_settings():
     """获取当前用户的设置"""
     try:
@@ -35,14 +35,14 @@ def get_user_settings():
 
 
 @user_settings_bp.route('', methods=['PUT'])
-@require_auth
+@unified_auth_required
 def update_user_settings():
     """更新当前用户的设置"""
     try:
         current_user = get_current_user()
         
         if not request.is_json:
-            return api_error("Content-Type must be application/json", 400)
+            return ApiResponse.error("Content-Type must be application/json", 400).to_response()
         
         data = request.get_json()
         
@@ -53,7 +53,7 @@ def update_user_settings():
         if 'language' in data:
             language = data['language']
             if language not in ['zh-CN', 'en']:
-                return api_error("Invalid language. Must be 'zh-CN' or 'en'", 400)
+                return ApiResponse.error("Invalid language. Must be 'zh-CN' or 'en'", 400).to_response()
             settings.language = language
         
         # 更新其他设置数据
@@ -71,32 +71,32 @@ def update_user_settings():
 
 
 @user_settings_bp.route('/language', methods=['PUT'])
-@require_auth
+@unified_auth_required
 def update_language():
     """更新用户语言设置"""
     try:
         current_user = get_current_user()
         
         if not request.is_json:
-            return api_error("Content-Type must be application/json", 400)
+            return ApiResponse.error("Content-Type must be application/json", 400).to_response()
         
         data = request.get_json()
         language = data.get('language')
         
         if not language:
-            return api_error("Language is required", 400)
+            return ApiResponse.error("Language is required", 400).to_response()
         
         if language not in ['zh-CN', 'en']:
-            return api_error("Invalid language. Must be 'zh-CN' or 'en'", 400)
+            return ApiResponse.error("Invalid language. Must be 'zh-CN' or 'en'", 400).to_response()
         
         # 获取或创建用户设置
         settings = UserSettings.get_or_create_for_user(current_user.id)
         settings.language = language
         settings.save()
         
-        return api_response({
+        return ApiResponse.success({
             'language': settings.language
-        }, "Language updated successfully")
+        }, "Language updated successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)

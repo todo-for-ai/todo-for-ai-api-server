@@ -4,14 +4,14 @@
 
 from flask import Blueprint, request, jsonify, g
 from models import db, UserProjectPin, Project
-from core.github_config import require_auth, get_current_user
-from .base import api_response, api_error, handle_api_error
+from core.auth import unified_auth_required, get_current_user
+from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 
-pins_bp = Blueprint('pins', __name__, url_prefix='/api/pins')
+pins_bp = Blueprint('pins', __name__)
 
 
 @pins_bp.route('', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_user_pins():
     """获取当前用户的Pin配置"""
     try:
@@ -28,17 +28,17 @@ def get_user_pins():
             pin_dict = pin.to_dict()
             result.append(pin_dict)
 
-        return api_response({
+        return ApiResponse.success({
             'pins': result,
             'total': len(result)
-        })
+        }, "User pins retrieved successfully").to_response()
 
     except Exception as e:
         return handle_api_error(e)
 
 
 @pins_bp.route('', methods=['POST'])
-@require_auth
+@unified_auth_required
 def pin_project():
     """Pin一个项目"""
     try:
@@ -49,29 +49,28 @@ def pin_project():
         pin_order = data.get('pin_order')
         
         if not project_id:
-            return jsonify({'error': 'project_id is required'}), 400
-        
+            return ApiResponse.error('project_id is required', 400).to_response()
+
         # 检查项目是否存在且用户有权限访问
         project = Project.query.filter_by(id=project_id, owner_id=user_id).first()
         if not project:
-            return jsonify({'error': 'Project not found or access denied'}), 404
+            return ApiResponse.error('Project not found or access denied', 404).to_response()
         
         # 检查Pin数量限制（最多10个）
         current_pin_count = UserProjectPin.get_user_pin_count(user_id)
         if current_pin_count >= 10:
             # 检查是否已经Pin了这个项目
             if not UserProjectPin.is_project_pinned(user_id, project_id):
-                return jsonify({'error': 'Maximum 10 projects can be pinned'}), 400
+                return ApiResponse.error('Maximum 10 projects can be pinned', 400).to_response()
         
         # Pin项目
         pin = UserProjectPin.pin_project(user_id, project_id, pin_order)
         db.session.add(pin)
         db.session.commit()
         
-        return jsonify({
-            'message': 'Project pinned successfully',
+        return ApiResponse.success({
             'pin': pin.to_dict()
-        })
+        }, 'Project pinned successfully').to_response()
     
     except Exception as e:
         db.session.rollback()
@@ -79,7 +78,7 @@ def pin_project():
 
 
 @pins_bp.route('/<int:project_id>', methods=['DELETE'])
-@require_auth
+@unified_auth_required
 def unpin_project(project_id):
     """取消Pin一个项目"""
     try:
@@ -88,14 +87,12 @@ def unpin_project(project_id):
         # 取消Pin
         pin = UserProjectPin.unpin_project(user_id, project_id)
         if not pin:
-            return jsonify({'error': 'Pin not found'}), 404
-        
+            return ApiResponse.error('Pin not found', 404).to_response()
+
         db.session.add(pin)
         db.session.commit()
-        
-        return jsonify({
-            'message': 'Project unpinned successfully'
-        })
+
+        return ApiResponse.success(None, 'Project unpinned successfully').to_response()
     
     except Exception as e:
         db.session.rollback()
@@ -103,7 +100,7 @@ def unpin_project(project_id):
 
 
 @pins_bp.route('/reorder', methods=['PUT'])
-@require_auth
+@unified_auth_required
 def reorder_pins():
     """重新排序Pin"""
     try:
@@ -112,20 +109,18 @@ def reorder_pins():
         
         pin_orders = data.get('pin_orders', [])
         if not pin_orders:
-            return jsonify({'error': 'pin_orders is required'}), 400
-        
+            return ApiResponse.error('pin_orders is required', 400).to_response()
+
         # 验证数据格式
         for item in pin_orders:
             if not isinstance(item, dict) or 'project_id' not in item or 'pin_order' not in item:
-                return jsonify({'error': 'Invalid pin_orders format'}), 400
+                return ApiResponse.error('Invalid pin_orders format', 400).to_response()
         
         # 重新排序
         UserProjectPin.reorder_pins(user_id, pin_orders)
         db.session.commit()
         
-        return jsonify({
-            'message': 'Pins reordered successfully'
-        })
+        return ApiResponse.success(None, 'Pins reordered successfully').to_response()
     
     except Exception as e:
         db.session.rollback()
@@ -133,42 +128,42 @@ def reorder_pins():
 
 
 @pins_bp.route('/check/<int:project_id>', methods=['GET'])
-@require_auth
+@unified_auth_required
 def check_pin_status(project_id):
     """检查项目的Pin状态"""
     try:
         user_id = get_current_user().id
         is_pinned = UserProjectPin.is_project_pinned(user_id, project_id)
         
-        return jsonify({
+        return ApiResponse.success({
             'project_id': project_id,
             'is_pinned': is_pinned
-        })
+        }, "Pin status retrieved successfully").to_response()
     
     except Exception as e:
         return handle_api_error(e)
 
 
 @pins_bp.route('/stats', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_pin_stats():
     """获取Pin统计信息"""
     try:
         user_id = get_current_user().id
         pin_count = UserProjectPin.get_user_pin_count(user_id)
 
-        return jsonify({
+        return ApiResponse.success({
             'pin_count': pin_count,
             'max_pins': 10,
             'remaining': max(0, 10 - pin_count)
-        })
+        }, "Pin statistics retrieved successfully").to_response()
 
     except Exception as e:
         return handle_api_error(e)
 
 
 @pins_bp.route('/task-counts', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_pinned_projects_task_counts():
     """获取Pin项目的待执行任务数量"""
     try:
@@ -181,10 +176,10 @@ def get_pinned_projects_task_counts():
             .all()
 
         if not pins:
-            return api_response({
+            return ApiResponse.success({
                 'task_counts': [],
                 'total_pins': 0
-            })
+            }, "Task counts retrieved successfully").to_response()
 
         # 批量查询每个项目的待执行任务数量
         from models.task import Task, TaskStatus
@@ -206,10 +201,10 @@ def get_pinned_projects_task_counts():
                     'pin_order': pin.pin_order
                 })
 
-        return api_response({
+        return ApiResponse.success({
             'task_counts': result,
             'total_pins': len(result)
-        })
+        }, "Task counts retrieved successfully").to_response()
 
     except Exception as e:
         return handle_api_error(e)

@@ -8,16 +8,15 @@ from flask import Blueprint, request
 from sqlalchemy import func, case
 from datetime import datetime, timedelta
 from models import db, Project, ProjectStatus, Task, TaskStatus
-from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args, APIException
-from core.auth import optional_token_auth
-from core.github_config import require_auth, get_current_user
+from .base import paginate_query, validate_json_request, get_request_args, APIException, ApiResponse
+from core.auth import unified_auth_required, get_current_user
 
 # 创建蓝图
 projects_bp = Blueprint('projects', __name__)
 
 
 @projects_bp.route('', methods=['GET'])
-@require_auth
+@unified_auth_required
 def list_projects():
     """获取项目列表"""
     try:
@@ -32,7 +31,7 @@ def list_projects():
             query = query.filter_by(owner_id=current_user.id)
         else:
             # 未登录用户不能访问项目列表
-            return api_error("Authentication required", 401)
+            return ApiResponse.unauthorized("Authentication required").to_response()
         
         # 状态筛选
         if args['status']:
@@ -40,7 +39,7 @@ def list_projects():
                 status = ProjectStatus(args['status'])
                 query = query.filter_by(status=status)
             except ValueError:
-                return api_error(f"Invalid status: {args['status']}", 400)
+                return ApiResponse.error(f"Invalid status: {args['status']}", 400).to_response()
         else:
             # 默认只显示未归档的项目
             query = query.filter(Project.status != ProjectStatus.ARCHIVED)
@@ -150,15 +149,18 @@ def list_projects():
                     'completion_rate': round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
                 })
 
-        # 直接返回项目列表和分页信息，不要额外包装
-        return api_response(result['items'], "Projects retrieved successfully", pagination=result['pagination'])
+        # 使用新的ApiResponse类，统一响应格式
+        return ApiResponse.success(
+            data=result,
+            message="Projects retrieved successfully"
+        ).to_response()
         
     except Exception as e:
-        return api_error(f"Failed to retrieve projects: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to retrieve projects: {str(e)}", 500).to_response()
 
 
 @projects_bp.route('', methods=['POST'])
-@require_auth
+@unified_auth_required
 def create_project():
     """创建新项目"""
     try:
@@ -179,7 +181,8 @@ def create_project():
             owner_id=current_user.id
         ).first()
         if existing_project:
-            return api_error("Project name already exists", 409, "DUPLICATE_NAME")
+            return ApiResponse.error("Project name already exists", 409,
+                                   error_details={"code": "DUPLICATE_NAME"}).to_response()
 
         # 创建项目
         current_time = datetime.utcnow()
@@ -198,19 +201,18 @@ def create_project():
         
         db.session.commit()
         
-        return api_response(
-            project.to_dict(include_stats=True),
-            "Project created successfully",
-            201
-        )
+        return ApiResponse.created(
+            data=project.to_dict(include_stats=True),
+            message="Project created successfully"
+        ).to_response()
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to create project: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to create project: {str(e)}", 500).to_response()
 
 
 @projects_bp.route('/<int:project_id>', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_project(project_id):
     """获取单个项目详情"""
     try:
@@ -218,26 +220,27 @@ def get_project(project_id):
 
         project = Project.query.get(project_id)
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.not_found("Project not found",
+                                       error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
         # 权限检查
         if current_user:
             if not current_user.can_access_project(project):
-                return api_error("Access denied", 403)
+                return ApiResponse.forbidden("Access denied").to_response()
         else:
-            return api_error("Authentication required", 401)
+            return ApiResponse.unauthorized("Authentication required").to_response()
 
-        return api_response(
+        return ApiResponse.success(
             project.to_dict(include_stats=True),
             "Project retrieved successfully"
-        )
+        ).to_response()
         
     except Exception as e:
-        return api_error(f"Failed to retrieve project: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to retrieve project: {str(e)}", 500).to_response()
 
 
 @projects_bp.route('/<int:project_id>', methods=['PUT'])
-@require_auth
+@unified_auth_required
 def update_project(project_id):
     """更新项目"""
     try:
@@ -245,11 +248,11 @@ def update_project(project_id):
 
         project = Project.query.get(project_id)
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
         # 权限检查
         if not current_user.can_access_project(project):
-            return api_error("Access denied", 403)
+            return ApiResponse.error("Access denied", 403).to_response()
         
         # 验证请求数据
         data = validate_json_request(
@@ -263,7 +266,7 @@ def update_project(project_id):
         if 'name' in data and data['name'] != project.name:
             existing_project = Project.query.filter_by(name=data['name']).first()
             if existing_project:
-                return api_error("Project name already exists", 409, "DUPLICATE_NAME")
+                return ApiResponse.error("Project name already exists", 409, error_details={"code": "DUPLICATE_NAME"}).to_response()
         
         # 更新项目
         project.update_from_dict(data)
@@ -296,16 +299,12 @@ def delete_project(project_id):
     try:
         project = Project.query.get(project_id)
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
         
         # 软删除
         project.soft_delete()
         
-        return api_response(
-            None,
-            "Project deleted successfully",
-            204
-        )
+        return ApiResponse.success(None, "Project deleted successfully", 204).to_response()
         
     except Exception as e:
         db.session.rollback()
@@ -318,7 +317,7 @@ def archive_project(project_id):
     try:
         project = Project.query.get(project_id)
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
         
         project.archive()
         
@@ -338,7 +337,7 @@ def restore_project(project_id):
     try:
         project = Project.query.get(project_id)
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
         
         project.restore()
         
@@ -358,7 +357,7 @@ def get_project_tasks(project_id):
     try:
         project = Project.query.get(project_id)
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
         
         args = get_request_args()
         
@@ -400,7 +399,7 @@ def get_project_tasks(project_id):
         # 分页
         result = paginate_query(query, args['page'], args['per_page'])
         
-        return api_response(result, "Project tasks retrieved successfully")
+        return ApiResponse.success(result, "Project tasks retrieved successfully").to_response()
         
     except Exception as e:
         return api_error(f"Failed to retrieve project tasks: {str(e)}", 500)
@@ -412,7 +411,7 @@ def get_project_context_rules(project_id):
     try:
         project = Project.query.get(project_id)
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
         rules = project.get_active_context_rules()
 

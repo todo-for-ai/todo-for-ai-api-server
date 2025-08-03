@@ -6,15 +6,15 @@
 
 from flask import Blueprint, request
 from models import db, ContextRule, Project
-from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args
-from core.github_config import require_auth, get_current_user
+from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
+from core.auth import unified_auth_required, get_current_user
 
 # 创建蓝图
 context_rules_bp = Blueprint('context_rules', __name__)
 
 
 @context_rules_bp.route('', methods=['GET'])
-@require_auth
+@unified_auth_required
 def list_context_rules():
     """获取上下文规则列表"""
     try:
@@ -30,7 +30,7 @@ def list_context_rules():
             # 验证用户是否有权限访问该项目
             project = Project.query.get(project_id)
             if project and not current_user.can_access_project(project):
-                return api_error("Access denied to project", 403, "PROJECT_ACCESS_DENIED")
+                return ApiResponse.error("Access denied to project", 403, error_details={"code": "PROJECT_ACCESS_DENIED"}).to_response()
             query = query.filter_by(project_id=project_id)
         elif request.args.get('scope') == 'global':
             query = query.filter_by(project_id=None)
@@ -91,14 +91,14 @@ def list_context_rules():
                         'color': project.color
                     }
         
-        return api_response(result, "Context rules retrieved successfully")
+        return ApiResponse.success(result, "Context rules retrieved successfully").to_response()
         
     except Exception as e:
-        return api_error(f"Failed to retrieve context rules: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to retrieve context rules: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('', methods=['POST'])
-@require_auth
+@unified_auth_required
 def create_context_rule():
     """创建新的上下文规则"""
     try:
@@ -121,11 +121,11 @@ def create_context_rule():
         if data.get('project_id'):
             project = Project.query.get(data['project_id'])
             if not project:
-                return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+                return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
             # 检查用户是否有权限访问该项目
             if not current_user.can_access_project(project):
-                return api_error("Access denied to project", 403, "PROJECT_ACCESS_DENIED")
+                return ApiResponse.error("Access denied to project", 403, error_details={"code": "PROJECT_ACCESS_DENIED"}).to_response()
 
         # 创建上下文规则
         context_rule = ContextRule.create(
@@ -145,45 +145,44 @@ def create_context_rule():
 
         db.session.commit()
 
-        return api_response(
+        return ApiResponse.created(
             context_rule.to_dict(include_project=True),
-            "Context rule created successfully",
-            201
-        )
+            "Context rule created successfully"
+        ).to_response()
 
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to create context rule: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to create context rule: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('/<int:rule_id>', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_context_rule(rule_id):
     """获取单个上下文规则详情"""
     try:
         current_user = get_current_user()
         context_rule = ContextRule.query.filter_by(id=rule_id, user_id=current_user.id).first()
         if not context_rule:
-            return api_error("Context rule not found", 404, "CONTEXT_RULE_NOT_FOUND")
+            return ApiResponse.error("Context rule not found", 404, error_details={"code": "CONTEXT_RULE_NOT_FOUND"}).to_response()
 
-        return api_response(
+        return ApiResponse.success(
             context_rule.to_dict(include_project=True),
             "Context rule retrieved successfully"
-        )
+        ).to_response()
 
     except Exception as e:
-        return api_error(f"Failed to retrieve context rule: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to retrieve context rule: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('/<int:rule_id>', methods=['PUT'])
-@require_auth
+@unified_auth_required
 def update_context_rule(rule_id):
     """更新上下文规则"""
     try:
         current_user = get_current_user()
         context_rule = ContextRule.query.filter_by(id=rule_id, user_id=current_user.id).first()
         if not context_rule:
-            return api_error("Context rule not found", 404, "CONTEXT_RULE_NOT_FOUND")
+            return ApiResponse.error("Context rule not found", 404, error_details={"code": "CONTEXT_RULE_NOT_FOUND"}).to_response()
 
         # 验证请求数据
         data = validate_json_request(
@@ -204,82 +203,82 @@ def update_context_rule(rule_id):
 
         db.session.commit()
 
-        return api_response(
+        return ApiResponse.success(
             context_rule.to_dict(include_project=True),
             "Context rule updated successfully"
-        )
+        ).to_response()
 
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to update context rule: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to update context rule: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('/<int:rule_id>', methods=['DELETE'])
-@require_auth
+@unified_auth_required
 def delete_context_rule(rule_id):
     """删除上下文规则"""
     try:
         current_user = get_current_user()
         context_rule = ContextRule.query.filter_by(id=rule_id, user_id=current_user.id).first()
         if not context_rule:
-            return api_error("Context rule not found", 404, "CONTEXT_RULE_NOT_FOUND")
+            return ApiResponse.error("Context rule not found", 404, error_details={"code": "CONTEXT_RULE_NOT_FOUND"}).to_response()
 
         # 删除规则
         context_rule.delete()
 
-        return api_response(
-            None,
-            "Context rule deleted successfully",
-            204
-        )
+        return ApiResponse.success(None, "Context rule deleted successfully", 204).to_response()
 
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to delete context rule: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to delete context rule: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('/<int:rule_id>/activate', methods=['POST'])
+@unified_auth_required
 def activate_context_rule(rule_id):
     """激活上下文规则"""
     try:
-        context_rule = ContextRule.query.get(rule_id)
+        current_user = get_current_user()
+        context_rule = ContextRule.query.filter_by(id=rule_id, user_id=current_user.id).first()
         if not context_rule:
-            return api_error("Context rule not found", 404, "CONTEXT_RULE_NOT_FOUND")
-        
+            return ApiResponse.error("Context rule not found", 404, error_details={"code": "CONTEXT_RULE_NOT_FOUND"}).to_response()
+
         context_rule.activate()
-        
-        return api_response(
+
+        return ApiResponse.success(
             context_rule.to_dict(),
             "Context rule activated successfully"
-        )
-        
+        ).to_response()
+
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to activate context rule: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to activate context rule: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('/<int:rule_id>/deactivate', methods=['POST'])
+@unified_auth_required
 def deactivate_context_rule(rule_id):
     """停用上下文规则"""
     try:
-        context_rule = ContextRule.query.get(rule_id)
+        current_user = get_current_user()
+        context_rule = ContextRule.query.filter_by(id=rule_id, user_id=current_user.id).first()
         if not context_rule:
-            return api_error("Context rule not found", 404, "CONTEXT_RULE_NOT_FOUND")
-        
+            return ApiResponse.error("Context rule not found", 404, error_details={"code": "CONTEXT_RULE_NOT_FOUND"}).to_response()
+
         context_rule.deactivate()
-        
-        return api_response(
+
+        return ApiResponse.success(
             context_rule.to_dict(),
             "Context rule deactivated successfully"
-        )
-        
+        ).to_response()
+
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to deactivate context rule: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to deactivate context rule: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('/build-context', methods=['POST'])
-@require_auth
+@unified_auth_required
 def build_context():
     """构建上下文字符串"""
     try:
@@ -313,22 +312,22 @@ def build_context():
             for_projects=for_projects
         )
         
-        return api_response(
+        return ApiResponse.success(
             {
                 'context_string': context_string,
                 'rules_applied': len(applicable_rules),
                 'rules': [rule.to_dict() for rule in applicable_rules]
             },
             "Context built successfully"
-        )
-        
+        ).to_response()
+
     except Exception as e:
-        return api_error(f"Failed to build context: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to build context: {str(e)}", 500).to_response()
 
 
 # 规则广场相关API
 @context_rules_bp.route('/marketplace', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_public_rules():
     """获取规则广场的公开规则"""
     try:
@@ -346,8 +345,8 @@ def get_public_rules():
         # 转换为字典，包含用户信息
         rules = [rule.to_dict(include_project=True, include_user=True) for rule in pagination.items]
 
-        return api_response({
-            'rules': rules,
+        return ApiResponse.success({
+            'items': rules,
             'pagination': {
                 'page': pagination.page,
                 'per_page': pagination.per_page,
@@ -356,14 +355,14 @@ def get_public_rules():
                 'has_prev': pagination.has_prev,
                 'has_next': pagination.has_next
             }
-        })
+        }, "Public rules retrieved successfully").to_response()
 
     except Exception as e:
-        return api_error(f"Failed to retrieve public rules: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to retrieve public rules: {str(e)}", 500).to_response()
 
 
 @context_rules_bp.route('/<int:rule_id>/copy', methods=['POST'])
-@require_auth
+@unified_auth_required
 def copy_rule_from_marketplace(rule_id):
     """从规则广场复制规则"""
     try:
@@ -372,7 +371,7 @@ def copy_rule_from_marketplace(rule_id):
         # 获取要复制的规则（必须是公开的）
         source_rule = ContextRule.query.filter_by(id=rule_id, is_public=True, is_active=True).first()
         if not source_rule:
-            return api_error("Public rule not found", 404, "RULE_NOT_FOUND")
+            return ApiResponse.error("Public rule not found", 404, error_details={"code": "RULE_NOT_FOUND"}).to_response()
 
         # 验证请求数据
         data = validate_json_request(
@@ -394,7 +393,7 @@ def copy_rule_from_marketplace(rule_id):
             # 验证用户是否有权限访问目标项目
             project = Project.query.get(target_project_id)
             if not project or not current_user.can_access_project(project):
-                return api_error("Access denied to target project", 403, "PROJECT_ACCESS_DENIED")
+                return ApiResponse.error("Access denied to target project", 403, error_details={"code": "PROJECT_ACCESS_DENIED"}).to_response()
 
         # 复制规则
         new_rule = source_rule.copy_to_user(
@@ -403,12 +402,11 @@ def copy_rule_from_marketplace(rule_id):
             target_project_id=target_project_id
         )
 
-        return api_response(
+        return ApiResponse.created(
             new_rule.to_dict(include_project=True),
-            "Rule copied successfully",
-            201
-        )
+            "Rule copied successfully"
+        ).to_response()
 
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to copy rule: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to copy rule: {str(e)}", 500).to_response()
