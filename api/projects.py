@@ -283,10 +283,10 @@ def update_project(project_id):
 
         db.session.commit()
         
-        return api_response(
+        return ApiResponse.success(
             project.to_dict(include_stats=True),
             "Project updated successfully"
-        )
+        ).to_response()
         
     except Exception as e:
         db.session.rollback()
@@ -321,10 +321,10 @@ def archive_project(project_id):
         
         project.archive()
         
-        return api_response(
+        return ApiResponse.success(
             project.to_dict(),
             "Project archived successfully"
-        )
+        ).to_response()
         
     except Exception as e:
         db.session.rollback()
@@ -341,10 +341,10 @@ def restore_project(project_id):
         
         project.restore()
         
-        return api_response(
+        return ApiResponse.success(
             project.to_dict(),
             "Project restored successfully"
-        )
+        ).to_response()
         
     except Exception as e:
         db.session.rollback()
@@ -415,10 +415,10 @@ def get_project_context_rules(project_id):
 
         rules = project.get_active_context_rules()
 
-        return api_response(
+        return ApiResponse.success(
             [rule.to_dict() for rule in rules],
             "Project context rules retrieved successfully"
-        )
+        ).to_response()
 
     except Exception as e:
         return api_error(f"Failed to retrieve project context rules: {str(e)}", 500)

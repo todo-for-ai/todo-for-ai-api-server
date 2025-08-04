@@ -4,6 +4,7 @@
 提供上下文规则的 CRUD 操作接口
 """
 
+from datetime import datetime
 from flask import Blueprint, request
 from models import db, ContextRule, Project
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
@@ -410,3 +411,161 @@ def copy_rule_from_marketplace(rule_id):
     except Exception as e:
         db.session.rollback()
         return ApiResponse.error(f"Failed to copy rule: {str(e)}", 500).to_response()
+
+
+@context_rules_bp.route('/global', methods=['GET'])
+@unified_auth_required
+def get_global_context_rules():
+    """获取全局上下文规则"""
+    try:
+        current_user = get_current_user()
+        args = get_request_args()
+
+        # 构建查询 - 获取全局规则（is_global=True 或 project_id为空且is_public=True）
+        query = ContextRule.query.filter(
+            db.or_(
+                ContextRule.is_global == True,
+                db.and_(
+                    ContextRule.project_id.is_(None),
+                    ContextRule.is_public == True
+                )
+            )
+        )
+
+        # 只显示激活的规则
+        if args.get('is_active') is not False:
+            query = query.filter(ContextRule.is_active == True)
+
+        # 排序
+        sort_by = args.get('sort_by', 'priority')
+        sort_order = args.get('sort_order', 'desc')
+
+        if sort_by == 'priority':
+            if sort_order == 'desc':
+                query = query.order_by(ContextRule.priority.desc())
+            else:
+                query = query.order_by(ContextRule.priority.asc())
+        elif sort_by == 'created_at':
+            if sort_order == 'desc':
+                query = query.order_by(ContextRule.created_at.desc())
+            else:
+                query = query.order_by(ContextRule.created_at.asc())
+        elif sort_by == 'name':
+            if sort_order == 'desc':
+                query = query.order_by(ContextRule.name.desc())
+            else:
+                query = query.order_by(ContextRule.name.asc())
+
+        rules = query.all()
+
+        result = [rule.to_dict(include_project=True) for rule in rules]
+
+        return ApiResponse.success(result, "Global context rules retrieved successfully").to_response()
+
+    except Exception as e:
+        return ApiResponse.error(f"Failed to retrieve global context rules: {str(e)}", 500).to_response()
+
+
+@context_rules_bp.route('/merged', methods=['GET'])
+@unified_auth_required
+def get_merged_context_rules():
+    """获取合并后的上下文规则（用于AI）"""
+    try:
+        current_user = get_current_user()
+        args = get_request_args()
+
+        project_id = args.get('project_id')
+
+        # 构建合并的上下文字符串
+        context_string = ContextRule.build_context_string(
+            project_id=project_id,
+            user_id=current_user.id,
+            for_tasks=True,
+            for_projects=True
+        )
+
+        # 获取应用的规则列表
+        rules_query = ContextRule.query.filter(
+            ContextRule.user_id == current_user.id,
+            ContextRule.is_active == True
+        )
+
+        if project_id:
+            # 包含项目特定规则和全局规则
+            rules_query = rules_query.filter(
+                db.or_(
+                    ContextRule.project_id == project_id,
+                    ContextRule.project_id.is_(None)
+                )
+            )
+        else:
+            # 只包含全局规则
+            rules_query = rules_query.filter(ContextRule.project_id.is_(None))
+
+        rules = rules_query.order_by(ContextRule.priority.desc()).all()
+
+        result = {
+            'content': context_string,
+            'rules': [rule.to_dict(include_project=True) for rule in rules]
+        }
+
+        return ApiResponse.success(result, "Merged context rules retrieved successfully").to_response()
+
+    except Exception as e:
+        return ApiResponse.error(f"Failed to retrieve merged context rules: {str(e)}", 500).to_response()
+
+
+@context_rules_bp.route('/preview', methods=['GET'])
+@unified_auth_required
+def preview_merged_rules():
+    """预览合并后的上下文规则"""
+    try:
+        current_user = get_current_user()
+        args = get_request_args()
+
+        project_id = args.get('project_id')
+
+        # 构建预览的上下文字符串（与merged相同的逻辑）
+        context_string = ContextRule.build_context_string(
+            project_id=project_id,
+            user_id=current_user.id,
+            for_tasks=True,
+            for_projects=True
+        )
+
+        # 获取将要应用的规则列表
+        rules_query = ContextRule.query.filter(
+            ContextRule.user_id == current_user.id,
+            ContextRule.is_active == True
+        )
+
+        if project_id:
+            # 包含项目特定规则和全局规则
+            rules_query = rules_query.filter(
+                db.or_(
+                    ContextRule.project_id == project_id,
+                    ContextRule.project_id.is_(None)
+                )
+            )
+        else:
+            # 只包含全局规则
+            rules_query = rules_query.filter(ContextRule.project_id.is_(None))
+
+        rules = rules_query.order_by(ContextRule.priority.desc()).all()
+
+        # 添加预览特定的信息
+        result = {
+            'content': context_string,
+            'rules': [rule.to_dict(include_project=True) for rule in rules],
+            'preview_info': {
+                'total_rules': len(rules),
+                'project_id': project_id,
+                'content_length': len(context_string),
+                'generated_at': datetime.utcnow().isoformat()
+            }
+        }
+
+        return ApiResponse.success(result, "Context rules preview generated successfully").to_response()
+
+    except Exception as e:
+        return ApiResponse.error(f"Failed to generate context rules preview: {str(e)}", 500).to_response()

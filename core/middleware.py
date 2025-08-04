@@ -137,88 +137,71 @@ def setup_error_handlers(app):
     @app.errorhandler(400)
     def bad_request(error):
         """400 错误处理"""
+        from api.base import ApiResponse
         app.logger.warning(f"Bad Request: {request.url} - {error}")
-        return jsonify({
-            'error': 'Bad Request',
-            'message': 'The request could not be understood by the server',
-            'status_code': 400,
-            'timestamp': datetime.utcnow().isoformat(),
-            'path': request.path
-        }), 400
+        return ApiResponse.error(
+            message='The request could not be understood by the server',
+            code=400
+        ).to_response()
     
     @app.errorhandler(401)
     def unauthorized(error):
         """401 错误处理"""
+        from api.base import ApiResponse
         app.logger.warning(f"Unauthorized: {request.url} - {error}")
-        return jsonify({
-            'error': 'Unauthorized',
-            'message': 'Authentication is required',
-            'status_code': 401,
-            'timestamp': datetime.utcnow().isoformat(),
-            'path': request.path
-        }), 401
+        return ApiResponse.unauthorized(
+            message='Authentication is required'
+        ).to_response()
     
     @app.errorhandler(403)
     def forbidden(error):
         """403 错误处理"""
+        from api.base import ApiResponse
         app.logger.warning(f"Forbidden: {request.url} - {error}")
-        return jsonify({
-            'error': 'Forbidden',
-            'message': 'You do not have permission to access this resource',
-            'status_code': 403,
-            'timestamp': datetime.utcnow().isoformat(),
-            'path': request.path
-        }), 403
+        return ApiResponse.forbidden(
+            message='You do not have permission to access this resource'
+        ).to_response()
     
     @app.errorhandler(404)
     def not_found(error):
         """404 错误处理"""
+        from api.base import ApiResponse
         app.logger.info(f"Not Found: {request.url}")
-        return jsonify({
-            'error': 'Not Found',
-            'message': 'The requested resource was not found',
-            'status_code': 404,
-            'timestamp': datetime.utcnow().isoformat(),
-            'path': request.path
-        }), 404
+        return ApiResponse.not_found(
+            message='The requested resource was not found'
+        ).to_response()
     
     @app.errorhandler(405)
     def method_not_allowed(error):
         """405 错误处理"""
+        from api.base import ApiResponse
         app.logger.warning(f"Method Not Allowed: {request.method} {request.url}")
-        return jsonify({
-            'error': 'Method Not Allowed',
-            'message': f'The {request.method} method is not allowed for this endpoint',
-            'status_code': 405,
-            'timestamp': datetime.utcnow().isoformat(),
-            'path': request.path
-        }), 405
+        return ApiResponse.error(
+            message=f'The {request.method} method is not allowed for this endpoint',
+            code=405
+        ).to_response()
     
     @app.errorhandler(422)
     def unprocessable_entity(error):
         """422 错误处理"""
+        from api.base import ApiResponse
         app.logger.warning(f"Unprocessable Entity: {request.url} - {error}")
-        return jsonify({
-            'error': 'Unprocessable Entity',
-            'message': 'The request was well-formed but contains semantic errors',
-            'status_code': 422,
-            'timestamp': datetime.utcnow().isoformat(),
-            'path': request.path
-        }), 422
+        return ApiResponse.error(
+            message='The request was well-formed but contains semantic errors',
+            code=422
+        ).to_response()
     
     @app.errorhandler(500)
     def internal_error(error):
         """500 错误处理"""
         from models import db
+        from api.base import ApiResponse
         db.session.rollback()
         app.logger.error(f"Internal Server Error: {request.url} - {error}")
-        return jsonify({
-            'error': 'Internal Server Error',
-            'message': 'An unexpected error occurred',
-            'status_code': 500,
-            'timestamp': datetime.utcnow().isoformat(),
-            'path': request.path
-        }), 500
+        return ApiResponse.error(
+            message='An unexpected error occurred',
+            code=500
+        ).to_response()
 
 
 def setup_security_headers(app):

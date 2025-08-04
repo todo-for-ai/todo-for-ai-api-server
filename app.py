@@ -78,15 +78,20 @@ def register_blueprints(app):
     # 基础路由
     @app.route('/')
     def index():
-        return jsonify({
-            'message': 'Todo for AI API',
-            'version': '1.0.0',
-            'status': 'running'
-        })
-    
+        from api.base import ApiResponse
+        return ApiResponse.success(
+            data={
+                'service': 'Todo for AI API',
+                'version': '1.0.0',
+                'status': 'running'
+            },
+            message='Welcome to Todo for AI API'
+        ).to_response()
+
     @app.route('/health')
     def health_check():
-        """健康检查"""
+        """健康检查 - 行业标准路径"""
+        from api.base import ApiResponse
         try:
             # 测试数据库连接
             with db.engine.connect() as connection:
@@ -95,15 +100,19 @@ def register_blueprints(app):
         except Exception as e:
             db_status = f'error: {str(e)}'
 
-        return jsonify({
-            'status': 'healthy',
-            'database': db_status,
-            'timestamp': 'now'
-        })
+        return ApiResponse.success(
+            data={
+                'status': 'healthy',
+                'database': db_status
+            },
+            message='Service is healthy'
+        ).to_response()
+
 
     @app.route('/todo-for-ai/api/v1/health')
     def api_health_check():
         """API健康检查 - 标准路径"""
+        from api.base import ApiResponse
         try:
             # 测试数据库连接
             with db.engine.connect() as connection:
@@ -112,14 +121,16 @@ def register_blueprints(app):
         except Exception as e:
             db_status = f'error: {str(e)}'
 
-        return jsonify({
-            'status': 'healthy',
-            'service': 'Todo for AI API',
-            'version': '1.0.0',
-            'database': db_status,
-            'timestamp': 'now',
-            'environment': app.config.get('ENV', 'development')
-        })
+        return ApiResponse.success(
+            data={
+                'status': 'healthy',
+                'service': 'Todo for AI API',
+                'version': '1.0.0',
+                'database': db_status,
+                'environment': app.config.get('ENV', 'development')
+            },
+            message='API service is healthy'
+        ).to_response()
     
     # 注册API蓝图
     from api.auth import auth_bp
@@ -133,6 +144,7 @@ def register_blueprints(app):
     from api.dashboard import dashboard_bp
     from api.user_settings import user_settings_bp
     from api.api_tokens import api_tokens_bp
+    from api.custom_prompts import custom_prompts_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -145,6 +157,7 @@ def register_blueprints(app):
     app.register_blueprint(dashboard_bp, url_prefix='/todo-for-ai/api/v1/dashboard')
     app.register_blueprint(user_settings_bp, url_prefix='/todo-for-ai/api/v1/user-settings')
     app.register_blueprint(api_tokens_bp, url_prefix='/todo-for-ai/api/v1/api-tokens')
+    app.register_blueprint(custom_prompts_bp, url_prefix='/todo-for-ai/api/v1/custom-prompts')
 
 
 

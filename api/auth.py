@@ -220,10 +220,10 @@ def logout():
         # 简单的登出响应（不再使用Auth0）
         return_to = request.json.get('return_to', 'http://localhost:50111/todo-for-ai/pages')
 
-        return api_response({
+        return ApiResponse.success({
             'message': 'Logout successful',
             'redirect_url': return_to
-        })
+        }, 'Logout successful').to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -235,7 +235,10 @@ def get_current_user_info():
     """获取当前用户信息"""
     try:
         current_user = get_current_user()
-        return api_response(current_user.to_dict())
+        return ApiResponse.success(
+            data=current_user.to_dict(),
+            message='User information retrieved successfully'
+        ).to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -268,7 +271,7 @@ def update_current_user():
         
         current_user.save()
         
-        return api_response(current_user.to_dict(), "User information updated successfully")
+        return ApiResponse.success(current_user.to_dict(), "User information updated successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -285,16 +288,18 @@ def verify_token():
         # 这里可以添加令牌验证逻辑
         # 目前使用Flask-JWT-Extended的内置验证
         
-        return api_response({
-            'valid': True,
-            'message': 'Token is valid'
-        })
-        
+        return ApiResponse.success(
+            data={
+                'valid': True
+            },
+            message='Token is valid'
+        ).to_response()
+
     except Exception as e:
-        return api_response({
-            'valid': False,
-            'message': 'Token is invalid'
-        })
+        return ApiResponse.error(
+            message='Token is invalid',
+            code=400
+        ).to_response()
 
 
 @auth_bp.route('/refresh', methods=['POST'])
@@ -313,11 +318,11 @@ def refresh():
         if not tokens:
             return ApiResponse.error("Failed to generate tokens", 500).to_response()
 
-        return api_response({
+        return ApiResponse.success({
             'access_token': tokens['access_token'],
             'refresh_token': tokens['refresh_token'],
             'token_type': tokens['token_type']
-        })
+        }, "Tokens refreshed successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -363,7 +368,7 @@ def list_users():
             error_out=False
         )
         
-        return api_response({
+        return ApiResponse.success({
             'users': [user.to_dict() for user in pagination.items],
             'pagination': {
                 'page': pagination.page,
@@ -373,7 +378,7 @@ def list_users():
                 'has_prev': pagination.has_prev,
                 'has_next': pagination.has_next
             }
-        })
+        }, "Users retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -394,7 +399,7 @@ def get_user(user_id):
         if not user:
             return ApiResponse.error("User not found", 404).to_response()
         
-        return api_response(user.to_dict())
+        return ApiResponse.success(user.to_dict(), "User information retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -425,7 +430,7 @@ def update_user_status(user_id):
             user.status = new_status
             user.save()
             
-            return api_response(user.to_dict(), "User status updated successfully")
+            return ApiResponse.success(user.to_dict(), "User status updated successfully").to_response()
             
         except ValueError:
             return ApiResponse.error("Invalid status value", 400).to_response()

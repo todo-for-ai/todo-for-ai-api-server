@@ -104,6 +104,12 @@ class User(BaseModel):
         cascade='all, delete-orphan',
         uselist=False
     )
+    custom_prompts = relationship(
+        'CustomPrompt',
+        back_populates='user',
+        cascade='all, delete-orphan',
+        lazy='dynamic'
+    )
     
     def __repr__(self):
         return f'<User {self.id}: {self.email}>'

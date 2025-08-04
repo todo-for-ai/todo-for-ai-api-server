@@ -28,7 +28,7 @@ def get_user_settings():
             default_language=detect_user_language(request)
         )
         
-        return api_response(settings.to_dict(), "User settings retrieved successfully")
+        return ApiResponse.success(settings.to_dict(), "User settings retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -64,7 +64,7 @@ def update_user_settings():
         
         settings.save()
         
-        return api_response(settings.to_dict(), "User settings updated successfully")
+        return ApiResponse.success(settings.to_dict(), "User settings updated successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
