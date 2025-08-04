@@ -104,13 +104,14 @@ class GoogleService:
             from models import db
             db.session.commit()
 
-            # 为新用户自动创建API Token、用户设置和默认全局规则
+            # 为新用户自动创建API Token、用户设置、默认全局规则和默认提示词
             if is_new_user:
                 self._create_default_api_token(user)
                 # 从Flask的request上下文获取请求对象
                 from flask import request as flask_request
-                self._create_default_user_settings(user, flask_request)
+                user_language = self._create_default_user_settings(user, flask_request)
                 self._create_default_global_rule(user)
+                self._create_default_custom_prompts(user, user_language)
 
             return user
         except Exception as e:
@@ -191,7 +192,7 @@ class GoogleService:
             # 检查用户是否已有设置
             existing_settings = UserSettings.query.filter_by(user_id=user.id).first()
             if existing_settings:
-                return  # 已有设置，不需要创建
+                return existing_settings.language  # 返回已有设置的语言
 
             # 检测用户语言偏好
             default_language = self._detect_user_language(user, request)
@@ -207,11 +208,13 @@ class GoogleService:
             db.session.commit()
 
             current_app.logger.info(f"为用户 {user.email} 创建了默认用户设置，语言: {default_language}")
+            return default_language
 
         except Exception as e:
             current_app.logger.error(f"创建默认用户设置失败: {str(e)}")
             from models import db
             db.session.rollback()
+            return 'zh-CN'  # 返回默认语言
 
     def _detect_user_language(self, user, request=None):
         """检测用户的语言偏好"""
@@ -282,6 +285,26 @@ class GoogleService:
 
         except Exception as e:
             current_app.logger.error(f"创建默认全局规则失败: {str(e)}")
+            from models import db
+            db.session.rollback()
+
+    def _create_default_custom_prompts(self, user, language='zh-CN'):
+        """为新用户创建默认的自定义提示词"""
+        try:
+            from models import CustomPrompt, db
+
+            # 检查用户是否已有提示词
+            existing_count = CustomPrompt.query.filter(CustomPrompt.user_id == user.id).count()
+            if existing_count > 0:
+                return  # 已有提示词，不需要创建
+
+            # 初始化默认提示词
+            CustomPrompt.initialize_user_defaults(user.id, language)
+
+            current_app.logger.info(f"为用户 {user.email} 创建了默认自定义提示词，语言: {language}")
+
+        except Exception as e:
+            current_app.logger.error(f"创建默认自定义提示词失败: {str(e)}")
             from models import db
             db.session.rollback()
 

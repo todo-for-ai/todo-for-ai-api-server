@@ -134,72 +134,117 @@ class CustomPrompt(db.Model):
                 prompt.updated_at = datetime.utcnow()
 
     @classmethod
-    def get_default_project_template(cls):
+    def get_default_project_template(cls, language='zh-CN'):
         """获取默认的项目提示词模板"""
-        return """# 项目上下文
+        if language == 'en':
+            return """Please help me execute all pending tasks in project "${project.name}":
 
-## 项目信息
-- **项目名称**: {{project.name}}
-- **项目描述**: {{project.description}}
-- **创建时间**: {{project.created_at}}
-- **任务总数**: {{tasks.length}}
+**Project Information**:
+- Project Name: ${project.name}
+- Project Description: ${project.description}
+- GitHub Repository: ${project.github_repo}
+- Project Context: ${project.context}
 
-## 任务列表
-{{#each tasks}}
-### 任务 {{this.id}}: {{this.title}}
-- **状态**: {{this.status}}
-- **优先级**: {{this.priority}}
-- **创建时间**: {{this.created_at}}
-- **描述**: {{this.content}}
-{{#if this.tags}}
-- **标签**: {{join this.tags ", "}}
-{{/if}}
+**Number of Tasks to Execute**: ${tasks.count} tasks
 
-{{/each}}
+**Execution Guidelines**:
+1. Please use MCP tools to connect to Todo system: ${system.url}
+2. Use get_project_tasks_by_name tool to get project task list:
+   - Project Name: "${project.name}"
+   - Status Filter: ["todo", "in_progress", "review"]
+3. Execute tasks in order of creation time
+4. For each task, use get_task_by_id to get detailed information
+5. After completing a task, use submit_task_feedback to submit feedback
+6. Continue to the next task until all tasks are completed
 
-## 上下文规则
-{{context_rules}}
+**Task Overview**:
+${tasks.list}
 
-请基于以上项目信息和任务列表，为我提供相关的帮助和建议。"""
+Please start executing the tasks in this project and submit feedback after each task is completed."""
+        else:
+            # 默认中文模板
+            return """请帮我执行项目"${project.name}"中的所有待办任务：
+
+**项目信息**:
+- 项目名称: ${project.name}
+- 项目描述: ${project.description}
+- GitHub仓库: ${project.github_repo}
+- 项目上下文: ${project.context}
+
+**待执行任务数量**: ${tasks.count}个
+
+**执行指引**:
+1. 请使用MCP工具连接到Todo系统: ${system.url}
+2. 使用get_project_tasks_by_name工具获取项目任务列表:
+   - 项目名称: "${project.name}"
+   - 状态筛选: ["todo", "in_progress", "review"]
+3. 按照任务的创建时间顺序，逐个执行任务
+4. 对于每个任务，使用get_task_by_id获取详细信息
+5. 完成任务后，使用submit_task_feedback提交反馈
+6. 继续执行下一个任务，直到所有任务完成
+
+**任务概览**:
+${tasks.list}
+
+请开始执行这个项目的任务，并在每个任务完成后提交反馈。"""
 
     @classmethod
-    def get_default_task_buttons(cls):
+    def get_default_task_buttons(cls, language='zh-CN'):
         """获取默认的任务按钮提示词"""
-        return [
-            {
-                'name': '分析任务',
-                'content': '请分析这个任务：\n\n**任务标题**: {{task.title}}\n**任务描述**: {{task.content}}\n**当前状态**: {{task.status}}\n**优先级**: {{task.priority}}\n\n请提供：\n1. 任务分析和理解\n2. 实施建议\n3. 可能的风险和注意事项',
-                'description': '分析当前任务的详细信息和实施建议',
-                'order_index': 1
-            },
-            {
-                'name': '生成子任务',
-                'content': '基于这个任务，请帮我生成详细的子任务列表：\n\n**主任务**: {{task.title}}\n**任务描述**: {{task.content}}\n\n请生成：\n1. 具体的执行步骤\n2. 每个步骤的预估时间\n3. 依赖关系和优先级',
-                'description': '为当前任务生成详细的子任务分解',
-                'order_index': 2
-            },
-            {
-                'name': '代码实现',
-                'content': '请帮我实现这个任务的代码：\n\n**任务**: {{task.title}}\n**需求**: {{task.content}}\n**项目**: {{project.name}}\n\n请提供：\n1. 代码实现方案\n2. 关键代码片段\n3. 测试建议',
-                'description': '为编程任务提供代码实现建议',
-                'order_index': 3
-            }
-        ]
+        if language == 'en':
+            return [
+                {
+                    'name': 'MCP Execution',
+                    'content': 'Please use the todo-for-ai MCP tool to get detailed information for task ID ${task.id}, then execute this task and submit a task feedback report upon completion.',
+                    'description': 'Execute task using MCP tools and submit feedback',
+                    'order_index': 1
+                },
+                {
+                    'name': 'Execute Task',
+                    'content': 'Please help me execute the following task:\n\n**Task Information**:\n- Task ID: ${task.id}\n- Task Title: ${task.title}\n- Task Content: ${task.content}\n- Task Status: ${task.status}\n- Priority: ${task.priority}\n- Created Time: ${task.created_at}\n- Due Date: ${task.due_date}\n- Estimated Hours: ${task.estimated_hours}\n- Tags: ${task.tags}\n- Related Files: ${task.related_files}\n\n**Project Information**:\n- Project Name: ${project.name}\n- Project Description: ${project.description}\n\nPlease execute this task and submit feedback.',
+                    'description': 'Execute task with detailed information and submit feedback',
+                    'order_index': 2
+                }
+            ]
+        else:
+            # 默认中文按钮
+            return [
+                {
+                    'name': 'MCP执行',
+                    'content': '请使用todo-for-ai MCP工具获取任务ID为${task.id}的详细信息，然后执行这个任务，完成后提交任务反馈报告。',
+                    'description': '使用MCP工具执行任务并提交反馈',
+                    'order_index': 1
+                },
+                {
+                    'name': '执行任务',
+                    'content': '请帮我执行以下任务：\n\n**任务信息**:\n- 任务ID: ${task.id}\n- 任务标题: ${task.title}\n- 任务内容: ${task.content}\n- 任务状态: ${task.status}\n- 优先级: ${task.priority}\n- 创建时间: ${task.created_at}\n- 截止时间: ${task.due_date}\n- 预估工时: ${task.estimated_hours}\n- 标签: ${task.tags}\n- 相关文件: ${task.related_files}\n\n**项目信息**:\n- 项目名称: ${project.name}\n- 项目描述: ${project.description}\n\n请执行这个任务并提交反馈。',
+                    'description': '执行任务并提交详细反馈',
+                    'order_index': 2
+                }
+            ]
 
     @classmethod
-    def initialize_user_defaults(cls, user_id):
+    def initialize_user_defaults(cls, user_id, language='zh-CN'):
         """为新用户初始化默认的提示词"""
+        # 根据语言设置名称和描述
+        if language == 'en':
+            project_name = 'Default Project Template'
+            project_description = 'Default project context prompt template'
+        else:
+            project_name = '默认项目模板'
+            project_description = '默认的项目上下文提示词模板'
+
         # 创建默认项目提示词
         project_prompt = cls.create_prompt(
             user_id=user_id,
             prompt_type=PromptType.PROJECT,
-            name='默认项目模板',
-            content=cls.get_default_project_template(),
-            description='默认的项目上下文提示词模板'
+            name=project_name,
+            content=cls.get_default_project_template(language),
+            description=project_description
         )
-        
+
         # 创建默认任务按钮提示词
-        default_buttons = cls.get_default_task_buttons()
+        default_buttons = cls.get_default_task_buttons(language)
         for button_data in default_buttons:
             cls.create_prompt(
                 user_id=user_id,
@@ -209,6 +254,6 @@ class CustomPrompt(db.Model):
                 description=button_data['description'],
                 order_index=button_data['order_index']
             )
-        
+
         db.session.commit()
         return True

@@ -369,6 +369,15 @@ def initialize_user_defaults():
     """为当前用户初始化默认的提示词"""
     try:
         current_user = get_current_user()
+        data = request.get_json() or {}
+
+        # 获取语言参数，默认从用户设置中获取
+        language = data.get('language')
+        if not language:
+            # 从用户设置中获取语言
+            from models import UserSettings
+            user_settings = UserSettings.query.filter_by(user_id=current_user.id).first()
+            language = user_settings.language if user_settings else 'zh-CN'
 
         # 检查用户是否已有提示词
         existing_count = CustomPrompt.query.filter(CustomPrompt.user_id == current_user.id).count()
@@ -377,7 +386,7 @@ def initialize_user_defaults():
             return ApiResponse.error("User already has custom prompts. Use reset-to-defaults to replace them.", 400).to_response()
 
         # 初始化默认提示词
-        CustomPrompt.initialize_user_defaults(current_user.id)
+        CustomPrompt.initialize_user_defaults(current_user.id, language)
 
         return ApiResponse.success(None, "Default prompts initialized successfully").to_response()
 
@@ -392,12 +401,21 @@ def reset_to_defaults():
     """重置用户的提示词为默认配置"""
     try:
         current_user = get_current_user()
+        data = request.get_json() or {}
+
+        # 获取语言参数，默认从用户设置中获取
+        language = data.get('language')
+        if not language:
+            # 从用户设置中获取语言
+            from models import UserSettings
+            user_settings = UserSettings.query.filter_by(user_id=current_user.id).first()
+            language = user_settings.language if user_settings else 'zh-CN'
 
         # 删除用户现有的所有提示词
         CustomPrompt.query.filter(CustomPrompt.user_id == current_user.id).delete()
 
         # 初始化默认提示词
-        CustomPrompt.initialize_user_defaults(current_user.id)
+        CustomPrompt.initialize_user_defaults(current_user.id, language)
 
         return ApiResponse.success(None, "Prompts reset to defaults successfully").to_response()
 
