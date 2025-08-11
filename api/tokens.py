@@ -4,15 +4,14 @@ API Token管理接口
 
 from flask import Blueprint, request, jsonify, g
 from models import db, ApiToken, User
-from core.auth import token_required, get_current_token
-from core.github_config import require_auth, get_current_user
-from api.base import handle_api_error
+from core.auth import unified_auth_required, get_current_user
+from api.base import ApiResponse
 
 tokens_bp = Blueprint('tokens', __name__)
 
 
 @tokens_bp.route('', methods=['GET'])
-@require_auth
+@unified_auth_required
 def list_tokens():
     """获取当前用户的Token列表"""
     try:
@@ -32,8 +31,8 @@ def list_tokens():
         
         tokens = [token.to_dict() for token in pagination.items]
         
-        return jsonify({
-            'tokens': tokens,
+        return ApiResponse.success({
+            'items': tokens,
             'pagination': {
                 'page': page,
                 'per_page': per_page,
@@ -42,25 +41,25 @@ def list_tokens():
                 'has_next': pagination.has_next,
                 'has_prev': pagination.has_prev
             }
-        })
-    
+        }, "Tokens retrieved successfully").to_response()
+
     except Exception as e:
-        return handle_api_error(e)
+        return ApiResponse.error(f"Failed to retrieve tokens: {str(e)}", 500).to_response()
 
 
 @tokens_bp.route('', methods=['POST'])
-@require_auth
+@unified_auth_required
 def create_token():
     """创建新的API Token"""
     try:
         data = request.get_json()
 
         if not data:
-            return jsonify({'error': 'No data provided'}), 400
+            return ApiResponse.error('No data provided', 400).to_response()
 
         name = data.get('name')
         if not name:
-            return jsonify({'error': 'Token name is required'}), 400
+            return ApiResponse.error('Token name is required', 400).to_response()
 
         description = data.get('description')
         expires_days = data.get('expires_days')
@@ -81,28 +80,31 @@ def create_token():
         # 返回token信息（包含完整token，仅此一次）
         result = api_token.to_dict()
         result['token'] = token  # 完整token仅在创建时返回
-        
-        return jsonify(result), 201
+
+        return ApiResponse.success(result, "Token created successfully", 201).to_response()
     
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e)
+        return ApiResponse.error(f"Failed to create token: {str(e)}", 500).to_response()
 
 
 @tokens_bp.route('/<int:token_id>', methods=['GET'])
-@token_required
+@unified_auth_required
 def get_token(token_id):
     """获取Token详情"""
     try:
-        api_token = ApiToken.query.get_or_404(token_id)
-        return jsonify(api_token.to_dict())
-    
+        current_user = get_current_user()
+        api_token = ApiToken.query.filter_by(id=token_id, user_id=current_user.id).first()
+        if not api_token:
+            return ApiResponse.error("Token not found", 404).to_response()
+        return ApiResponse.success(api_token.to_dict(), "Token retrieved successfully").to_response()
+
     except Exception as e:
-        return handle_api_error(e)
+        return ApiResponse.error(f"Failed to retrieve token: {str(e)}", 500).to_response()
 
 
 @tokens_bp.route('/<int:token_id>', methods=['PUT'])
-@token_required
+@unified_auth_required
 def update_token(token_id):
     """更新Token"""
     try:
@@ -110,7 +112,7 @@ def update_token(token_id):
         data = request.get_json()
         
         if not data:
-            return jsonify({'error': 'No data provided'}), 400
+            return ApiResponse.error('No data provided', 400).to_response()
         
         # 更新字段
         if 'name' in data:
@@ -122,15 +124,15 @@ def update_token(token_id):
         
         db.session.commit()
         
-        return jsonify(api_token.to_dict())
-    
+        return ApiResponse.success(api_token.to_dict(), "Token updated successfully").to_response()
+
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e)
+        return ApiResponse.error(f"Failed to update token: {str(e)}", 500).to_response()
 
 
 @tokens_bp.route('/<int:token_id>/renew', methods=['POST'])
-@token_required
+@unified_auth_required
 def renew_token(token_id):
     """续期Token"""
     try:
@@ -151,7 +153,7 @@ def renew_token(token_id):
 
 
 @tokens_bp.route('/<int:token_id>/reveal', methods=['GET'])
-@require_auth
+@unified_auth_required
 def reveal_token(token_id):
     """获取解密的完整token"""
     try:
@@ -203,7 +205,7 @@ def reveal_token(token_id):
 
 
 @tokens_bp.route('/<int:token_id>', methods=['DELETE'])
-@require_auth
+@unified_auth_required
 def delete_token(token_id):
     """删除（停用）Token"""
     try:
@@ -259,7 +261,7 @@ def verify_token():
 
 
 @tokens_bp.route('/cleanup', methods=['POST'])
-@token_required
+@unified_auth_required
 def cleanup_expired_tokens():
     """清理过期的Token"""
     try:

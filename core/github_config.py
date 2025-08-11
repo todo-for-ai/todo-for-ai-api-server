@@ -7,7 +7,7 @@ import requests
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import request, jsonify, g, current_app
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity
 from authlib.integrations.flask_client import OAuth
 from models import User
 
@@ -49,8 +49,12 @@ class GitHubService:
         
         # 初始化 JWT
         self.jwt_manager = JWTManager(app)
-        app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'your-secret-key')
-        app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
+        # JWT配置已在config.py中设置，这里不再覆盖
+        # 确保JWT_ACCESS_TOKEN_EXPIRES使用timedelta对象
+        if isinstance(app.config.get('JWT_ACCESS_TOKEN_EXPIRES'), int):
+            app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(seconds=app.config['JWT_ACCESS_TOKEN_EXPIRES'])
+        if isinstance(app.config.get('JWT_REFRESH_TOKEN_EXPIRES'), int):
+            app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(seconds=app.config['JWT_REFRESH_TOKEN_EXPIRES'])
         
         self._register_jwt_handlers()
     
@@ -123,13 +127,14 @@ class GitHubService:
             from models import db
             db.session.commit()
 
-            # 为新用户自动创建API Token、用户设置和默认全局规则
+            # 为新用户自动创建API Token、用户设置、默认全局规则和默认提示词
             if is_new_user:
                 self._create_default_api_token(user)
                 # 从Flask的request上下文获取请求对象
                 from flask import request as flask_request
-                self._create_default_user_settings(user, flask_request)
+                user_language = self._create_default_user_settings(user, flask_request)
                 self._create_default_global_rule(user)
+                self._create_default_custom_prompts(user, user_language)
 
             return user
         except Exception as e:
@@ -139,16 +144,35 @@ class GitHubService:
             return None
     
     def generate_tokens(self, user):
+        """为用户生成JWT令牌（包括access token和refresh token）"""
         try:
+            # 生成access token
             access_token = create_access_token(
                 identity=user.id,
                 additional_claims={
                     'username': user.username,
                     'email': user.email,
-                    'github_id': user.github_id
+                    'github_id': user.github_id,
+                    'provider': 'github'
                 }
             )
-            return access_token
+
+            # 生成refresh token
+            refresh_token = create_refresh_token(
+                identity=user.id,
+                additional_claims={
+                    'username': user.username,
+                    'email': user.email,
+                    'github_id': user.github_id,
+                    'provider': 'github'
+                }
+            )
+
+            return {
+                'access_token': access_token,
+                'refresh_token': refresh_token,
+                'token_type': 'Bearer'
+            }
         except Exception as e:
             current_app.logger.error(f"生成令牌失败: {str(e)}")
             return None
@@ -190,13 +214,13 @@ class GitHubService:
 
             # 防止递归调用
             if hasattr(user, '_creating_settings'):
-                return
+                return 'zh-CN'  # 返回默认语言
             user._creating_settings = True
 
             # 检查用户是否已有设置
             existing_settings = UserSettings.query.filter_by(user_id=user.id).first()
             if existing_settings:
-                return  # 已有设置，不需要创建
+                return existing_settings.language  # 返回已有设置的语言
 
             # 检测用户语言偏好
             default_language = self._detect_user_language(user, request)
@@ -212,11 +236,13 @@ class GitHubService:
             db.session.commit()
 
             current_app.logger.info(f"为用户 {user.email} 创建了默认用户设置，语言: {default_language}")
+            return default_language
 
         except Exception as e:
             current_app.logger.error(f"创建默认用户设置失败: {str(e)}")
             from models import db
             db.session.rollback()
+            return 'zh-CN'  # 返回默认语言
         finally:
             # 清理递归标记
             if hasattr(user, '_creating_settings'):
@@ -291,6 +317,26 @@ class GitHubService:
 
         except Exception as e:
             current_app.logger.error(f"创建默认全局规则失败: {str(e)}")
+            from models import db
+            db.session.rollback()
+
+    def _create_default_custom_prompts(self, user, language='zh-CN'):
+        """为新用户创建默认的自定义提示词"""
+        try:
+            from models import CustomPrompt, db
+
+            # 检查用户是否已有提示词
+            existing_count = CustomPrompt.query.filter(CustomPrompt.user_id == user.id).count()
+            if existing_count > 0:
+                return  # 已有提示词，不需要创建
+
+            # 初始化默认提示词
+            CustomPrompt.initialize_user_defaults(user.id, language)
+
+            current_app.logger.info(f"为用户 {user.email} 创建了默认自定义提示词，语言: {language}")
+
+        except Exception as e:
+            current_app.logger.error(f"创建默认自定义提示词失败: {str(e)}")
             from models import db
             db.session.rollback()
 

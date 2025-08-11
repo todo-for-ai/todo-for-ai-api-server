@@ -7,16 +7,15 @@
 from datetime import datetime
 from flask import Blueprint, request
 from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
-from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args
-from core.auth import optional_token_auth
-from core.github_config import require_auth, get_current_user
+from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
+from core.auth import unified_auth_required, get_current_user
 
 # 创建蓝图
 tasks_bp = Blueprint('tasks', __name__)
 
 
 @tasks_bp.route('', methods=['GET'])
-@require_auth
+@unified_auth_required
 def list_tasks():
     """获取任务列表"""
     try:
@@ -26,14 +25,12 @@ def list_tasks():
         # 构建查询
         query = Task.query
 
-        # 用户权限控制
+        # 用户权限控制 - 所有用户（包括管理员）只能看到自己项目的任务
         if current_user:
-            if not current_user.is_admin():
-                # 普通用户只能看到自己相关的任务
-                query = query.join(Project).filter(Project.owner_id == current_user.id)
+            query = query.join(Project).filter(Project.owner_id == current_user.id)
         else:
             # 未登录用户不能访问任务列表
-            return api_error("Authentication required", 401)
+            return ApiResponse.error("Authentication required", 401).to_response()
         
         # 项目筛选
         if args['project_id']:
@@ -53,7 +50,7 @@ def list_tasks():
                     status = TaskStatus(args['status'])
                     query = query.filter_by(status=status)
             except ValueError:
-                return api_error(f"Invalid status: {args['status']}", 400)
+                return ApiResponse.error(f"Invalid status: {args['status']}", 400).to_response()
         
         # 优先级筛选
         if args['priority']:
@@ -61,7 +58,7 @@ def list_tasks():
                 priority = TaskPriority(args['priority'])
                 query = query.filter_by(priority=priority)
             except ValueError:
-                return api_error(f"Invalid priority: {args['priority']}", 400)
+                return ApiResponse.error(f"Invalid priority: {args['priority']}", 400).to_response()
         
 
         
@@ -106,14 +103,14 @@ def list_tasks():
                         'color': project.color
                     }
         
-        return api_response(result, "Tasks retrieved successfully")
+        return ApiResponse.success(result, "Tasks retrieved successfully").to_response()
         
     except Exception as e:
-        return api_error(f"Failed to retrieve tasks: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to retrieve tasks: {str(e)}", 500).to_response()
 
 
 @tasks_bp.route('', methods=['POST'])
-@require_auth
+@unified_auth_required
 def create_task():
     """创建新任务"""
     try:
@@ -134,11 +131,11 @@ def create_task():
         # 验证项目是否存在
         project = Project.query.get(data['project_id'])
         if not project:
-            return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
+            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
-        # 验证用户是否有权限在该项目中创建任务
-        if not current_user.is_admin() and project.owner_id != current_user.id:
-            return api_error("Permission denied", 403, "PERMISSION_DENIED")
+        # 验证用户是否有权限在该项目中创建任务 - 只能在自己的项目中创建任务
+        if project.owner_id != current_user.id:
+            return ApiResponse.error("Permission denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 处理日期字段
         due_date = None
@@ -146,7 +143,7 @@ def create_task():
             try:
                 due_date = datetime.fromisoformat(data['due_date'].replace('Z', '+00:00'))
             except ValueError:
-                return api_error("Invalid due_date format. Use ISO format.", 400)
+                return ApiResponse.error("Invalid due_date format. Use ISO format.", 400).to_response()
         
         # 处理状态和优先级
         status = TaskStatus.TODO
@@ -154,14 +151,14 @@ def create_task():
             try:
                 status = TaskStatus(data['status'])
             except ValueError:
-                return api_error(f"Invalid status: {data['status']}", 400)
+                return ApiResponse.error(f"Invalid status: {data['status']}", 400).to_response()
         
         priority = TaskPriority.MEDIUM
         if 'priority' in data:
             try:
                 priority = TaskPriority(data['priority'])
             except ValueError:
-                return api_error(f"Invalid priority: {data['priority']}", 400)
+                return ApiResponse.error(f"Invalid priority: {data['priority']}", 400).to_response()
         
         # 处理标题：如果没有提供标题，从内容中生成
         title = data.get('title', '').strip()
@@ -193,7 +190,10 @@ def create_task():
             creator_id=current_user.id,  # 设置创建者ID
             created_by=current_user.email  # 设置创建者邮箱
         )
-        
+
+        # 更新项目最后活动时间
+        project.last_activity_at = datetime.utcnow()
+
         db.session.commit()
 
         # 记录历史
@@ -212,36 +212,42 @@ def create_task():
                 # 记录活跃度失败不应该影响任务创建
                 print(f"Warning: Failed to record user activity: {str(e)}")
 
-        return api_response(
+        return ApiResponse.created(
             task.to_dict(include_project=True, include_stats=True),
-            "Task created successfully",
-            201
-        )
+            "Task created successfully"
+        ).to_response()
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to create task: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to create task: {str(e)}", 500).to_response()
 
 
 @tasks_bp.route('/<int:task_id>', methods=['GET'])
+@unified_auth_required
 def get_task(task_id):
     """获取单个任务详情"""
     try:
+        current_user = get_current_user()
+
         task = Task.query.get(task_id)
         if not task:
-            return api_error("Task not found", 404, "TASK_NOT_FOUND")
-        
-        return api_response(
+            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
+
+        # 权限检查 - 只能访问自己项目中的任务
+        if task.project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only access tasks from your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+
+        return ApiResponse.success(
             task.to_dict(include_project=True, include_stats=True),
             "Task retrieved successfully"
-        )
-        
+        ).to_response()
+
     except Exception as e:
-        return api_error(f"Failed to retrieve task: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to retrieve task: {str(e)}", 500).to_response()
 
 
 @tasks_bp.route('/<int:task_id>', methods=['PUT'])
-@require_auth
+@unified_auth_required
 def update_task(task_id):
     """更新任务"""
     try:
@@ -249,11 +255,11 @@ def update_task(task_id):
 
         task = Task.query.get(task_id)
         if not task:
-            return api_error("Task not found", 404, "TASK_NOT_FOUND")
+            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
 
-        # 验证用户是否有权限更新该任务
-        if not current_user.is_admin() and task.project.owner_id != current_user.id:
-            return api_error("Permission denied", 403, "PERMISSION_DENIED")
+        # 验证用户是否有权限更新该任务 - 只能更新自己项目的任务
+        if task.project.owner_id != current_user.id:
+            return ApiResponse.error("Permission denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 验证请求数据
         data = validate_json_request(
@@ -278,7 +284,7 @@ def update_task(task_id):
                     changes.append(('due_date', old_due_date, new_due_date))
                     task.due_date = new_due_date
             except ValueError:
-                return api_error("Invalid due_date format. Use ISO format.", 400)
+                return ApiResponse.error("Invalid due_date format. Use ISO format.", 400).to_response()
         
         # 处理状态变更
         if 'status' in data:
@@ -294,7 +300,7 @@ def update_task(task_id):
                         task.completed_at = datetime.utcnow()
                         task.completion_rate = 100
             except ValueError:
-                return api_error(f"Invalid status: {data['status']}", 400)
+                return ApiResponse.error(f"Invalid status: {data['status']}", 400).to_response()
         
         # 处理优先级变更
         if 'priority' in data:
@@ -305,7 +311,7 @@ def update_task(task_id):
                     changes.append(('priority', old_priority.value, new_priority.value))
                     task.priority = new_priority
             except ValueError:
-                return api_error(f"Invalid priority: {data['priority']}", 400)
+                return ApiResponse.error(f"Invalid priority: {data['priority']}", 400).to_response()
         
         # 处理其他字段
         simple_fields = ['title', 'content', 'completion_rate', 'tags']
@@ -316,7 +322,11 @@ def update_task(task_id):
                 if old_value != new_value:
                     changes.append((field, old_value, new_value))
                     setattr(task, field, new_value)
-        
+
+        # 更新项目最后活动时间
+        if changes:  # 只有在有实际更改时才更新项目活跃时间
+            task.project.last_activity_at = datetime.utcnow()
+
         db.session.commit()
 
         # 记录变更历史
@@ -348,14 +358,14 @@ def update_task(task_id):
                 # 记录活跃度失败不应该影响任务更新
                 print(f"Warning: Failed to record user activity: {str(e)}")
 
-        return api_response(
+        return ApiResponse.success(
             task.to_dict(include_project=True, include_stats=True),
             "Task updated successfully"
-        )
+        ).to_response()
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to update task: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to update task: {str(e)}", 500).to_response()
 
 
 @tasks_bp.route('/<int:task_id>', methods=['DELETE'])
@@ -364,7 +374,7 @@ def delete_task(task_id):
     try:
         task = Task.query.get(task_id)
         if not task:
-            return api_error("Task not found", 404, "TASK_NOT_FOUND")
+            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
         
         # 记录删除历史
         TaskHistory.log_action(
@@ -377,12 +387,94 @@ def delete_task(task_id):
         # 删除任务
         task.delete()
         
-        return api_response(
-            None,
-            "Task deleted successfully",
-            204
-        )
+        return ApiResponse.success(None, "Task deleted successfully", 204).to_response()
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to delete task: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to delete task: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/<int:task_id>/history', methods=['GET'])
+@unified_auth_required
+def get_task_history(task_id):
+    """获取任务历史记录"""
+    try:
+        current_user = get_current_user()
+
+        # 验证任务是否存在
+        task = Task.query.get(task_id)
+        if not task:
+            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
+
+        # 权限检查 - 只能访问自己项目中的任务历史
+        if task.project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only access history from your own tasks", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+
+        # 获取任务历史记录
+        history_records = TaskHistory.get_task_history(task_id, limit=100)  # 限制返回最近100条记录
+
+        result = [record.to_dict() for record in history_records]
+
+        return ApiResponse.success(
+            result,
+            f"Task history retrieved successfully ({len(result)} records)"
+        ).to_response()
+
+    except Exception as e:
+        return ApiResponse.error(f"Failed to retrieve task history: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/<int:task_id>/attachments', methods=['GET'])
+@unified_auth_required
+def get_task_attachments(task_id):
+    """获取任务附件列表"""
+    try:
+        current_user = get_current_user()
+
+        # 验证任务是否存在
+        task = Task.query.get(task_id)
+        if not task:
+            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
+
+        # 权限检查 - 只能访问自己项目中的任务附件
+        if task.project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only access attachments from your own tasks", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+
+        # TODO: 实现完整的附件功能
+        # 目前返回空列表，避免前端调用出错
+        result = []
+
+        return ApiResponse.success(
+            result,
+            "Task attachments retrieved successfully (feature not fully implemented)"
+        ).to_response()
+
+    except Exception as e:
+        return ApiResponse.error(f"Failed to retrieve task attachments: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/<int:task_id>/attachments/<int:attachment_id>', methods=['DELETE'])
+@unified_auth_required
+def delete_task_attachment(task_id, attachment_id):
+    """删除任务附件"""
+    try:
+        current_user = get_current_user()
+
+        # 验证任务是否存在
+        task = Task.query.get(task_id)
+        if not task:
+            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
+
+        # 权限检查 - 只能删除自己项目中的任务附件
+        if task.project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only delete attachments from your own tasks", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+
+        # TODO: 实现完整的附件删除功能
+        # 目前返回成功响应，避免前端调用出错
+        return ApiResponse.success(
+            None,
+            f"Task attachment {attachment_id} deleted successfully (feature not fully implemented)"
+        ).to_response()
+
+    except Exception as e:
+        return ApiResponse.error(f"Failed to delete task attachment: {str(e)}", 500).to_response()

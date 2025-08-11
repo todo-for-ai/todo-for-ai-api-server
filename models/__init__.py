@@ -15,6 +15,7 @@ from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
 from .user_activity import UserActivity
 from .user_settings import UserSettings
+from .custom_prompt import CustomPrompt, PromptType
 
 __all__ = [
     'db',
@@ -34,4 +35,7 @@ __all__ = [
     'ApiToken',
     'UserProjectPin',
     'UserActivity',
+    'UserSettings',
+    'CustomPrompt',
+    'PromptType',
 ]

@@ -104,6 +104,12 @@ class User(BaseModel):
         cascade='all, delete-orphan',
         uselist=False
     )
+    custom_prompts = relationship(
+        'CustomPrompt',
+        back_populates='user',
+        cascade='all, delete-orphan',
+        lazy='dynamic'
+    )
     
     def __repr__(self):
         return f'<User {self.id}: {self.email}>'
@@ -208,17 +214,13 @@ class User(BaseModel):
         return self.status == UserStatus.ACTIVE
     
     def can_access_project(self, project):
-        """检查是否可以访问项目"""
-        if self.is_admin():
-            return True
+        """检查是否可以访问项目 - 所有用户（包括管理员）只能访问自己的项目"""
         return project.owner_id == self.id
     
     def can_access_task(self, task):
-        """检查是否可以访问任务"""
-        if self.is_admin():
-            return True
-        return (task.assignee_id == self.id or 
-                task.creator_id == self.id or 
+        """检查是否可以访问任务 - 所有用户（包括管理员）只能访问自己项目的任务"""
+        return (task.assignee_id == self.id or
+                task.creator_id == self.id or
                 self.can_access_project(task.project))
     
     def update_last_active(self):

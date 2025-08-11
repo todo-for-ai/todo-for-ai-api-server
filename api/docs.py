@@ -2,7 +2,8 @@
 API文档接口
 """
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
+from .base import ApiResponse
 
 docs_bp = Blueprint('docs', __name__)
 
@@ -248,4 +249,4 @@ def api_docs():
         }
     }
     
-    return jsonify(docs)
+    return ApiResponse.success(docs, "API documentation retrieved successfully").to_response()

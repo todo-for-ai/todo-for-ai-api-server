@@ -9,7 +9,7 @@ import secrets
 from flask import Blueprint, request, jsonify, redirect, url_for, session
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, User
-from .base import api_response, api_error, handle_api_error
+from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 from core.github_config import github_service, require_auth, get_current_user
 from core.google_config import google_service
 
@@ -125,28 +125,37 @@ def github_callback():
         token = github_service.oauth.github.authorize_access_token()
 
         if not token:
-            return api_error("Failed to get access token from GitHub", 400)
+            return ApiResponse.error("Failed to get access token from GitHub", 400).to_response()
 
         # 获取用户信息
         user_info = github_service.get_user_info(token['access_token'])
         if not user_info:
-            return api_error("Failed to get user information", 400)
+            return ApiResponse.error("Failed to get user information", 400).to_response()
 
         # 创建或更新用户
         user = github_service.create_or_update_user(user_info)
         if not user:
-            return api_error("Failed to create or update user", 500)
+            return ApiResponse.error("Failed to create or update user", 500).to_response()
 
         # 生成JWT令牌
-        access_token = github_service.generate_tokens(user)
+        tokens = github_service.generate_tokens(user)
+        if not tokens:
+            return ApiResponse.error("Failed to generate tokens", 500).to_response()
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
         default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
-        # 重定向到前端，并在URL中包含令牌
-        return redirect(f"{redirect_url}?token={access_token}")
+        # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
+        import urllib.parse
+        params = {
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
+        }
+        query_string = urllib.parse.urlencode(params)
+        return redirect(f"{redirect_url}?{query_string}")
 
     except Exception as e:
         return handle_api_error(e)
@@ -160,28 +169,37 @@ def google_callback():
         token = google_service.oauth.google.authorize_access_token()
 
         if not token:
-            return api_error("Failed to get access token from Google", 400)
+            return ApiResponse.error("Failed to get access token from Google", 400).to_response()
 
         # 获取用户信息
         user_info = google_service.get_user_info(token['access_token'])
         if not user_info:
-            return api_error("Failed to get user information from Google", 400)
+            return ApiResponse.error("Failed to get user information from Google", 400).to_response()
 
         # 创建或更新用户
         user = google_service.create_or_update_user(user_info)
         if not user:
-            return api_error("Failed to create or update user", 500)
+            return ApiResponse.error("Failed to create or update user", 500).to_response()
 
         # 生成JWT令牌
-        access_token = google_service.generate_tokens(user)
+        tokens = google_service.generate_tokens(user)
+        if not tokens:
+            return ApiResponse.error("Failed to generate tokens", 500).to_response()
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
         default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
-        # 重定向到前端，并在URL中包含令牌
-        return redirect(f"{redirect_url}?token={access_token}")
+        # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
+        import urllib.parse
+        params = {
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
+        }
+        query_string = urllib.parse.urlencode(params)
+        return redirect(f"{redirect_url}?{query_string}")
 
     except Exception as e:
         return handle_api_error(e)
@@ -202,10 +220,10 @@ def logout():
         # 简单的登出响应（不再使用Auth0）
         return_to = request.json.get('return_to', 'http://localhost:50111/todo-for-ai/pages')
 
-        return api_response({
+        return ApiResponse.success({
             'message': 'Logout successful',
             'redirect_url': return_to
-        })
+        }, 'Logout successful').to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -217,7 +235,10 @@ def get_current_user_info():
     """获取当前用户信息"""
     try:
         current_user = get_current_user()
-        return api_response(current_user.to_dict())
+        return ApiResponse.success(
+            data=current_user.to_dict(),
+            message='User information retrieved successfully'
+        ).to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -231,7 +252,7 @@ def update_current_user():
         current_user = get_current_user()
         
         if not request.is_json:
-            return api_error("Content-Type must be application/json", 400)
+            return ApiResponse.error("Content-Type must be application/json", 400).to_response()
         
         data = request.get_json()
         
@@ -250,7 +271,7 @@ def update_current_user():
         
         current_user.save()
         
-        return api_response(current_user.to_dict(), "User information updated successfully")
+        return ApiResponse.success(current_user.to_dict(), "User information updated successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -262,21 +283,23 @@ def verify_token():
     try:
         data = request.get_json()
         if not data or 'token' not in data:
-            return api_error("Token is required", 400)
+            return ApiResponse.error("Token is required", 400).to_response()
         
         # 这里可以添加令牌验证逻辑
         # 目前使用Flask-JWT-Extended的内置验证
         
-        return api_response({
-            'valid': True,
-            'message': 'Token is valid'
-        })
-        
+        return ApiResponse.success(
+            data={
+                'valid': True
+            },
+            message='Token is valid'
+        ).to_response()
+
     except Exception as e:
-        return api_response({
-            'valid': False,
-            'message': 'Token is invalid'
-        })
+        return ApiResponse.error(
+            message='Token is invalid',
+            code=400
+        ).to_response()
 
 
 @auth_bp.route('/refresh', methods=['POST'])
@@ -288,15 +311,18 @@ def refresh():
         user = User.query.get(current_user_id)
         
         if not user or not user.is_active():
-            return api_error("User not found or inactive", 404)
+            return ApiResponse.error("User not found or inactive", 404).to_response()
         
-        # 生成新的访问令牌
-        new_token = github_service.generate_tokens(user)
-        
-        return api_response({
-            'access_token': new_token,
-            'token_type': 'Bearer'
-        })
+        # 生成新的访问令牌和刷新令牌
+        tokens = github_service.generate_tokens(user)
+        if not tokens:
+            return ApiResponse.error("Failed to generate tokens", 500).to_response()
+
+        return ApiResponse.success({
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
+        }, "Tokens refreshed successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -310,7 +336,7 @@ def list_users():
         current_user = get_current_user()
         
         if not current_user.is_admin():
-            return api_error("Admin access required", 403)
+            return ApiResponse.error("Admin access required", 403).to_response()
         
         # 获取查询参数
         page = request.args.get('page', 1, type=int)
@@ -342,7 +368,7 @@ def list_users():
             error_out=False
         )
         
-        return api_response({
+        return ApiResponse.success({
             'users': [user.to_dict() for user in pagination.items],
             'pagination': {
                 'page': pagination.page,
@@ -352,7 +378,7 @@ def list_users():
                 'has_prev': pagination.has_prev,
                 'has_next': pagination.has_next
             }
-        })
+        }, "Users retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -367,13 +393,13 @@ def get_user(user_id):
         
         # 只有管理员或用户本人可以查看详细信息
         if not current_user.is_admin() and current_user.id != user_id:
-            return api_error("Access denied", 403)
+            return ApiResponse.error("Access denied", 403).to_response()
         
         user = User.query.get(user_id)
         if not user:
-            return api_error("User not found", 404)
+            return ApiResponse.error("User not found", 404).to_response()
         
-        return api_response(user.to_dict())
+        return ApiResponse.success(user.to_dict(), "User information retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
@@ -387,15 +413,15 @@ def update_user_status(user_id):
         current_user = get_current_user()
         
         if not current_user.is_admin():
-            return api_error("Admin access required", 403)
+            return ApiResponse.error("Admin access required", 403).to_response()
         
         user = User.query.get(user_id)
         if not user:
-            return api_error("User not found", 404)
+            return ApiResponse.error("User not found", 404).to_response()
         
         data = request.get_json()
         if not data or 'status' not in data:
-            return api_error("Status is required", 400)
+            return ApiResponse.error("Status is required", 400).to_response()
         
         # 验证状态值
         from models.user import UserStatus
@@ -404,10 +430,10 @@ def update_user_status(user_id):
             user.status = new_status
             user.save()
             
-            return api_response(user.to_dict(), "User status updated successfully")
+            return ApiResponse.success(user.to_dict(), "User status updated successfully").to_response()
             
         except ValueError:
-            return api_error("Invalid status value", 400)
+            return ApiResponse.error("Invalid status value", 400).to_response()
         
     except Exception as e:
         return handle_api_error(e)
