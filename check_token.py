@@ -17,7 +17,7 @@ def check_token_in_db():
         return
     
     # 我们要检查的token
-    test_token = 'VqGbuPQvFygVmqJwrMQ1rSHDVrb0iYapNbfOaDAmCFs'
+    test_token = 'your-api-token-here'
     test_hash = hashlib.sha256(test_token.encode()).hexdigest()
     
     print(f"Checking token: {test_token}")
