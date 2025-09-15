@@ -16,6 +16,7 @@ from .user_project_pin import UserProjectPin
 from .user_activity import UserActivity
 from .user_settings import UserSettings
 from .custom_prompt import CustomPrompt, PromptType
+from .interaction_log import InteractionLog, InteractionType, InteractionStatus
 
 __all__ = [
     'db',

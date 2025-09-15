@@ -272,6 +272,51 @@ def list_tools():
                 }
             },
             {
+                "name": "update_task",
+                "description": "Update an existing task with proper permission checking",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "integer",
+                            "description": "The ID of the task to update"
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "The new title of the task (optional)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The new content/description of the task (optional)"
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": ["todo", "in_progress", "review", "done", "cancelled"],
+                            "description": "The new status of the task (optional)"
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "medium", "high", "urgent"],
+                            "description": "The new priority of the task (optional)"
+                        },
+                        "due_date": {
+                            "type": "string",
+                            "description": "The new due date in YYYY-MM-DD format (optional)"
+                        },
+                        "completion_rate": {
+                            "type": "number",
+                            "description": "The completion rate percentage (0-100) (optional)"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tags associated with the task (optional)"
+                        }
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            {
                 "name": "get_project_info",
                 "description": "Get detailed project information including statistics and configuration. Provide either project_id or project_name.",
                 "inputSchema": {
@@ -339,6 +384,66 @@ def list_tools():
                         }
                     },
                     "required": ["task_id", "project_name", "feedback_content", "status"]
+                }
+            },
+            {
+                "name": "wait_for_new_tasks",
+                "description": "Wait for new tasks to be created in a project, with configurable timeout and polling interval",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project_name": {
+                            "type": "string",
+                            "description": "The name of the project to monitor for new tasks"
+                        },
+                        "timeout_seconds": {
+                            "type": "number",
+                            "description": "Maximum time to wait for new tasks in seconds (default: 3600, max: 7200)",
+                            "default": 3600,
+                            "minimum": 30,
+                            "maximum": 7200
+                        },
+                        "poll_interval_seconds": {
+                            "type": "number",
+                            "description": "Interval between checks for new tasks in seconds (default: 30, min: 10)",
+                            "default": 30,
+                            "minimum": 10,
+                            "maximum": 300
+                        }
+                    },
+                    "required": ["project_name"]
+                }
+            },
+            {
+                "name": "wait_for_human_feedback",
+                "description": "Wait for human feedback on an interactive task that AI has submitted for review",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "integer",
+                            "description": "The ID of the task to wait for human feedback"
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "The interaction session ID"
+                        },
+                        "timeout_seconds": {
+                            "type": "number",
+                            "description": "Maximum time to wait for human feedback in seconds (default: 3600, max: 7200)",
+                            "default": 3600,
+                            "minimum": 30,
+                            "maximum": 7200
+                        },
+                        "poll_interval_seconds": {
+                            "type": "number",
+                            "description": "Interval between checks for human feedback in seconds (default: 30, min: 10)",
+                            "default": 30,
+                            "minimum": 10,
+                            "maximum": 300
+                        }
+                    },
+                    "required": ["task_id", "session_id"]
                 }
             }
         ]
@@ -420,15 +525,21 @@ def call_tool():
             result = submit_task_feedback(arguments)
         elif tool_name == 'create_task':
             result = create_task(arguments)
+        elif tool_name == 'update_task':
+            result = update_task(arguments)
         elif tool_name == 'get_project_info':
             result = get_project_info(arguments)
         elif tool_name == 'list_user_projects':
             result = list_user_projects(arguments)
+        elif tool_name == 'wait_for_new_tasks':
+            result = wait_for_new_tasks(arguments)
+        elif tool_name == 'wait_for_human_feedback':
+            result = wait_for_human_feedback(arguments)
         else:
             current_app.logger.error(f"[MCP_TOOL_ERROR] {call_id} Unknown tool: {tool_name}", extra={
                 'call_id': call_id,
                 'tool_name': tool_name,
-                'available_tools': ['get_project_tasks_by_name', 'get_task_by_id', 'submit_task_feedback', 'create_task', 'get_project_info', 'list_user_projects']
+                'available_tools': ['get_project_tasks_by_name', 'get_task_by_id', 'submit_task_feedback', 'create_task', 'update_task', 'get_project_info', 'list_user_projects', 'wait_for_new_tasks', 'wait_for_human_feedback']
             })
             return jsonify({'error': f'Unknown tool: {tool_name}'}), 400
 
@@ -580,7 +691,11 @@ def get_task_by_id(arguments):
 
 
 def submit_task_feedback(arguments):
-    """提交任务反馈"""
+    """提交任务反馈 - 支持交互式任务"""
+    import uuid
+    from models import InteractionLog, InteractionType, InteractionStatus
+    from flask import current_app
+
     task_id = arguments.get('task_id')
     project_name = arguments.get('project_name')
     feedback_content = arguments.get('feedback_content')
@@ -601,7 +716,7 @@ def submit_task_feedback(arguments):
     ai_identifier = sanitize_input(ai_identifier)
 
     # 验证状态值
-    valid_statuses = ['in_progress', 'review', 'done', 'cancelled']
+    valid_statuses = ['in_progress', 'review', 'done', 'cancelled', 'waiting_human_feedback']
     if status not in valid_statuses:
         return {'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}
 
@@ -617,20 +732,70 @@ def submit_task_feedback(arguments):
     # 检查权限 - 只能修改自己创建的任务或自己项目中的任务
     if task.creator_id != g.current_user.id and project.owner_id != g.current_user.id:
         return {'error': 'Access denied: You can only modify your own tasks'}
-    
+
     # 跟踪状态变更
     old_status = task.status
     status_changed = str(old_status) != str(status)
 
-    # 更新任务
+    # 检查是否为交互式任务
+    is_interactive_task = task.is_interactive
+
+    # 生成或使用现有的交互会话ID
+    session_id = task.interaction_session_id
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        task.interaction_session_id = session_id
+
+    current_app.logger.info(f"[SUBMIT_TASK_FEEDBACK] Processing feedback for task {task_id}", extra={
+        'task_id': task_id,
+        'is_interactive': is_interactive_task,
+        'session_id': session_id,
+        'status': status,
+        'ai_identifier': ai_identifier
+    })
+
+    # 更新任务基本信息
     task.feedback_content = feedback_content
     task.feedback_at = datetime.utcnow()
-    task.status = status
+
+    # 处理交互式任务逻辑
+    if is_interactive_task and status != 'cancelled':
+        # 创建AI反馈记录
+        interaction_log = InteractionLog.create_ai_feedback(
+            task_id=task_id,
+            session_id=session_id,
+            content=feedback_content,
+            metadata={
+                'ai_identifier': ai_identifier,
+                'original_status': str(old_status),
+                'requested_status': status
+            }
+        )
+
+        # 如果AI请求完成任务，设置为等待人工反馈状态
+        if status == 'done':
+            task.status = 'waiting_human_feedback'
+            task.ai_waiting_feedback = True
+            current_app.logger.info(f"[INTERACTIVE_TASK] Task {task_id} set to waiting_human_feedback")
+        else:
+            # 对于其他状态，直接更新
+            task.status = status
+            task.ai_waiting_feedback = False
+    else:
+        # 非交互式任务，直接更新状态
+        task.status = status
+        task.ai_waiting_feedback = False
 
     # 更新项目最后活动时间
     project.last_activity_at = datetime.utcnow()
 
-    db.session.commit()
+    try:
+        db.session.commit()
+        current_app.logger.info(f"[SUBMIT_TASK_FEEDBACK] Successfully updated task {task_id}")
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"[SUBMIT_TASK_FEEDBACK] Failed to update task {task_id}: {str(e)}")
+        return {'error': f'Failed to submit feedback: {str(e)}'}
 
     # 记录用户活跃度
     user_id = None
@@ -645,22 +810,32 @@ def submit_task_feedback(arguments):
             if status_changed:
                 UserActivity.record_activity(user_id, 'task_status_changed')
                 # 如果任务状态变为完成，额外记录完成任务活跃度
-                if status == 'done':
+                if task.status == 'done':
                     UserActivity.record_activity(user_id, 'task_completed')
             else:
                 UserActivity.record_activity(user_id, 'task_updated')
         except Exception as e:
             print(f"Warning: Failed to record user activity: {str(e)}")
-    
-    return {
+
+    # 构建返回结果
+    result = {
         'task_id': task_id,
         'project_name': project_name,
-        'status': status,
+        'status': task.status.value if hasattr(task.status, 'value') else task.status,
         'feedback_submitted': True,
         'feedback_content': feedback_content,
         'ai_identifier': ai_identifier,
-        'timestamp': datetime.utcnow().isoformat()
+        'timestamp': datetime.utcnow().isoformat(),
+        'is_interactive': is_interactive_task,
+        'session_id': session_id
     }
+
+    # 如果是交互式任务且AI在等待反馈，添加等待信息
+    if is_interactive_task and task.ai_waiting_feedback:
+        result['waiting_human_feedback'] = True
+        result['message'] = 'Task feedback submitted. Waiting for human confirmation or additional instructions.'
+
+    return result
 
 
 def create_task(arguments):
@@ -1113,3 +1288,611 @@ def list_user_projects(arguments):
             'exception_message': str(e)
         }, exc_info=True)
         return {'error': f'Failed to list user projects: {str(e)}'}
+
+
+def wait_for_new_tasks(arguments):
+    """等待项目中的新任务"""
+    import time
+    from flask import current_app
+
+    func_start_time = time.time()
+    func_id = f"wait-for-new-tasks-{int(time.time() * 1000)}-{id(arguments)}"
+
+    current_app.logger.info(f"[WAIT_FOR_NEW_TASKS_START] {func_id} Function started", extra={
+        'func_id': func_id,
+        'arguments': arguments,
+        'user_id': g.current_user.id if hasattr(g, 'current_user') and g.current_user else None,
+        'timestamp': datetime.utcnow().isoformat()
+    })
+
+    project_name = arguments.get('project_name')
+    timeout_seconds = arguments.get('timeout_seconds', 3600)  # Default 1 hour
+    poll_interval_seconds = arguments.get('poll_interval_seconds', 30)  # Default 30 seconds
+
+    current_app.logger.debug(f"[WAIT_FOR_NEW_TASKS_ARGS] {func_id} Arguments parsed", extra={
+        'func_id': func_id,
+        'project_name': project_name,
+        'timeout_seconds': timeout_seconds,
+        'poll_interval_seconds': poll_interval_seconds,
+        'has_project_name': bool(project_name)
+    })
+
+    if not project_name:
+        current_app.logger.warning(f"[WAIT_FOR_NEW_TASKS_ERROR] {func_id} Missing required arguments")
+        return {'error': 'project_name is required'}
+
+    # 验证和清理输入
+    project_name = sanitize_input(project_name)
+
+    # 验证超时时间和轮询间隔
+    try:
+        timeout_seconds = max(30, min(7200, int(timeout_seconds)))  # 30秒到2小时
+        poll_interval_seconds = max(10, min(300, int(poll_interval_seconds)))  # 10秒到5分钟
+    except (ValueError, TypeError):
+        return {'error': 'timeout_seconds and poll_interval_seconds must be valid numbers'}
+
+    # 查找项目
+    query_start_time = time.time()
+    project = Project.query.filter_by(name=project_name).first()
+    query_duration = time.time() - query_start_time
+
+    current_app.logger.debug(f"[WAIT_FOR_NEW_TASKS_QUERY] {func_id} Project query completed", extra={
+        'func_id': func_id,
+        'query_duration_ms': round(query_duration * 1000, 2),
+        'project_found': bool(project),
+        'project_id': project.id if project else None,
+        'project_name': project.name if project else None
+    })
+
+    if not project:
+        # 只返回当前用户有权限访问的项目
+        user_projects = Project.query.filter_by(owner_id=g.current_user.id).all()
+        return {
+            'error': f'Project "{project_name}" not found',
+            'available_projects': [p.name for p in user_projects]
+        }
+
+    # 检查权限 - 只能访问自己创建的项目
+    if project.owner_id != g.current_user.id:
+        current_app.logger.warning(f"[WAIT_FOR_NEW_TASKS_ACCESS_DENIED] {func_id} Access denied", extra={
+            'func_id': func_id,
+            'project_id': project.id,
+            'project_name': project.name,
+            'project_owner_id': project.owner_id,
+            'current_user_id': g.current_user.id
+        })
+        return {'error': 'Access denied: You can only access your own projects'}
+
+    # 记录开始时间戳，用于检测新任务
+    start_timestamp = datetime.utcnow()
+    end_time = time.time() + timeout_seconds
+    poll_count = 0
+
+    current_app.logger.info(f"[WAIT_FOR_NEW_TASKS_POLLING_START] {func_id} Starting polling loop", extra={
+        'func_id': func_id,
+        'project_id': project.id,
+        'project_name': project.name,
+        'start_timestamp': start_timestamp.isoformat(),
+        'timeout_seconds': timeout_seconds,
+        'poll_interval_seconds': poll_interval_seconds,
+        'end_time': datetime.fromtimestamp(end_time).isoformat()
+    })
+
+    try:
+        while time.time() < end_time:
+            poll_count += 1
+            poll_start_time = time.time()
+
+            current_app.logger.debug(f"[WAIT_FOR_NEW_TASKS_POLL] {func_id} Poll #{poll_count} started", extra={
+                'func_id': func_id,
+                'poll_count': poll_count,
+                'remaining_time': end_time - time.time(),
+                'timestamp': datetime.utcnow().isoformat()
+            })
+
+            # 查询在开始时间之后创建的待执行任务
+            new_tasks_query = Task.query.filter(
+                Task.project_id == project.id,
+                Task.created_at > start_timestamp,
+                Task.status.in_(['todo', 'in_progress', 'review'])
+            ).order_by(Task.created_at.asc())
+
+            new_tasks = new_tasks_query.all()
+            poll_duration = time.time() - poll_start_time
+
+            current_app.logger.debug(f"[WAIT_FOR_NEW_TASKS_POLL_RESULT] {func_id} Poll #{poll_count} completed", extra={
+                'func_id': func_id,
+                'poll_count': poll_count,
+                'poll_duration_ms': round(poll_duration * 1000, 2),
+                'new_tasks_count': len(new_tasks),
+                'new_task_ids': [task.id for task in new_tasks] if new_tasks else []
+            })
+
+            if new_tasks:
+                # 找到新任务，准备返回结果
+                tasks_data = []
+                for task in new_tasks:
+                    task_dict = task.to_dict()
+                    task_dict['project_name'] = project.name
+                    tasks_data.append(task_dict)
+
+                func_duration = time.time() - func_start_time
+
+                current_app.logger.info(f"[WAIT_FOR_NEW_TASKS_SUCCESS] {func_id} Found new tasks", extra={
+                    'func_id': func_id,
+                    'project_id': project.id,
+                    'project_name': project.name,
+                    'new_tasks_count': len(new_tasks),
+                    'poll_count': poll_count,
+                    'func_duration_ms': round(func_duration * 1000, 2),
+                    'task_ids': [task.id for task in new_tasks]
+                })
+
+                return {
+                    'project_name': project.name,
+                    'project_id': project.id,
+                    'new_tasks': tasks_data,
+                    'total_new_tasks': len(tasks_data),
+                    'poll_count': poll_count,
+                    'wait_duration_seconds': round(func_duration, 2),
+                    'timeout': False,
+                    'start_timestamp': start_timestamp.isoformat(),
+                    'found_timestamp': datetime.utcnow().isoformat()
+                }
+
+            # 没有找到新任务，检查是否还有时间继续轮询
+            remaining_time = end_time - time.time()
+            if remaining_time <= 0:
+                break
+
+            # 等待下一次轮询，但不超过剩余时间
+            sleep_time = min(poll_interval_seconds, remaining_time)
+            if sleep_time > 0:
+                current_app.logger.debug(f"[WAIT_FOR_NEW_TASKS_SLEEP] {func_id} Sleeping before next poll", extra={
+                    'func_id': func_id,
+                    'poll_count': poll_count,
+                    'sleep_time': sleep_time,
+                    'remaining_time': remaining_time
+                })
+                time.sleep(sleep_time)
+
+        # 超时，没有找到新任务
+        func_duration = time.time() - func_start_time
+
+        current_app.logger.info(f"[WAIT_FOR_NEW_TASKS_TIMEOUT] {func_id} Wait timed out", extra={
+            'func_id': func_id,
+            'project_id': project.id,
+            'project_name': project.name,
+            'poll_count': poll_count,
+            'func_duration_ms': round(func_duration * 1000, 2),
+            'timeout_seconds': timeout_seconds
+        })
+
+        return {
+            'project_name': project.name,
+            'project_id': project.id,
+            'new_tasks': [],
+            'total_new_tasks': 0,
+            'poll_count': poll_count,
+            'wait_duration_seconds': round(func_duration, 2),
+            'timeout': True,
+            'timeout_seconds': timeout_seconds,
+            'start_timestamp': start_timestamp.isoformat(),
+            'end_timestamp': datetime.utcnow().isoformat()
+        }
+
+    except Exception as e:
+        func_duration = time.time() - func_start_time
+        current_app.logger.error(f"[WAIT_FOR_NEW_TASKS_EXCEPTION] {func_id} Exception occurred", extra={
+            'func_id': func_id,
+            'project_id': project.id if 'project' in locals() and project else None,
+            'func_duration_ms': round(func_duration * 1000, 2),
+            'poll_count': poll_count,
+            'exception_type': type(e).__name__,
+            'exception_message': str(e)
+        }, exc_info=True)
+        return {'error': f'Failed to wait for new tasks: {str(e)}'}
+
+
+def update_task(arguments):
+    """更新现有任务"""
+    from flask import current_app
+    import requests
+
+    func_start_time = time.time()
+    func_id = f"update-task-{int(time.time() * 1000)}-{id(arguments)}"
+
+    current_app.logger.info(f"[UPDATE_TASK_START] {func_id} Function started", extra={
+        'func_id': func_id,
+        'arguments': arguments,
+        'user_id': g.current_user.id if hasattr(g, 'current_user') and g.current_user else None,
+        'timestamp': datetime.utcnow().isoformat()
+    })
+
+    task_id = arguments.get('task_id')
+
+    if not task_id:
+        current_app.logger.warning(f"[UPDATE_TASK_ERROR] {func_id} Missing required task_id")
+        return {'error': 'task_id is required'}
+
+    # 验证task_id是整数
+    try:
+        task_id = validate_integer(task_id, 'task_id')
+    except ValueError as e:
+        current_app.logger.warning(f"[UPDATE_TASK_ERROR] {func_id} Invalid task_id: {str(e)}")
+        return {'error': str(e)}
+
+    current_app.logger.debug(f"[UPDATE_TASK_ARGS] {func_id} Arguments parsed", extra={
+        'func_id': func_id,
+        'task_id': task_id,
+        'has_title': 'title' in arguments,
+        'has_content': 'content' in arguments,
+        'has_status': 'status' in arguments,
+        'has_priority': 'priority' in arguments,
+        'has_due_date': 'due_date' in arguments
+    })
+
+    # 构建更新数据
+    update_data = {}
+    
+    # 清理和验证输入
+    if 'title' in arguments and arguments['title']:
+        update_data['title'] = sanitize_input(arguments['title'])
+    
+    if 'content' in arguments and arguments['content'] is not None:
+        update_data['content'] = sanitize_input(arguments['content'])
+    
+    if 'status' in arguments and arguments['status']:
+        valid_statuses = ['todo', 'in_progress', 'review', 'done', 'cancelled']
+        status = arguments['status']
+        if status not in valid_statuses:
+            return {'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}
+        update_data['status'] = status
+    
+    if 'priority' in arguments and arguments['priority']:
+        valid_priorities = ['low', 'medium', 'high', 'urgent']
+        priority = arguments['priority']
+        if priority not in valid_priorities:
+            return {'error': f'Invalid priority. Must be one of: {", ".join(valid_priorities)}'}
+        update_data['priority'] = priority
+    
+    if 'due_date' in arguments and arguments['due_date']:
+        # 验证日期格式
+        try:
+            datetime.strptime(arguments['due_date'], '%Y-%m-%d')
+            update_data['due_date'] = arguments['due_date']
+        except ValueError:
+            return {'error': 'Invalid due_date format. Use YYYY-MM-DD'}
+    
+    if 'completion_rate' in arguments and arguments['completion_rate'] is not None:
+        try:
+            completion_rate = float(arguments['completion_rate'])
+            if completion_rate < 0 or completion_rate > 100:
+                return {'error': 'completion_rate must be between 0 and 100'}
+            update_data['completion_rate'] = completion_rate
+        except (ValueError, TypeError):
+            return {'error': 'completion_rate must be a valid number'}
+    
+    if 'tags' in arguments and arguments['tags'] is not None:
+        if isinstance(arguments['tags'], list):
+            update_data['tags'] = [sanitize_input(tag) for tag in arguments['tags'] if tag]
+        else:
+            return {'error': 'tags must be an array of strings'}
+
+    # 如果没有提供任何要更新的字段
+    if not update_data:
+        return {'error': 'At least one field must be provided for update'}
+
+    current_app.logger.debug(f"[UPDATE_TASK_DATA] {func_id} Update data prepared", extra={
+        'func_id': func_id,
+        'task_id': task_id,
+        'update_fields': list(update_data.keys()),
+        'update_data_size': len(str(update_data))
+    })
+
+    try:
+        # 直接调用后端 tasks API
+        # 构建内部 API 请求头，包含当前用户的认证信息
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': request.headers.get('Authorization')  # 传递原始的认证头
+        }
+        
+        # 获取当前应用的基础 URL
+        base_url = request.host_url.rstrip('/')
+        tasks_api_url = f"{base_url}/api/tasks/{task_id}"
+        
+        current_app.logger.debug(f"[UPDATE_TASK_API_CALL] {func_id} Calling tasks API", extra={
+            'func_id': func_id,
+            'api_url': tasks_api_url,
+            'headers': {k: v if k != 'Authorization' else 'Bearer ***' for k, v in headers.items()},
+            'update_data': update_data
+        })
+
+        api_call_start_time = time.time()
+        
+        # 调用内部 tasks API
+        response = requests.put(
+            tasks_api_url,
+            json=update_data,
+            headers=headers,
+            timeout=30
+        )
+        
+        api_call_duration = time.time() - api_call_start_time
+
+        current_app.logger.debug(f"[UPDATE_TASK_API_RESPONSE] {func_id} Tasks API response received", extra={
+            'func_id': func_id,
+            'api_call_duration_ms': round(api_call_duration * 1000, 2),
+            'status_code': response.status_code,
+            'has_response_data': bool(response.content)
+        })
+
+        if response.status_code == 200:
+            result = response.json()
+            
+            # 检查响应格式
+            if 'data' in result:
+                task_data = result['data']
+            else:
+                task_data = result
+            
+            func_duration = time.time() - func_start_time
+            
+            current_app.logger.info(f"[UPDATE_TASK_SUCCESS] {func_id} Task updated successfully", extra={
+                'func_id': func_id,
+                'task_id': task_id,
+                'func_duration_ms': round(func_duration * 1000, 2),
+                'updated_fields': list(update_data.keys()),
+                'task_title': task_data.get('title', 'Unknown')
+            })
+            
+            return task_data
+        else:
+            # API 调用失败
+            error_data = {}
+            try:
+                error_data = response.json()
+            except:
+                error_data = {'error': f'HTTP {response.status_code}: {response.text}'}
+            
+            current_app.logger.warning(f"[UPDATE_TASK_API_ERROR] {func_id} Tasks API returned error", extra={
+                'func_id': func_id,
+                'task_id': task_id,
+                'status_code': response.status_code,
+                'error_data': error_data
+            })
+            
+            return {'error': error_data.get('error', f'Failed to update task: HTTP {response.status_code}')}
+
+    except requests.RequestException as e:
+        func_duration = time.time() - func_start_time
+        current_app.logger.error(f"[UPDATE_TASK_REQUEST_ERROR] {func_id} Request exception occurred", extra={
+            'func_id': func_id,
+            'task_id': task_id,
+            'func_duration_ms': round(func_duration * 1000, 2),
+            'exception_type': type(e).__name__,
+            'exception_message': str(e)
+        }, exc_info=True)
+        return {'error': f'Failed to call tasks API: {str(e)}'}
+    
+    except Exception as e:
+        func_duration = time.time() - func_start_time
+        current_app.logger.error(f"[UPDATE_TASK_EXCEPTION] {func_id} Exception occurred", extra={
+            'func_id': func_id,
+            'task_id': task_id,
+            'func_duration_ms': round(func_duration * 1000, 2),
+            'exception_type': type(e).__name__,
+            'exception_message': str(e)
+        }, exc_info=True)
+        return {'error': f'Failed to update task: {str(e)}'}
+
+
+def wait_for_human_feedback(arguments):
+    """等待人工反馈 - 用于交互式任务"""
+    import time
+    from models import InteractionLog, InteractionType, InteractionStatus
+    from flask import current_app
+
+    func_start_time = time.time()
+    func_id = f"wait-for-human-feedback-{int(time.time() * 1000)}-{id(arguments)}"
+
+    current_app.logger.info(f"[WAIT_FOR_HUMAN_FEEDBACK_START] {func_id} Function started", extra={
+        'func_id': func_id,
+        'arguments': arguments,
+        'user_id': g.current_user.id if hasattr(g, 'current_user') and g.current_user else None,
+        'timestamp': datetime.utcnow().isoformat()
+    })
+
+    task_id = arguments.get('task_id')
+    session_id = arguments.get('session_id')
+    timeout_seconds = arguments.get('timeout_seconds', 3600)  # Default 1 hour
+    poll_interval_seconds = arguments.get('poll_interval_seconds', 30)  # Default 30 seconds
+
+    current_app.logger.debug(f"[WAIT_FOR_HUMAN_FEEDBACK_ARGS] {func_id} Arguments parsed", extra={
+        'func_id': func_id,
+        'task_id': task_id,
+        'session_id': session_id,
+        'timeout_seconds': timeout_seconds,
+        'poll_interval_seconds': poll_interval_seconds
+    })
+
+    if not all([task_id, session_id]):
+        current_app.logger.warning(f"[WAIT_FOR_HUMAN_FEEDBACK_ERROR] {func_id} Missing required arguments")
+        return {'error': 'task_id and session_id are required'}
+
+    # 验证输入
+    try:
+        task_id = validate_integer(task_id, 'task_id')
+        timeout_seconds = max(30, min(7200, int(timeout_seconds)))  # 30秒到2小时
+        poll_interval_seconds = max(10, min(300, int(poll_interval_seconds)))  # 10秒到5分钟
+    except (ValueError, TypeError) as e:
+        return {'error': f'Invalid input: {str(e)}'}
+
+    session_id = sanitize_input(session_id)
+
+    # 验证任务存在
+    task = Task.query.get(task_id)
+    if not task:
+        return {'error': f'Task with ID {task_id} not found'}
+
+    # 检查权限
+    if task.creator_id != g.current_user.id:
+        project = Project.query.get(task.project_id)
+        if not project or project.owner_id != g.current_user.id:
+            return {'error': 'Access denied: You can only access your own tasks'}
+
+    # 验证任务是交互式的且在等待反馈
+    if not task.is_interactive:
+        return {'error': 'Task is not interactive'}
+
+    if not task.ai_waiting_feedback:
+        return {'error': 'Task is not waiting for human feedback'}
+
+    if task.interaction_session_id != session_id:
+        return {'error': 'Invalid session ID'}
+
+    # 开始轮询等待人工反馈
+    end_time = time.time() + timeout_seconds
+    poll_count = 0
+
+    current_app.logger.info(f"[WAIT_FOR_HUMAN_FEEDBACK_POLLING_START] {func_id} Starting polling loop", extra={
+        'func_id': func_id,
+        'task_id': task_id,
+        'session_id': session_id,
+        'timeout_seconds': timeout_seconds,
+        'poll_interval_seconds': poll_interval_seconds
+    })
+
+    try:
+        while time.time() < end_time:
+            poll_count += 1
+            poll_start_time = time.time()
+
+            current_app.logger.debug(f"[WAIT_FOR_HUMAN_FEEDBACK_POLL] {func_id} Poll #{poll_count} started", extra={
+                'func_id': func_id,
+                'poll_count': poll_count,
+                'remaining_time': end_time - time.time()
+            })
+
+            # 刷新任务状态
+            db.session.refresh(task)
+
+            # 检查是否有新的人工响应
+            human_responses = InteractionLog.query.filter(
+                InteractionLog.session_id == session_id,
+                InteractionLog.interaction_type == InteractionType.HUMAN_RESPONSE,
+                InteractionLog.created_at > datetime.utcnow() - timedelta(seconds=timeout_seconds + 60)
+            ).order_by(InteractionLog.created_at.desc()).all()
+
+            poll_duration = time.time() - poll_start_time
+
+            current_app.logger.debug(f"[WAIT_FOR_HUMAN_FEEDBACK_POLL_RESULT] {func_id} Poll #{poll_count} completed", extra={
+                'func_id': func_id,
+                'poll_count': poll_count,
+                'poll_duration_ms': round(poll_duration * 1000, 2),
+                'human_responses_count': len(human_responses),
+                'ai_waiting_feedback': task.ai_waiting_feedback
+            })
+
+            # 如果任务不再等待反馈，说明有人工响应
+            if not task.ai_waiting_feedback or human_responses:
+                latest_response = human_responses[0] if human_responses else None
+
+                func_duration = time.time() - func_start_time
+
+                current_app.logger.info(f"[WAIT_FOR_HUMAN_FEEDBACK_SUCCESS] {func_id} Received human feedback", extra={
+                    'func_id': func_id,
+                    'task_id': task_id,
+                    'session_id': session_id,
+                    'poll_count': poll_count,
+                    'func_duration_ms': round(func_duration * 1000, 2),
+                    'response_status': latest_response.status.value if latest_response else 'unknown'
+                })
+
+                result = {
+                    'task_id': task_id,
+                    'session_id': session_id,
+                    'human_feedback_received': True,
+                    'poll_count': poll_count,
+                    'wait_duration_seconds': round(func_duration, 2),
+                    'timeout': False,
+                    'task_status': task.status.value if hasattr(task.status, 'value') else task.status,
+                    'ai_waiting_feedback': task.ai_waiting_feedback
+                }
+
+                if latest_response:
+                    result['human_response'] = {
+                        'content': latest_response.content,
+                        'status': latest_response.status.value if hasattr(latest_response.status, 'value') else latest_response.status,
+                        'created_at': latest_response.created_at.isoformat(),
+                        'created_by': latest_response.created_by
+                    }
+
+                    # 根据人工响应状态决定下一步行动
+                    if latest_response.status == InteractionStatus.COMPLETED:
+                        result['action'] = 'task_completed'
+                        result['message'] = 'Task has been marked as completed by human reviewer.'
+                    elif latest_response.status == InteractionStatus.CONTINUED:
+                        result['action'] = 'continue_task'
+                        result['message'] = 'Human has provided additional instructions. Continue working on the task.'
+                        result['additional_instructions'] = latest_response.content
+                    else:
+                        result['action'] = 'pending'
+                        result['message'] = 'Human response received but status is pending.'
+
+                return result
+
+            # 没有收到人工反馈，检查是否还有时间继续轮询
+            remaining_time = end_time - time.time()
+            if remaining_time <= 0:
+                break
+
+            # 等待下一次轮询
+            sleep_time = min(poll_interval_seconds, remaining_time)
+            if sleep_time > 0:
+                current_app.logger.debug(f"[WAIT_FOR_HUMAN_FEEDBACK_SLEEP] {func_id} Sleeping before next poll", extra={
+                    'func_id': func_id,
+                    'poll_count': poll_count,
+                    'sleep_time': sleep_time,
+                    'remaining_time': remaining_time
+                })
+                time.sleep(sleep_time)
+
+        # 超时，没有收到人工反馈
+        func_duration = time.time() - func_start_time
+
+        current_app.logger.info(f"[WAIT_FOR_HUMAN_FEEDBACK_TIMEOUT] {func_id} Wait timed out", extra={
+            'func_id': func_id,
+            'task_id': task_id,
+            'session_id': session_id,
+            'poll_count': poll_count,
+            'func_duration_ms': round(func_duration * 1000, 2),
+            'timeout_seconds': timeout_seconds
+        })
+
+        return {
+            'task_id': task_id,
+            'session_id': session_id,
+            'human_feedback_received': False,
+            'poll_count': poll_count,
+            'wait_duration_seconds': round(func_duration, 2),
+            'timeout': True,
+            'timeout_seconds': timeout_seconds,
+            'task_status': task.status.value if hasattr(task.status, 'value') else task.status,
+            'ai_waiting_feedback': task.ai_waiting_feedback,
+            'message': 'Timeout waiting for human feedback. Task remains in waiting state.'
+        }
+
+    except Exception as e:
+        func_duration = time.time() - func_start_time
+        current_app.logger.error(f"[WAIT_FOR_HUMAN_FEEDBACK_EXCEPTION] {func_id} Exception occurred", extra={
+            'func_id': func_id,
+            'task_id': task_id,
+            'session_id': session_id,
+            'func_duration_ms': round(func_duration * 1000, 2),
+            'poll_count': poll_count,
+            'exception_type': type(e).__name__,
+            'exception_message': str(e)
+        }, exc_info=True)
+        return {'error': f'Failed to wait for human feedback: {str(e)}'}

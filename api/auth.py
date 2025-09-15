@@ -30,9 +30,10 @@ def github_login():
         # 获取重定向URL - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
         if is_docker:
-            # 生产环境使用域名
-            default_redirect_uri = 'https://todo4ai.org/todo-for-ai/api/v1/auth/callback'
-            frontend_base = 'https://todo4ai.org'
+            # 生产环境使用环境变量配置的域名，默认为SaaS域名
+            base_url = os.environ.get('BASE_URL', 'https://todo4ai.org')
+            default_redirect_uri = f'{base_url}/todo-for-ai/api/v1/auth/callback'
+            frontend_base = base_url
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/callback'
@@ -74,9 +75,10 @@ def google_login():
         # 获取重定向URL - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
         if is_docker:
-            # 生产环境使用域名
-            default_redirect_uri = 'https://todo4ai.org/todo-for-ai/api/v1/auth/google/callback'
-            frontend_base = 'https://todo4ai.org'
+            # 生产环境使用环境变量配置的域名，默认为SaaS域名
+            base_url = os.environ.get('BASE_URL', 'https://todo4ai.org')
+            default_redirect_uri = f'{base_url}/todo-for-ai/api/v1/auth/google/callback'
+            frontend_base = base_url
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/google/callback'
@@ -121,11 +123,34 @@ def callback():
 def github_callback():
     """GitHub OAuth回调处理"""
     try:
-        # 获取授权码并交换令牌
-        token = github_service.oauth.github.authorize_access_token()
+        # 手动处理OAuth回调，避免state验证问题
+        code = request.args.get('code')
+        if not code:
+            return ApiResponse.error("Authorization code not found", 400).to_response()
 
-        if not token:
-            return ApiResponse.error("Failed to get access token from GitHub", 400).to_response()
+        # 直接使用code交换token，跳过Authlib的state验证
+        import requests
+        token_data = {
+            'client_id': github_service.config.client_id,
+            'client_secret': github_service.config.client_secret,
+            'code': code
+        }
+
+        token_response = requests.post(
+            'https://github.com/login/oauth/access_token',
+            data=token_data,
+            headers={'Accept': 'application/json'},
+            timeout=180
+        )
+
+        if token_response.status_code != 200:
+            return ApiResponse.error("Failed to exchange code for token", 400).to_response()
+
+        token_json = token_response.json()
+        if 'access_token' not in token_json:
+            return ApiResponse.error("Access token not found in response", 400).to_response()
+
+        token = {'access_token': token_json['access_token']}
 
         # 获取用户信息
         user_info = github_service.get_user_info(token['access_token'])
@@ -144,7 +169,11 @@ def github_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
+        if is_docker:
+            base_url = os.environ.get('BASE_URL', 'https://todo4ai.org')
+            default_dashboard = f'{base_url}/todo-for-ai/pages/dashboard'
+        else:
+            default_dashboard = 'http://localhost:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
@@ -188,7 +217,11 @@ def google_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
+        if is_docker:
+            base_url = os.environ.get('BASE_URL', 'https://todo4ai.org')
+            default_dashboard = f'{base_url}/todo-for-ai/pages/dashboard'
+        else:
+            default_dashboard = 'http://localhost:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）

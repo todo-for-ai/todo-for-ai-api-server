@@ -36,10 +36,6 @@ def create_app(config_name=None):
     # 初始化扩展
     db.init_app(app)
 
-    # 初始化Session存储 (解决OAuth state不匹配问题)
-    session_dir = app.config.get('SESSION_FILE_DIR', '/tmp/flask-sessions')
-    os.makedirs(session_dir, exist_ok=True)
-
     # 初始化CORS（开发环境必需，生产环境可选）
     CORS(app,
          origins=app.config['CORS_ORIGINS'],
@@ -145,6 +141,7 @@ def register_blueprints(app):
     from api.user_settings import user_settings_bp
     from api.api_tokens import api_tokens_bp
     from api.custom_prompts import custom_prompts_bp
+    from api.interactive_tasks import interactive_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -158,6 +155,7 @@ def register_blueprints(app):
     app.register_blueprint(user_settings_bp, url_prefix='/todo-for-ai/api/v1/user-settings')
     app.register_blueprint(api_tokens_bp, url_prefix='/todo-for-ai/api/v1/api-tokens')
     app.register_blueprint(custom_prompts_bp, url_prefix='/todo-for-ai/api/v1/custom-prompts')
+    app.register_blueprint(interactive_bp, url_prefix='/todo-for-ai/api/v1/interactive')
 
 
 

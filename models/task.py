@@ -16,6 +16,7 @@ class TaskStatus(enum.Enum):
     REVIEW = 'review'
     DONE = 'done'
     CANCELLED = 'cancelled'
+    WAITING_HUMAN_FEEDBACK = 'waiting_human_feedback'
 
 
 class TaskPriority(enum.Enum):
@@ -68,6 +69,11 @@ class Task(BaseModel):
     creator_identifier = Column(String(100), comment='创建者标识符 (AI的标识或用户ID)')
     feedback_content = Column(Text, comment='任务反馈内容')
     feedback_at = Column(DateTime, comment='反馈时间')
+
+    # 交互式任务相关字段
+    is_interactive = Column(Boolean, default=False, comment='是否为交互式任务')
+    ai_waiting_feedback = Column(Boolean, default=False, comment='AI是否正在等待人工反馈')
+    interaction_session_id = Column(String(100), comment='交互会话ID，用于标识一次交互流程')
     
     # 关系
     project = relationship('Project', back_populates='tasks')
@@ -81,6 +87,12 @@ class Task(BaseModel):
     )
     attachments = relationship(
         'Attachment',
+        back_populates='task',
+        cascade='all, delete-orphan',
+        lazy='dynamic'
+    )
+    interaction_logs = relationship(
+        'InteractionLog',
         back_populates='task',
         cascade='all, delete-orphan',
         lazy='dynamic'

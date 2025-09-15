@@ -55,9 +55,9 @@ class GoogleService:
             }
             
             user_response = requests.get(
-                'https://www.googleapis.com/oauth2/v2/userinfo', 
-                headers=headers, 
-                timeout=10
+                'https://www.googleapis.com/oauth2/v2/userinfo',
+                headers=headers,
+                timeout=180
             )
             user_response.raise_for_status()
             user_data = user_response.json()

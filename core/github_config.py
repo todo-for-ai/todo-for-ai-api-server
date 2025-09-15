@@ -78,12 +78,12 @@ class GitHubService:
                 'Accept': 'application/vnd.github.v3+json'
             }
             
-            user_response = requests.get('https://api.github.com/user', headers=headers, timeout=10)
+            user_response = requests.get('https://api.github.com/user', headers=headers, timeout=180)
             user_response.raise_for_status()
             user_data = user_response.json()
             
             if not user_data.get('email'):
-                email_response = requests.get('https://api.github.com/user/emails', headers=headers, timeout=10)
+                email_response = requests.get('https://api.github.com/user/emails', headers=headers, timeout=180)
                 if email_response.status_code == 200:
                     emails = email_response.json()
                     primary_email = next((email['email'] for email in emails if email['primary']), None)

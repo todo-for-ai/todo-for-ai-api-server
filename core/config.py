@@ -53,11 +53,13 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
 
     # Session 配置 (解决OAuth state不匹配问题)
-    SESSION_TYPE = 'filesystem'
+    SESSION_TYPE = 'null'  # 使用默认的secure cookie session
     SESSION_PERMANENT = False
     SESSION_USE_SIGNER = True
     SESSION_KEY_PREFIX = 'todo-for-ai:'
-    SESSION_FILE_DIR = '/tmp/flask-sessions'
+    SESSION_COOKIE_SECURE = False  # HTTP环境下设为False
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
 
     
     # 数据库配置
