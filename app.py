@@ -13,6 +13,10 @@ import os
 from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_migrate import Migrate
+from dotenv import load_dotenv
+
+# 加载.env文件
+load_dotenv()
 
 # 导入模型和配置
 from models import db
@@ -57,8 +61,8 @@ def create_app(config_name=None):
     # 数据库迁移
     migrate = Migrate(app, db)
 
-    # 设置中间件
-    setup_all_middleware(app)
+    # 设置中间件（临时注释）
+    # setup_all_middleware(app)
 
     # 注册蓝图
     register_blueprints(app)
@@ -128,34 +132,12 @@ def register_blueprints(app):
             message='API service is healthy'
         ).to_response()
     
-    # 注册API蓝图
+    # 注册API蓝图 - 只注册auth蓝图用于游客登录
     from api.auth import auth_bp
-    from api.projects import projects_bp
-    from api.tasks import tasks_bp
-    from api.context_rules import context_rules_bp
-    from api.tokens import tokens_bp
-    from api.mcp import mcp_bp
-    from api.docs import docs_bp
-    from api.pins import pins_bp
-    from api.dashboard import dashboard_bp
-    from api.user_settings import user_settings_bp
-    from api.api_tokens import api_tokens_bp
-    from api.custom_prompts import custom_prompts_bp
-    from api.interactive_tasks import interactive_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
-    app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
-    app.register_blueprint(tasks_bp, url_prefix='/todo-for-ai/api/v1/tasks')
-    app.register_blueprint(context_rules_bp, url_prefix='/todo-for-ai/api/v1/context-rules')
-    app.register_blueprint(tokens_bp, url_prefix='/todo-for-ai/api/v1/tokens')
-    app.register_blueprint(mcp_bp, url_prefix='/todo-for-ai/api/v1/mcp')
-    app.register_blueprint(docs_bp, url_prefix='/todo-for-ai/api/v1/docs')
-    app.register_blueprint(pins_bp, url_prefix='/todo-for-ai/api/v1/pins')
-    app.register_blueprint(dashboard_bp, url_prefix='/todo-for-ai/api/v1/dashboard')
-    app.register_blueprint(user_settings_bp, url_prefix='/todo-for-ai/api/v1/user-settings')
-    app.register_blueprint(api_tokens_bp, url_prefix='/todo-for-ai/api/v1/api-tokens')
-    app.register_blueprint(custom_prompts_bp, url_prefix='/todo-for-ai/api/v1/custom-prompts')
-    app.register_blueprint(interactive_bp, url_prefix='/todo-for-ai/api/v1/interactive')
+
+    app.logger.info("Registered auth blueprint only (minimal configuration for guest login)")
 
 
 

@@ -1,3 +1,6 @@
+# ====================================
+# Python
+# ====================================
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -101,14 +104,20 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# ====================================
 # Environments
+# ====================================
 .env
+.env.local
+.env.production
+.env.development
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+environment.yml.lock
 
 # Spyder project settings
 .spyderproject
@@ -128,31 +137,94 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# IDE
+# ====================================
+# IDE / Editor
+# ====================================
 .vscode/
+.vscode-test/
 .idea/
 *.swp
 *.swo
+*~
+*.code-workspace
 
+# ====================================
 # OS
+# ====================================
+# macOS
 .DS_Store
-Thumbs.db
+.DS_Store?
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
 
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+ehthumbs.db
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ====================================
 # Database
+# ====================================
 *.db
 *.sqlite
 *.sqlite3
+*.db-shm
+*.db-wal
 
+# ====================================
 # Logs
+# ====================================
 logs/
 *.log
+mcp_manager.log
+app.log
 
+# ====================================
 # Temporary files
+# ====================================
 tmp/
 temp/
 .tmp/
 
+# ====================================
 # Application specific
+# ====================================
+# Uploads directory (user generated content)
 uploads/
 static/uploads/
 media/
+
+# Migration backups
+migrations/backup/
+migrations/*.bak
+
+# Test/debug scripts
+test_*.py
+*_test.py
+check_*.py
+debug_*.py
+
+# Generated tokens
+*.token
+tokens/
+
+# SSL/TLS certificates
+*.pem
+*.key
+*.crt
+*.cert
+
+# Backup files
+*.sql
+*.backup
+*.bak
+backup/

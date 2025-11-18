@@ -68,3 +68,7 @@ class BaseModel(db.Model):
     
     def __repr__(self):
         return f'<{self.__class__.__name__} {self.id}>'
+
+
+# 为了兼容性，创建Base别名
+Base = BaseModel
