@@ -187,6 +187,44 @@ def google_callback():
         return handle_api_error(e)
 
 
+@auth_bp.route('/login/guest', methods=['POST'])
+def guest_login():
+    """游客模式登录 - 使用固定的游客账号"""
+    try:
+        # 固定的游客账号信息
+        guest_email = 'guest@todo4ai.org'
+        guest_username = 'guest'
+        
+        # 查找或创建游客账号
+        user = User.query.filter_by(email=guest_email).first()
+        
+        if not user:
+            # 创建游客账号
+            user = User(
+                email=guest_email,
+                username=guest_username,
+                full_name='Guest User',
+                auth_provider='guest',
+                avatar='https://api.dicebear.com/7.x/avataaars/svg?seed=guest',
+                status='ACTIVE',
+                role='USER'
+            )
+            db.session.add(user)
+            db.session.commit()
+        
+        # 生成JWT令牌
+        access_token = github_service.generate_tokens(user)
+        
+        return api_response({
+            'access_token': access_token,
+            'token_type': 'Bearer',
+            'user': user.to_dict()
+        }, "Guest login successful")
+        
+    except Exception as e:
+        return handle_api_error(e)
+
+
 
 @auth_bp.route('/logout', methods=['POST'])
 @require_auth

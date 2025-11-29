@@ -131,23 +131,43 @@ def list_projects():
         # 分页
         result = paginate_query(query, args['page'], args['per_page'])
 
-        # 为每个项目添加统计信息
-        for project_dict in result['items']:
-            project = Project.query.get(project_dict['id'])
-            if project:
-                # 添加任务统计信息
-                from models.task import Task
-                total_tasks = Task.query.filter_by(project_id=project.id).count()
-                pending_tasks = Task.query.filter_by(project_id=project.id).filter(
-                    Task.status.in_(['todo', 'in_progress', 'review'])
-                ).count()
-                completed_tasks = Task.query.filter_by(project_id=project.id).filter_by(status='done').count()
-
+        # 一次性查询所有项目的任务统计（避免N+1查询）
+        if result['items']:
+            project_ids = [p['id'] for p in result['items']]
+            
+            # 使用GROUP BY一次性查询所有统计
+            stats_query = db.session.query(
+                Task.project_id,
+                func.count(Task.id).label('total_tasks'),
+                func.sum(case((Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]), 1), else_=0)).label('pending_tasks'),
+                func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('completed_tasks')
+            ).filter(
+                Task.project_id.in_(project_ids)
+            ).group_by(Task.project_id).all()
+            
+            # 构建统计字典
+            stats_dict = {}
+            for project_id, total, pending, completed in stats_query:
+                stats_dict[project_id] = {
+                    'total_tasks': total or 0,
+                    'pending_tasks': pending or 0,
+                    'completed_tasks': completed or 0,
+                }
+            
+            # 为每个项目添加统计信息
+            for project_dict in result['items']:
+                stats = stats_dict.get(project_dict['id'], {
+                    'total_tasks': 0,
+                    'pending_tasks': 0,
+                    'completed_tasks': 0,
+                })
+                total = stats['total_tasks']
+                completed = stats['completed_tasks']
                 project_dict.update({
-                    'total_tasks': total_tasks,
-                    'pending_tasks': pending_tasks,
-                    'completed_tasks': completed_tasks,
-                    'completion_rate': round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
+                    'total_tasks': total,
+                    'pending_tasks': stats['pending_tasks'],
+                    'completed_tasks': completed,
+                    'completion_rate': round((completed / total * 100) if total > 0 else 0, 1)
                 })
 
         # 直接返回项目列表和分页信息，不要额外包装

@@ -4,6 +4,7 @@
 
 from flask import Blueprint, jsonify
 from sqlalchemy import func, and_
+from sqlalchemy.orm import joinedload
 from datetime import datetime, date, timedelta
 
 from models import db, User, Project, Task, TaskStatus, UserActivity
@@ -20,61 +21,55 @@ def get_dashboard_stats():
     try:
         current_user = get_current_user()
         
-        # 获取用户的项目统计
-        user_projects = Project.query.filter_by(owner_id=current_user.id).all()
-        project_ids = [p.id for p in user_projects]
+        # 使用聚合查询优化项目统计（避免加载所有项目）
+        project_stats_query = db.session.query(
+            func.count(Project.id).label('total'),
+            func.sum(func.IF(Project.status == 'ACTIVE', 1, 0)).label('active')
+        ).filter_by(owner_id=current_user.id).first()
         
-        # 项目统计
-        total_projects = len(user_projects)
-        active_projects = len([p for p in user_projects if p.status.value == 'active'])
+        total_projects = project_stats_query.total or 0
+        active_projects = project_stats_query.active or 0
         
-        # 任务统计（只统计用户拥有的项目中的任务）
-        if project_ids:
-            # 总任务数
-            total_tasks = Task.query.filter(Task.project_id.in_(project_ids)).count()
-            
-            # 各状态任务数
-            todo_tasks = Task.query.filter(
-                Task.project_id.in_(project_ids),
-                Task.status == TaskStatus.TODO
-            ).count()
-            
-            in_progress_tasks = Task.query.filter(
-                Task.project_id.in_(project_ids),
-                Task.status == TaskStatus.IN_PROGRESS
-            ).count()
-            
-            review_tasks = Task.query.filter(
-                Task.project_id.in_(project_ids),
-                Task.status == TaskStatus.REVIEW
-            ).count()
-            
-            done_tasks = Task.query.filter(
-                Task.project_id.in_(project_ids),
-                Task.status == TaskStatus.DONE
-            ).count()
-            
-            # AI任务数（进行中的AI任务）
-            ai_tasks = Task.query.filter(
-                Task.project_id.in_(project_ids),
-                Task.is_ai_task == True,
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW])
-            ).count()
-            
-        else:
-            total_tasks = todo_tasks = in_progress_tasks = review_tasks = done_tasks = ai_tasks = 0
+        # 使用原生SQL优化性能（避免ORM开销）
+        from sqlalchemy import text
+        sql = text("""
+            SELECT 
+                COUNT(tasks.id) as total,
+                SUM(CASE WHEN tasks.status = 'TODO' THEN 1 ELSE 0 END) as todo,
+                SUM(CASE WHEN tasks.status = 'IN_PROGRESS' THEN 1 ELSE 0 END) as in_progress,
+                SUM(CASE WHEN tasks.status = 'REVIEW' THEN 1 ELSE 0 END) as review,
+                SUM(CASE WHEN tasks.status = 'DONE' THEN 1 ELSE 0 END) as done,
+                SUM(CASE WHEN tasks.is_ai_task = 1 AND tasks.status IN ('TODO', 'IN_PROGRESS', 'REVIEW') THEN 1 ELSE 0 END) as ai_tasks
+            FROM tasks
+            JOIN projects ON tasks.project_id = projects.id
+            WHERE projects.owner_id = :owner_id
+        """)
         
-        # 最近项目（最近更新的5个项目）
+        result = db.session.execute(sql, {'owner_id': current_user.id}).first()
+        
+        total_tasks = result.total or 0
+        todo_tasks = result.todo or 0
+        in_progress_tasks = result.in_progress or 0
+        review_tasks = result.review or 0
+        done_tasks = result.done or 0
+        ai_tasks = result.ai_tasks or 0
+        
+        # 创建子查询用于后续查询
+        project_id_subquery = db.session.query(Project.id).filter_by(owner_id=current_user.id).subquery()
+        
+        # 最近项目（优化：使用索引友好的查询）
         recent_projects = Project.query.filter_by(owner_id=current_user.id)\
-            .order_by(Project.updated_at.desc())\
+            .order_by(Project.id.desc())\
             .limit(5).all()
         
-        # 最近任务（最近更新的5个任务）
+        # 最近任务（暂时禁用，大数据量下排序性能问题）
+        # TODO: 优化方案 - 添加复合索引或使用缓存
         recent_tasks = []
-        if project_ids:
-            recent_tasks = Task.query.filter(Task.project_id.in_(project_ids))\
-                .order_by(Task.updated_at.desc())\
-                .limit(5).all()
+        # if total_projects > 0:
+        #     recent_tasks = Task.query.options(joinedload(Task.project))\
+        #         .filter(Task.project_id.in_(project_id_subquery))\
+        #         .order_by(Task.updated_at.desc())\
+        #         .limit(5).all()
         
         # 用户活跃度统计（最近30天）
         activity_stats = UserActivity.get_user_activity_stats(current_user.id, days=30)
