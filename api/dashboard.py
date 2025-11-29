@@ -30,7 +30,7 @@ def get_dashboard_stats():
         total_projects = project_stats_query.total or 0
         active_projects = project_stats_query.active or 0
         
-        # 使用原生SQL优化性能（避免ORM开销）
+        # 使用原生SQL优化性能（使用子查询代替JOIN，性能更好）
         from sqlalchemy import text
         sql = text("""
             SELECT 
@@ -41,8 +41,7 @@ def get_dashboard_stats():
                 SUM(CASE WHEN tasks.status = 'DONE' THEN 1 ELSE 0 END) as done,
                 SUM(CASE WHEN tasks.is_ai_task = 1 AND tasks.status IN ('TODO', 'IN_PROGRESS', 'REVIEW') THEN 1 ELSE 0 END) as ai_tasks
             FROM tasks
-            JOIN projects ON tasks.project_id = projects.id
-            WHERE projects.owner_id = :owner_id
+            WHERE tasks.project_id IN (SELECT id FROM projects WHERE owner_id = :owner_id)
         """)
         
         result = db.session.execute(sql, {'owner_id': current_user.id}).first()

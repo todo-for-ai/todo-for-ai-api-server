@@ -6,6 +6,7 @@
 
 from datetime import datetime
 from flask import Blueprint, request
+from sqlalchemy.orm import joinedload
 from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
 from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args
 from core.auth import optional_token_auth
@@ -23,17 +24,37 @@ def list_tasks():
         args = get_request_args()
         current_user = get_current_user()
 
-        # 构建查询
-        query = Task.query
-
         # 用户权限控制
-        if current_user:
-            if not current_user.is_admin():
-                # 普通用户只能看到自己相关的任务
-                query = query.join(Project).filter(Project.owner_id == current_user.id)
-        else:
-            # 未登录用户不能访问任务列表
+        if not current_user:
             return api_error("Authentication required", 401)
+        
+        # 性能优化：先获取项目ID列表，避免JOIN带来的性能问题
+        if not current_user.is_admin():
+            from sqlalchemy import text
+            # 使用原生SQL获取用户的项目ID（更高效）
+            project_ids_sql = text("SELECT id FROM projects WHERE owner_id = :owner_id")
+            project_ids = [row[0] for row in db.session.execute(project_ids_sql, {'owner_id': current_user.id}).fetchall()]
+            
+            if not project_ids:
+                # 用户没有项目，返回空列表
+                return api_response({
+                    'items': [],
+                    'pagination': {
+                        'page': args['page'],
+                        'per_page': args['per_page'],
+                        'has_prev': False,
+                        'has_next': False,
+                        'prev_num': None,
+                        'next_num': None
+                    }
+                }, "Tasks retrieved successfully")
+            
+            # 构建查询（预加载项目信息）
+            query = Task.query.options(joinedload(Task.project))\
+                .filter(Task.project_id.in_(project_ids))
+        else:
+            # 管理员可以看所有任务
+            query = Task.query.options(joinedload(Task.project))
         
         # 项目筛选
         if args['project_id']:
@@ -73,7 +94,7 @@ def list_tasks():
                 Task.content.like(search_term)
             )
         
-        # 排序
+        # 排序（性能优化：默认使用id降序，因为id是主键排序更快）
         if args['sort_by'] == 'title':
             order_column = Task.title
         elif args['sort_by'] == 'priority':
@@ -84,27 +105,44 @@ def list_tasks():
             order_column = Task.due_date
         elif args['sort_by'] == 'updated_at':
             order_column = Task.updated_at
-        else:
+        elif args['sort_by'] == 'created_at':
             order_column = Task.created_at
+        else:
+            # 默认使用id降序（性能最佳）
+            order_column = Task.id
         
         if args['sort_order'] == 'desc':
             query = query.order_by(order_column.desc())
         else:
             query = query.order_by(order_column.asc())
         
-        # 分页
-        result = paginate_query(query, args['page'], args['per_page'])
+        # 执行分页查询（避免慢COUNT查询）
+        page = args['page']
+        per_page = min(args['per_page'], 100)
+        offset = (page - 1) * per_page
         
-        # 包含项目信息
-        for item in result['items']:
-            if 'project_id' in item:
-                project = Project.query.get(item['project_id'])
-                if project:
-                    item['project'] = {
-                        'id': project.id,
-                        'name': project.name,
-                        'color': project.color
-                    }
+        # 获取数据（使用LIMIT/OFFSET，不执行COUNT）
+        tasks = query.limit(per_page + 1).offset(offset).all()
+        
+        # 判断是否有下一页
+        has_next = len(tasks) > per_page
+        if has_next:
+            tasks = tasks[:per_page]
+        
+        # 手动序列化，包含预加载的项目信息（避免N+1查询）
+        items = [task.to_dict(include_project=True) for task in tasks]
+        
+        result = {
+            'items': items,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'has_prev': page > 1,
+                'has_next': has_next,
+                'prev_num': page - 1 if page > 1 else None,
+                'next_num': page + 1 if has_next else None
+            }
+        }
         
         return api_response(result, "Tasks retrieved successfully")
         
