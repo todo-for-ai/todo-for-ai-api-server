@@ -6,12 +6,18 @@ from flask import Blueprint, jsonify
 from sqlalchemy import func, and_
 from sqlalchemy.orm import joinedload
 from datetime import datetime, date, timedelta
+from functools import wraps
+import time
 
 from models import db, User, Project, Task, TaskStatus, UserActivity
 from .auth import require_auth, get_current_user
 from .base import api_response, api_error
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/dashboard')
+
+# 简单的内存缓存（用户ID -> (数据, 过期时间)）
+_dashboard_cache = {}
+_CACHE_TTL = 300  # 5分钟缓存
 
 
 @dashboard_bp.route('/stats', methods=['GET'])
@@ -20,6 +26,15 @@ def get_dashboard_stats():
     """获取仪表盘统计数据（用户隔离）"""
     try:
         current_user = get_current_user()
+        current_time = time.time()
+        
+        # 检查缓存
+        cache_key = f"dashboard_stats_{current_user.id}"
+        if cache_key in _dashboard_cache:
+            cached_data, expire_time = _dashboard_cache[cache_key]
+            if current_time < expire_time:
+                # 缓存未过期，直接返回
+                return api_response(cached_data, "Dashboard stats retrieved from cache")
         
         # 使用聚合查询优化项目统计（避免加载所有项目）
         project_stats_query = db.session.query(
@@ -73,7 +88,8 @@ def get_dashboard_stats():
         # 用户活跃度统计（最近30天）
         activity_stats = UserActivity.get_user_activity_stats(current_user.id, days=30)
         
-        return api_response({
+        # 构建响应数据
+        response_data = {
             'projects': {
                 'total': total_projects,
                 'active': active_projects,
@@ -89,7 +105,17 @@ def get_dashboard_stats():
             'recent_projects': [p.to_dict() for p in recent_projects],
             'recent_tasks': [t.to_dict(include_project=True) for t in recent_tasks],
             'activity_stats': activity_stats,
-        })
+        }
+        
+        # 更新缓存
+        _dashboard_cache[cache_key] = (response_data, current_time + _CACHE_TTL)
+        
+        # 清理过期缓存（保持缓存字典不会无限增长）
+        expired_keys = [k for k, (_, exp_time) in _dashboard_cache.items() if current_time > exp_time]
+        for k in expired_keys:
+            del _dashboard_cache[k]
+        
+        return api_response(response_data, "Dashboard stats retrieved successfully")
         
     except Exception as e:
         return api_error(f"Failed to get dashboard stats: {str(e)}", 500)
