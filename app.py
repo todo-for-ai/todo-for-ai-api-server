@@ -63,6 +63,10 @@ def create_app(config_name=None):
 
     # 设置中间件
     setup_all_middleware(app)
+    
+    # 启用JWT自动续期
+    from core.jwt_refresh import setup_jwt_refresh
+    setup_jwt_refresh(app)
 
     # 注册蓝图
     register_blueprints(app)

@@ -84,7 +84,9 @@ class Config:
 
     # JWT 配置
     JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or SECRET_KEY
-    JWT_ACCESS_TOKEN_EXPIRES = 3600  # 1 hour
+    # 注意：JWT过期时间在 core/github_config.py 中设置为 timedelta(hours=24)
+    # 这里的配置会被 github_config.py 覆盖，保持此处配置作为备用
+    JWT_ACCESS_TOKEN_EXPIRES = 86400  # 24 hours (in seconds)
     JWT_REFRESH_TOKEN_EXPIRES = 2592000  # 30 days
 
 

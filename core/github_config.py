@@ -50,7 +50,14 @@ class GitHubService:
         # 初始化 JWT
         self.jwt_manager = JWTManager(app)
         app.config['JWT_SECRET_KEY'] = os.environ.get('JWT_SECRET_KEY', 'your-secret-key')
-        app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
+        
+        # JWT Token过期时间配置
+        # 建议：生产环境设置为7天，开发环境可以设置为24小时
+        jwt_expires_hours = int(os.environ.get('JWT_EXPIRES_HOURS', '168'))  # 默认7天
+        app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=jwt_expires_hours)
+        
+        # 启用自动Token刷新（当Token剩余时间少于1/3时返回新Token）
+        app.config['JWT_REFRESH_TOKEN_AUTO'] = True
         
         self._register_jwt_handlers()
     
