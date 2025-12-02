@@ -55,17 +55,33 @@ class GitHubService:
         self._register_jwt_handlers()
     
     def _register_jwt_handlers(self):
+        """注册JWT错误处理器，使用统一的API错误响应格式"""
+        from api.base import api_error
+        
         @self.jwt_manager.expired_token_loader
         def expired_token_callback(jwt_header, jwt_payload):
-            return jsonify({'error': 'token_expired'}), 401
+            return api_error(
+                message="登录会话已过期，请重新登录",
+                status_code=401,
+                error_code="TOKEN_EXPIRED"
+            )
         
         @self.jwt_manager.invalid_token_loader
         def invalid_token_callback(error):
-            return jsonify({'error': 'invalid_token'}), 401
+            return api_error(
+                message="无效的认证令牌",
+                status_code=401,
+                error_code="INVALID_TOKEN",
+                details=str(error)
+            )
         
         @self.jwt_manager.unauthorized_loader
         def missing_token_callback(error):
-            return jsonify({'error': 'authorization_required'}), 401
+            return api_error(
+                message="缺少认证令牌，请先登录",
+                status_code=401,
+                error_code="AUTHORIZATION_REQUIRED"
+            )
     
     def get_user_info(self, access_token):
         try:
