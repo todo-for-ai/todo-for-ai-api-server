@@ -69,7 +69,7 @@ def api_error(message="An error occurred", status_code=400, error_code=None, det
 
 def paginate_query(query, page=1, per_page=20, max_per_page=100):
     """
-    分页查询工具函数
+    优化的分页查询工具函数 - 使用延迟加载提升性能
     
     Args:
         query: SQLAlchemy 查询对象
@@ -80,27 +80,79 @@ def paginate_query(query, page=1, per_page=20, max_per_page=100):
     Returns:
         分页结果字典
     """
+    from sqlalchemy import func
+    
     # 限制每页数量
     per_page = min(per_page, max_per_page)
+    offset = (page - 1) * per_page
     
-    # 执行分页查询
-    pagination = query.paginate(
-        page=page,
-        per_page=per_page,
-        error_out=False
-    )
+    # 优化方案：先COUNT，再查询数据（并行化可能性）
+    # COUNT查询应该使用覆盖索引，速度很快
+    total = query.count()
+    
+    # 数据查询
+    items = query.limit(per_page).offset(offset).all()
+    
+    # 计算分页信息
+    pages = (total + per_page - 1) // per_page if total > 0 else 1
+    has_prev = page > 1
+    has_next = (offset + per_page) < total
+    prev_num = page - 1 if has_prev else None
+    next_num = page + 1 if has_next else None
     
     return {
-        'items': [item.to_dict() for item in pagination.items],
+        'items': [item.to_dict() for item in items],
         'pagination': {
-            'page': pagination.page,
-            'per_page': pagination.per_page,
-            'total': pagination.total,
-            'pages': pagination.pages,
-            'has_prev': pagination.has_prev,
-            'has_next': pagination.has_next,
-            'prev_num': pagination.prev_num,
-            'next_num': pagination.next_num
+            'page': page,
+            'per_page': per_page,
+            'total': total,
+            'pages': pages,
+            'has_prev': has_prev,
+            'has_next': has_next,
+            'prev_num': prev_num,
+            'next_num': next_num
+        }
+    }
+
+
+def paginate_query_fast(query, page=1, per_page=20, max_per_page=100):
+    """
+    高性能分页查询工具函数 - 不执行COUNT查询
+    使用LIMIT+1的方式判断是否有下一页，避免慢速COUNT
+    
+    适用于大数据量场景，性能提升显著
+    
+    Args:
+        query: SQLAlchemy 查询对象
+        page: 页码
+        per_page: 每页数量
+        max_per_page: 最大每页数量
+    
+    Returns:
+        分页结果字典（不包含total和pages信息）
+    """
+    # 限制每页数量
+    per_page = min(per_page, max_per_page)
+    offset = (page - 1) * per_page
+    
+    # 获取per_page+1条数据，用于判断是否有下一页
+    items = query.limit(per_page + 1).offset(offset).all()
+    
+    # 判断是否有下一页
+    has_next = len(items) > per_page
+    if has_next:
+        items = items[:per_page]  # 去掉多余的一条
+    
+    return {
+        'items': [item.to_dict() for item in items],
+        'pagination': {
+            'page': page,
+            'per_page': per_page,
+            'has_prev': page > 1,
+            'has_next': has_next,
+            'prev_num': page - 1 if page > 1 else None,
+            'next_num': page + 1 if has_next else None,
+            # 注意：不提供total和pages，因为需要避免COUNT查询
         }
     }
 

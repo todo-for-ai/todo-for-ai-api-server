@@ -36,6 +36,7 @@ class Task(BaseModel):
 
     # 基本信息
     project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, comment='所属项目ID')
+    owner_id = Column(Integer, ForeignKey('users.id'), nullable=True, comment='任务所属者ID（冗余字段，性能优化）')
     assignee_id = Column(Integer, ForeignKey('users.id'), nullable=True, comment='任务分配者ID')
     creator_id = Column(Integer, ForeignKey('users.id'), nullable=True, comment='任务创建者ID')
     title = Column(String(500), nullable=False, comment='任务标题')

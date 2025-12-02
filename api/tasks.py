@@ -28,33 +28,13 @@ def list_tasks():
         if not current_user:
             return api_error("Authentication required", 401)
         
-        # 性能优化：先获取项目ID列表，避免JOIN带来的性能问题
+        # 性能优化：使用owner_id字段直接查询（避免JOIN）
         if not current_user.is_admin():
-            from sqlalchemy import text
-            # 使用原生SQL获取用户的项目ID（更高效）
-            project_ids_sql = text("SELECT id FROM projects WHERE owner_id = :owner_id")
-            project_ids = [row[0] for row in db.session.execute(project_ids_sql, {'owner_id': current_user.id}).fetchall()]
-            
-            if not project_ids:
-                # 用户没有项目，返回空列表
-                return api_response({
-                    'items': [],
-                    'pagination': {
-                        'page': args['page'],
-                        'per_page': args['per_page'],
-                        'has_prev': False,
-                        'has_next': False,
-                        'prev_num': None,
-                        'next_num': None
-                    }
-                }, "Tasks retrieved successfully")
-            
-            # 构建查询（预加载项目信息）
-            query = Task.query.options(joinedload(Task.project))\
-                .filter(Task.project_id.in_(project_ids))
+            # 使用owner_id直接过滤（性能最佳）
+            query = Task.query.filter(Task.owner_id == current_user.id)
         else:
             # 管理员可以看所有任务
-            query = Task.query.options(joinedload(Task.project))
+            query = Task.query
         
         # 项目筛选
         if args['project_id']:
@@ -116,32 +96,74 @@ def list_tasks():
         else:
             query = query.order_by(order_column.asc())
         
-        # 执行分页查询（避免慢COUNT查询）
+        # 执行分页查询
         page = args['page']
         per_page = min(args['per_page'], 100)
         offset = (page - 1) * per_page
         
-        # 获取数据（使用LIMIT/OFFSET，不执行COUNT）
-        tasks = query.limit(per_page + 1).offset(offset).all()
+        # 如果是项目任务列表（有project_id筛选），使用正常分页
+        # 利用刚创建的复合索引 idx_tasks_owner_project_updated 大幅提升性能
+        # 如果是全局任务列表（无project_id筛选），使用快速分页避免慢COUNT
+        if args['project_id']:
+            # 项目任务列表：使用优化的索引查询
+            # 强制使用idx_tasks_owner_project索引进行快速COUNT
+            from sqlalchemy import text
+            count_sql = text('''
+                SELECT COUNT(*) 
+                FROM tasks USE INDEX (idx_tasks_owner_project)
+                WHERE owner_id = :owner_id AND project_id = :project_id
+            ''')
+            total = db.session.execute(count_sql, {
+                'owner_id': current_user.id,
+                'project_id': args['project_id']
+            }).scalar()
+            
+            # 数据查询使用原来的ORM方式（已经优化过）
+            tasks = query.limit(per_page).offset(offset).all()
+            has_next = (offset + per_page) < total
+            pages = (total + per_page - 1) // per_page  # 向上取整
+        else:
+            # 全局任务列表：使用快速分页，避免慢COUNT
+            tasks = query.limit(per_page + 1).offset(offset).all()
+            has_next = len(tasks) > per_page
+            if has_next:
+                tasks = tasks[:per_page]
+            total = None  # 不提供total
+            pages = None  # 不提供pages
         
-        # 判断是否有下一页
-        has_next = len(tasks) > per_page
-        if has_next:
-            tasks = tasks[:per_page]
+        # 批量查询项目信息（避免N+1查询）
+        project_ids_in_page = list(set([task.project_id for task in tasks]))
+        projects_dict = {}
+        if project_ids_in_page:
+            projects = Project.query.filter(Project.id.in_(project_ids_in_page)).all()
+            projects_dict = {p.id: p.to_dict() for p in projects}
         
-        # 手动序列化，包含预加载的项目信息（避免N+1查询）
-        items = [task.to_dict(include_project=True) for task in tasks]
+        # 手动序列化，附加项目信息
+        items = []
+        for task in tasks:
+            task_dict = task.to_dict()
+            if task.project_id in projects_dict:
+                task_dict['project'] = projects_dict[task.project_id]
+            items.append(task_dict)
+        
+        # 构建分页信息
+        pagination_info = {
+            'page': page,
+            'per_page': per_page,
+            'has_prev': page > 1,
+            'has_next': has_next,
+            'prev_num': page - 1 if page > 1 else None,
+            'next_num': page + 1 if has_next else None
+        }
+        
+        # 如果是项目任务列表，添加total和pages字段
+        if total is not None:
+            pagination_info['total'] = total
+            pagination_info['pages'] = pages
         
         result = {
             'items': items,
-            'pagination': {
-                'page': page,
-                'per_page': per_page,
-                'has_prev': page > 1,
-                'has_next': has_next,
-                'prev_num': page - 1 if page > 1 else None,
-                'next_num': page + 1 if has_next else None
-            }
+            'pagination': pagination_info
         }
         
         return api_response(result, "Tasks retrieved successfully")

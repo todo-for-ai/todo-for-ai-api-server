@@ -8,7 +8,7 @@ from flask import Blueprint, request
 from sqlalchemy import func, case
 from datetime import datetime, timedelta
 from models import db, Project, ProjectStatus, Task, TaskStatus
-from .base import api_response, api_error, paginate_query, validate_json_request, get_request_args, APIException
+from .base import api_response, api_error, paginate_query, paginate_query_fast, validate_json_request, get_request_args, APIException
 from core.auth import optional_token_auth
 from core.github_config import require_auth, get_current_user
 
@@ -128,7 +128,7 @@ def list_projects():
         else:
             query = query.order_by(order_column.asc())
         
-        # 分页
+        # 分页（项目数量不多，使用正常分页）
         result = paginate_query(query, args['page'], args['per_page'])
 
         # 一次性查询所有项目的任务统计（避免N+1查询）
@@ -365,23 +365,30 @@ def restore_project(project_id):
 
 @projects_bp.route('/<int:project_id>/tasks', methods=['GET'])
 def get_project_tasks(project_id):
-    """获取项目的任务列表"""
+    """获取项目的任务列表（性能优化版）"""
     try:
+        # 检查项目是否存在
         project = Project.query.get(project_id)
         if not project:
             return api_error("Project not found", 404, "PROJECT_NOT_FOUND")
         
         args = get_request_args()
         
-        # 构建任务查询
-        query = project.tasks
+        # 构建任务查询（使用Task.query而不是project.tasks，性能更好）
+        from models import Task
+        query = Task.query.filter_by(project_id=project_id)
         
         # 状态筛选
         if args['status']:
             from models import TaskStatus
             try:
-                status = TaskStatus(args['status'])
-                query = query.filter_by(status=status)
+                # 支持多状态筛选
+                if ',' in args['status']:
+                    status_list = [TaskStatus(s.strip()) for s in args['status'].split(',')]
+                    query = query.filter(Task.status.in_(status_list))
+                else:
+                    status = TaskStatus(args['status'])
+                    query = query.filter_by(status=status)
             except ValueError:
                 return api_error(f"Invalid status: {args['status']}", 400)
         
@@ -396,20 +403,57 @@ def get_project_tasks(project_id):
         
         # 分配者筛选
         if args['assignee']:
-            query = query.filter_by(assignee=args['assignee'])
+            query = query.filter_by(assignee_id=args['assignee'])
         
         # 搜索
         if args['search']:
-            from models import Task
             search_term = f"%{args['search']}%"
             query = query.filter(
                 Task.title.like(search_term) |
-                Task.description.like(search_term) |
                 Task.content.like(search_term)
             )
         
-        # 分页
-        result = paginate_query(query, args['page'], args['per_page'])
+        # 排序（使用id降序，性能最佳）
+        sort_by = args.get('sort_by', 'id')
+        if sort_by == 'created_at':
+            order_column = Task.created_at
+        elif sort_by == 'updated_at':
+            order_column = Task.updated_at
+        elif sort_by == 'priority':
+            order_column = Task.priority
+        else:
+            order_column = Task.id
+        
+        sort_order = args.get('sort_order', 'desc')
+        if sort_order == 'desc':
+            query = query.order_by(order_column.desc())
+        else:
+            query = query.order_by(order_column.asc())
+        
+        # 分页（避免慢COUNT查询）
+        page = args['page']
+        per_page = min(args['per_page'], 100)
+        offset = (page - 1) * per_page
+        
+        # 获取数据（使用LIMIT+1判断是否有下一页）
+        tasks = query.limit(per_page + 1).offset(offset).all()
+        
+        # 判断是否有下一页
+        has_next = len(tasks) > per_page
+        if has_next:
+            tasks = tasks[:per_page]
+        
+        result = {
+            'items': [task.to_dict() for task in tasks],
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'has_prev': page > 1,
+                'has_next': has_next,
+                'prev_num': page - 1 if page > 1 else None,
+                'next_num': page + 1 if has_next else None
+            }
+        }
         
         return api_response(result, "Project tasks retrieved successfully")
         
