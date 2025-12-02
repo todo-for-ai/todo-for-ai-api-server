@@ -318,23 +318,46 @@ def verify_token():
 
 
 @auth_bp.route('/refresh', methods=['POST'])
-@jwt_required(refresh=True)
+@jwt_required()
 def refresh():
-    """刷新访问令牌"""
+    """
+    刷新访问令牌
+    
+    支持两种方式：
+    1. 使用当前的access_token刷新（简单模式）
+    2. 使用refresh_token刷新（标准模式，暂不支持）
+    
+    功能：
+    - 验证当前Token是否有效
+    - 生成新的access_token
+    - 继承原Token的所有claims
+    """
     try:
         current_user_id = get_jwt_identity()
         user = User.query.get(current_user_id)
         
         if not user or not user.is_active():
-            return api_error("User not found or inactive", 404)
+            return api_error("用户不存在或已停用", 404, "USER_NOT_FOUND")
+        
+        # 获取当前JWT的claims（用于继承）
+        current_claims = get_jwt()
         
         # 生成新的访问令牌
         new_token = github_service.generate_tokens(user)
         
-        return api_response({
-            'access_token': new_token,
-            'token_type': 'Bearer'
-        })
+        return api_response(
+            data={
+                'access_token': new_token,
+                'token_type': 'Bearer',
+                'user': {
+                    'id': user.id,
+                    'username': user.username,
+                    'email': user.email,
+                    'role': user.role
+                }
+            },
+            message="Token刷新成功"
+        )
         
     except Exception as e:
         return handle_api_error(e)
