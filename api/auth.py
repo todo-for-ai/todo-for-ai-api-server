@@ -221,12 +221,12 @@ def guest_login():
         
         if not existing_token:
             # 创建游客测试Token
-            test_token = ApiToken.create(
-                user_id=user.id,
+            test_token, _ = ApiToken.generate_token(
                 name='Guest Test Token',
                 description='测试用Token，可用于体验MCP功能',
                 expires_days=None  # 永不过期
             )
+            test_token.user_id = user.id
             db.session.add(test_token)
             db.session.commit()
         
