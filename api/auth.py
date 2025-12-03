@@ -9,6 +9,7 @@ import secrets
 from flask import Blueprint, request, jsonify, redirect, url_for, session
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, User
+from models.api_token import ApiToken
 from .base import api_response, api_error, handle_api_error
 from core.github_config import github_service, require_auth, get_current_user
 from core.google_config import google_service
@@ -210,6 +211,23 @@ def guest_login():
                 role='USER'
             )
             db.session.add(user)
+            db.session.commit()
+        
+        # 确保游客有测试Token（如果不存在则创建）
+        existing_token = ApiToken.query.filter_by(
+            user_id=user.id,
+            name='Guest Test Token'
+        ).first()
+        
+        if not existing_token:
+            # 创建游客测试Token
+            test_token = ApiToken.create(
+                user_id=user.id,
+                name='Guest Test Token',
+                description='测试用Token，可用于体验MCP功能',
+                expires_days=None  # 永不过期
+            )
+            db.session.add(test_token)
             db.session.commit()
         
         # 生成JWT令牌

@@ -102,6 +102,64 @@ def update_language():
         return handle_api_error(e)
 
 
+@user_settings_bp.route('/custom-prompts', methods=['GET'])
+@require_auth
+def get_custom_prompts():
+    """获取用户自定义的提示词配置"""
+    try:
+        current_user = get_current_user()
+        
+        # 获取或创建用户设置
+        settings = UserSettings.get_or_create_for_user(current_user.id)
+        
+        # 从settings_data中获取自定义提示词
+        custom_prompts = {}
+        if settings.settings_data:
+            custom_prompts = settings.settings_data.get('custom_prompts', {})
+        
+        return api_response(custom_prompts, "Custom prompts retrieved successfully")
+        
+    except Exception as e:
+        return handle_api_error(e)
+
+
+@user_settings_bp.route('/custom-prompts', methods=['PUT'])
+@require_auth
+def update_custom_prompts():
+    """更新用户自定义的提示词配置
+    
+    只保存用户修改过的提示词，未修改的不保存（节省存储空间）
+    """
+    try:
+        current_user = get_current_user()
+        
+        if not request.is_json:
+            return api_error("Content-Type must be application/json", 400)
+        
+        data = request.get_json()
+        
+        # 获取或创建用户设置
+        settings = UserSettings.get_or_create_for_user(current_user.id)
+        
+        # 确保settings_data存在
+        if not settings.settings_data:
+            settings.settings_data = {}
+        
+        # 更新自定义提示词配置
+        if 'custom_prompts' in data:
+            settings.settings_data['custom_prompts'] = data['custom_prompts']
+        
+        settings.save()
+        
+        return api_response(
+            settings.settings_data.get('custom_prompts', {}),
+            "Custom prompts updated successfully"
+        )
+        
+    except Exception as e:
+        return handle_api_error(e)
+
+
 def detect_user_language(request):
     """根据请求头检测用户语言偏好"""
     accept_language = request.headers.get('Accept-Language', '')
