@@ -24,6 +24,7 @@ class UserActivity(BaseModel):
     task_status_changed_count = Column(Integer, default=0, comment='当天修改任务状态数量')
     task_completed_count = Column(Integer, default=0, comment='当天完成任务数量')
     total_activity_count = Column(Integer, default=0, comment='当天总活跃次数')
+    activity_level = Column(Integer, default=0, comment='活跃等级(0-4，用于热力图颜色)')
     
     # 时间信息
     first_activity_at = Column(DateTime, comment='当天首次活跃时间')
@@ -118,6 +119,9 @@ class UserActivity(BaseModel):
             (activity.task_status_changed_count or 0) +
             (activity.task_completed_count or 0)
         )
+        
+        # 自动计算并更新activity_level（性能优化：避免后续重复计算）
+        activity.activity_level = cls._get_activity_level(activity.total_activity_count)
 
         try:
             db.session.commit()
@@ -129,7 +133,7 @@ class UserActivity(BaseModel):
     @classmethod
     def get_user_activity_heatmap(cls, user_id, days=365):
         """
-        获取用户活跃度热力图数据
+        获取用户活跃度热力图数据（优化版）
         
         Args:
             user_id: 用户ID
@@ -143,32 +147,57 @@ class UserActivity(BaseModel):
         end_date = date.today()
         start_date = end_date - timedelta(days=days-1)
         
-        activities = cls.query.filter(
+        # 优化1: 只选择需要的字段，减少数据传输，包括预计算的activity_level
+        activities = cls.query.with_entities(
+            cls.activity_date,
+            cls.total_activity_count,
+            cls.activity_level,  # 使用预计算的level，避免重复计算
+            cls.task_created_count,
+            cls.task_updated_count,
+            cls.task_status_changed_count,
+            cls.task_completed_count,
+            cls.first_activity_at,
+            cls.last_activity_at
+        ).filter(
             cls.user_id == user_id,
             cls.activity_date >= start_date,
             cls.activity_date <= end_date
         ).order_by(cls.activity_date.asc()).all()
         
-        # 创建完整的日期范围数据
+        # 优化2: 使用字典快速查找，避免O(n)循环
+        activity_dict = {}
+        for activity in activities:
+            activity_dict[activity[0]] = {  # activity[0] 是 activity_date
+                'count': activity[1] or 0,  # total_activity_count
+                'level': activity[2] or 0,  # activity_level（预计算的）
+                'task_created': activity[3] or 0,
+                'task_updated': activity[4] or 0,
+                'task_status_changed': activity[5] or 0,
+                'task_completed': activity[6] or 0,
+                'first_at': activity[7],
+                'last_at': activity[8]
+            }
+        
+        # 优化3: 预分配列表，避免动态扩容
         result = []
         current_date = start_date
-        activity_dict = {activity.activity_date: activity for activity in activities}
         
         while current_date <= end_date:
             activity = activity_dict.get(current_date)
             if activity:
                 result.append({
                     'date': current_date.isoformat(),
-                    'count': activity.total_activity_count,
-                    'level': cls._get_activity_level(activity.total_activity_count),
-                    'task_created_count': activity.task_created_count,
-                    'task_updated_count': activity.task_updated_count,
-                    'task_status_changed_count': activity.task_status_changed_count,
-                    'task_completed_count': activity.task_completed_count,
-                    'first_activity_at': activity.first_activity_at.isoformat() if activity.first_activity_at else None,
-                    'last_activity_at': activity.last_activity_at.isoformat() if activity.last_activity_at else None
+                    'count': activity['count'],
+                    'level': activity['level'],  # 直接使用预计算的level，性能大幅提升
+                    'task_created_count': activity['task_created'],
+                    'task_updated_count': activity['task_updated'],
+                    'task_status_changed_count': activity['task_status_changed'],
+                    'task_completed_count': activity['task_completed'],
+                    'first_activity_at': activity['first_at'].isoformat() if activity['first_at'] else None,
+                    'last_activity_at': activity['last_at'].isoformat() if activity['last_at'] else None
                 })
             else:
+                # 优化4: 复用不变的零值字典
                 result.append({
                     'date': current_date.isoformat(),
                     'count': 0,
