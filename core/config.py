@@ -8,16 +8,17 @@ from dotenv import load_dotenv
 def load_env_files():
     """
     加载环境变量文件，支持多种启动方式：
-    1. 本地启动: 读取根目录/.env
+    1. ENV_FILE环境变量: 通过ENV_FILE环境变量指定.env文件路径（最高优先级）
     2. Docker环境变量传递: 不加载文件，直接使用环境变量
-    3. Docker文件传递: 通过ENV_FILE环境变量指定.env文件路径
+    3. 私有配置优先: 优先读取private-deploy/.env（默认）
+    4. 本地开发配置: 回退到根目录/.env
     """
     # 获取当前文件所在目录（backend/app/）
     current_dir = os.path.dirname(os.path.abspath(__file__))
     backend_dir = os.path.dirname(current_dir)  # backend/
     project_root = os.path.dirname(backend_dir)  # 项目根目录
 
-    # 检查是否通过ENV_FILE环境变量指定了.env文件路径
+    # 检查是否通过ENV_FILE环境变量指定了.env文件路径（最高优先级）
     env_file_path = os.environ.get('ENV_FILE')
     if env_file_path:
         if os.path.exists(env_file_path):
@@ -32,10 +33,17 @@ def load_env_files():
         print("🐳 Docker环境检测到，使用环境变量配置")
         return "environment_variables"
 
-    # 本地启动：读取根目录.env
+    # 本地启动：优先尝试私有配置（private-deploy/.env）
+    private_env = os.path.join(project_root, 'private-deploy', '.env')
+    if os.path.exists(private_env):
+        print(f"📄 本地启动 - 加载私有配置: {private_env}")
+        load_dotenv(private_env)
+        return private_env
+    
+    # 回退到根目录.env（开发者本地配置）
     root_env = os.path.join(project_root, '.env')
     if os.path.exists(root_env):
-        print(f"📄 本地启动 - 加载环境变量: {root_env}")
+        print(f"📄 本地启动 - 加载开发配置: {root_env}")
         load_dotenv(root_env)
         return root_env
     else:
