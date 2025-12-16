@@ -369,12 +369,19 @@ def update_task(task_id):
 
 
 @tasks_bp.route('/<int:task_id>', methods=['DELETE'])
+@unified_auth_required
 def delete_task(task_id):
     """删除任务"""
     try:
+        current_user = get_current_user()
+
         task = Task.query.get(task_id)
         if not task:
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
+
+        # 与list权限一致 所有用户（包括管理员）只能删除自己项目中的任务
+        if task.project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only delete tasks from your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 记录删除历史
         TaskHistory.log_action(

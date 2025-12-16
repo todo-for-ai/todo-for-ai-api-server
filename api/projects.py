@@ -294,12 +294,19 @@ def update_project(project_id):
 
 
 @projects_bp.route('/<int:project_id>', methods=['DELETE'])
+@unified_auth_required
 def delete_project(project_id):
     """删除项目（软删除）"""
     try:
+        current_user = get_current_user()
+
         project = Project.query.get(project_id)
         if not project:
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
+
+        # 权限检查 - 只能删除自己的项目
+        if project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only delete your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 软删除
         project.soft_delete()
@@ -312,12 +319,19 @@ def delete_project(project_id):
 
 
 @projects_bp.route('/<int:project_id>/archive', methods=['POST'])
+@unified_auth_required
 def archive_project(project_id):
     """归档项目"""
     try:
+        current_user = get_current_user()
+
         project = Project.query.get(project_id)
         if not project:
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
+
+        # 权限检查 - 只能归档自己的项目
+        if project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only archive your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         project.archive()
         
@@ -332,12 +346,19 @@ def archive_project(project_id):
 
 
 @projects_bp.route('/<int:project_id>/restore', methods=['POST'])
+@unified_auth_required
 def restore_project(project_id):
     """恢复项目"""
     try:
+        current_user = get_current_user()
+
         project = Project.query.get(project_id)
         if not project:
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
+
+        # 权限检查 - 只能恢复自己的项目
+        if project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only restore your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         project.restore()
         
@@ -350,75 +371,89 @@ def restore_project(project_id):
         db.session.rollback()
         return api_error(f"Failed to restore project: {str(e)}", 500)
 
+# TODO: 我感觉这个接口并没有任何作用，因为tasks.py有list接口,确定没用的话之后整个删掉吧
+# @projects_bp.route('/<int:project_id>/tasks', methods=['GET'])
+# @unified_auth_required
+# def get_project_tasks(project_id):
+#     """获取项目的任务列表"""
+#     try:
+#         current_user = get_current_user()
+#
+#         project = Project.query.get(project_id)
+#         if not project:
+#             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
+#
+#         # 权限检查 - 只能访问自己项目的任务
+#         if project.owner_id != current_user.id:
+#             return ApiResponse.error("Access denied: You can only access tasks from your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+#
+#         args = get_request_args()
+#
+#         # 构建任务查询
+#         query = project.tasks
+#
+#         # 状态筛选
+#         if args['status']:
+#             from models import TaskStatus
+#             try:
+#                 status = TaskStatus(args['status'])
+#                 query = query.filter_by(status=status)
+#             except ValueError:
+#                 return ApiResponse.error(f"Invalid status: {args['status']}", 400).to_response()
+#
+#         # 优先级筛选
+#         if args['priority']:
+#             from models import TaskPriority
+#             try:
+#                 priority = TaskPriority(args['priority'])
+#                 query = query.filter_by(priority=priority)
+#             except ValueError:
+#                 return api_error(f"Invalid priority: {args['priority']}", 400)
+#
+#         # 分配者筛选
+#         if args['assignee']:
+#             query = query.filter_by(assignee=args['assignee'])
+#
+#         # 搜索
+#         if args['search']:
+#             from models import Task
+#             search_term = f"%{args['search']}%"
+#             query = query.filter(
+#                 Task.title.like(search_term) |
+#                 Task.description.like(search_term) |
+#                 Task.content.like(search_term)
+#             )
+#
+#         # 分页
+#         result = paginate_query(query, args['page'], args['per_page'])
+#
+#         return ApiResponse.success(result, "Project tasks retrieved successfully").to_response()
+#
+#     except Exception as e:
+#         return api_error(f"Failed to retrieve project tasks: {str(e)}", 500)
 
-@projects_bp.route('/<int:project_id>/tasks', methods=['GET'])
-def get_project_tasks(project_id):
-    """获取项目的任务列表"""
-    try:
-        project = Project.query.get(project_id)
-        if not project:
-            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
-        
-        args = get_request_args()
-        
-        # 构建任务查询
-        query = project.tasks
-        
-        # 状态筛选
-        if args['status']:
-            from models import TaskStatus
-            try:
-                status = TaskStatus(args['status'])
-                query = query.filter_by(status=status)
-            except ValueError:
-                return api_error(f"Invalid status: {args['status']}", 400)
-        
-        # 优先级筛选
-        if args['priority']:
-            from models import TaskPriority
-            try:
-                priority = TaskPriority(args['priority'])
-                query = query.filter_by(priority=priority)
-            except ValueError:
-                return api_error(f"Invalid priority: {args['priority']}", 400)
-        
-        # 分配者筛选
-        if args['assignee']:
-            query = query.filter_by(assignee=args['assignee'])
-        
-        # 搜索
-        if args['search']:
-            from models import Task
-            search_term = f"%{args['search']}%"
-            query = query.filter(
-                Task.title.like(search_term) |
-                Task.description.like(search_term) |
-                Task.content.like(search_term)
-            )
-        
-        # 分页
-        result = paginate_query(query, args['page'], args['per_page'])
-        
-        return ApiResponse.success(result, "Project tasks retrieved successfully").to_response()
-        
-    except Exception as e:
-        return api_error(f"Failed to retrieve project tasks: {str(e)}", 500)
-
-
-@projects_bp.route('/<int:project_id>/context-rules', methods=['GET'])
-def get_project_context_rules(project_id):
-    """获取项目的上下文规则"""
-    try:
-        project = Project.query.get(project_id)
-        if not project:
-            return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
-
-        rules = project.get_active_context_rules()
-
-        return ApiResponse.success(
-            [rule.to_dict() for rule in rules],
-            "Project context rules retrieved successfully"
-        ).to_response()
-
-    except Exception as e:
-        return api_error(f"Failed to retrieve project context rules: {str(e)}", 500)
+# TODO: 同上 因为有list_context_rules方法了，感觉这个也是没用的接口,确定没用的话之后整个删掉吧
+# @projects_bp.route('/<int:project_id>/context-rules', methods=['GET'])
+# @unified_auth_required
+# def get_project_context_rules(project_id):
+#     """获取项目的上下文规则"""
+#     try:
+#         current_user = get_current_user()
+#
+#         project = Project.query.get(project_id)
+#         if not project:
+#             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
+#
+#         # 权限检查 - 只能访问自己项目的上下文规则
+#         if project.owner_id != current_user.id:
+#             return ApiResponse.error("Access denied: You can only access context rules from your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+#
+#         rules = project.get_active_context_rules()
+#
+#         return ApiResponse.success(
+#             [rule.to_dict() for rule in rules],
+#             "Project context rules retrieved successfully"
+#         ).to_response()
+#
+#     except Exception as e:
+#         return api_error(f"Failed to retrieve project context rules: {str(e)}", 500)
