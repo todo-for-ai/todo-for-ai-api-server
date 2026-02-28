@@ -17,6 +17,25 @@ from core.google_config import google_service
 # 创建蓝图
 auth_bp = Blueprint('auth', __name__)
 
+def _normalize_return_to(return_to: str, frontend_base: str) -> str:
+    """规范化登录后回跳地址，优先保留用户当前前端域名。"""
+    if not return_to:
+        return f'{frontend_base}/todo-for-ai/pages/dashboard'
+
+    # 相对路径 -> 当前前端域名
+    if return_to.startswith('/'):
+        return f'{frontend_base}{return_to}'
+
+    # 显式URL：仅当它指向后端地址时，替换到前端地址
+    if return_to.startswith('http://') or return_to.startswith('https://'):
+        if 'localhost:50110' in return_to:
+            return return_to.replace('http://localhost:50110', frontend_base)
+        if '/todo-for-ai/api/v1' in return_to:
+            return return_to.replace('/todo-for-ai/api/v1', '/todo-for-ai/pages')
+        return return_to
+
+    return f'{frontend_base}/todo-for-ai/pages/dashboard'
+
 
 @auth_bp.route('/login', methods=['GET'])
 def login():
@@ -37,26 +56,14 @@ def github_login():
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/callback'
-            frontend_base = 'http://localhost:50111'
+            frontend_base = request.headers.get('Origin') or 'http://localhost:50111'
 
         redirect_uri = request.args.get('redirect_uri', default_redirect_uri)
 
         # 存储原始重定向URL，确保重定向到前端dashboard
         return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
 
-        # 如果是相对路径，转换为前端完整URL
-        if return_to.startswith('/'):
-            return_to = f'{frontend_base}{return_to}'
-        # 如果是后端URL，替换为前端URL
-        elif 'localhost:50110' in return_to or 'todo4ai.org' in return_to:
-            # 统一替换为当前环境的前端地址
-            if return_to.startswith('http://localhost:50110'):
-                return_to = return_to.replace('http://localhost:50110', frontend_base)
-            elif return_to.startswith('https://todo4ai.org/todo-for-ai/api'):
-                return_to = return_to.replace('https://todo4ai.org/todo-for-ai/api/v1', frontend_base + '/todo-for-ai/pages')
-        # 如果没有指定，默认到dashboard
-        elif not (frontend_base in return_to):
-            return_to = f'{frontend_base}/todo-for-ai/pages/dashboard'
+        return_to = _normalize_return_to(return_to, frontend_base)
 
         session['redirect_after_login'] = return_to
         session['auth_provider'] = 'github'
@@ -81,26 +88,14 @@ def google_login():
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/google/callback'
-            frontend_base = 'http://localhost:50111'
+            frontend_base = request.headers.get('Origin') or 'http://localhost:50111'
 
         redirect_uri = request.args.get('redirect_uri', default_redirect_uri)
 
         # 存储原始重定向URL，确保重定向到前端dashboard
         return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
 
-        # 如果是相对路径，转换为前端完整URL
-        if return_to.startswith('/'):
-            return_to = f'{frontend_base}{return_to}'
-        # 如果是后端URL，替换为前端URL
-        elif 'localhost:50110' in return_to or 'todo4ai.org' in return_to:
-            # 统一替换为当前环境的前端地址
-            if return_to.startswith('http://localhost:50110'):
-                return_to = return_to.replace('http://localhost:50110', frontend_base)
-            elif return_to.startswith('https://todo4ai.org/todo-for-ai/api'):
-                return_to = return_to.replace('https://todo4ai.org/todo-for-ai/api/v1', frontend_base + '/todo-for-ai/pages')
-        # 如果没有指定，默认到dashboard
-        elif not (frontend_base in return_to):
-            return_to = f'{frontend_base}/todo-for-ai/pages/dashboard'
+        return_to = _normalize_return_to(return_to, frontend_base)
 
         session['redirect_after_login'] = return_to
         session['auth_provider'] = 'google'
@@ -118,19 +113,11 @@ def guest_login():
     try:
         # 根据环境确定前端地址
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        frontend_base = 'https://todo4ai.org' if is_docker else 'http://localhost:50111'
+        frontend_base = 'https://todo4ai.org' if is_docker else (request.headers.get('Origin') or 'http://localhost:50111')
 
         # return_to 兼容相对路径与错误域名
         return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
-        if return_to.startswith('/'):
-            return_to = f'{frontend_base}{return_to}'
-        elif 'localhost:50110' in return_to or 'todo4ai.org' in return_to:
-            if return_to.startswith('http://localhost:50110'):
-                return_to = return_to.replace('http://localhost:50110', frontend_base)
-            elif return_to.startswith('https://todo4ai.org/todo-for-ai/api'):
-                return_to = return_to.replace('https://todo4ai.org/todo-for-ai/api/v1', frontend_base + '/todo-for-ai/pages')
-        elif frontend_base not in return_to:
-            return_to = f'{frontend_base}/todo-for-ai/pages/dashboard'
+        return_to = _normalize_return_to(return_to, frontend_base)
 
         guest_email = os.environ.get('GUEST_EMAIL', 'guest@todo4ai.local')
         user = User.query.filter_by(email=guest_email).first()
