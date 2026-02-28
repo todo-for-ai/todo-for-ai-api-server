@@ -103,7 +103,7 @@ def update_language():
 
 
 @user_settings_bp.route('/custom-prompts', methods=['GET'])
-@require_auth
+@unified_auth_required
 def get_custom_prompts():
     """获取用户自定义的提示词配置"""
     try:
@@ -117,14 +117,14 @@ def get_custom_prompts():
         if settings.settings_data:
             custom_prompts = settings.settings_data.get('custom_prompts', {})
         
-        return api_response(custom_prompts, "Custom prompts retrieved successfully")
+        return ApiResponse.success(custom_prompts, "Custom prompts retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
 
 
 @user_settings_bp.route('/custom-prompts', methods=['PUT'])
-@require_auth
+@unified_auth_required
 def update_custom_prompts():
     """更新用户自定义的提示词配置
     
@@ -134,7 +134,7 @@ def update_custom_prompts():
         current_user = get_current_user()
         
         if not request.is_json:
-            return api_error("Content-Type must be application/json", 400)
+            return ApiResponse.error("Content-Type must be application/json", 400).to_response()
         
         data = request.get_json()
         
@@ -151,10 +151,10 @@ def update_custom_prompts():
         
         settings.save()
         
-        return api_response(
+        return ApiResponse.success(
             settings.settings_data.get('custom_prompts', {}),
             "Custom prompts updated successfully"
-        )
+        ).to_response()
         
     except Exception as e:
         return handle_api_error(e)

@@ -6,6 +6,7 @@
 
 import os
 import secrets
+from datetime import datetime
 from flask import Blueprint, request, jsonify, redirect, url_for, session
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, User
@@ -106,6 +107,67 @@ def google_login():
 
         # 重定向到Google登录页面
         return google_service.oauth.google.authorize_redirect(redirect_uri)
+
+    except Exception as e:
+        return handle_api_error(e)
+
+
+@auth_bp.route('/login/guest', methods=['GET'])
+def guest_login():
+    """游客模式登录：创建/复用本地游客账号并签发JWT"""
+    try:
+        # 根据环境确定前端地址
+        is_docker = os.environ.get('DOCKER_ENV') == 'true'
+        frontend_base = 'https://todo4ai.org' if is_docker else 'http://localhost:50111'
+
+        # return_to 兼容相对路径与错误域名
+        return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
+        if return_to.startswith('/'):
+            return_to = f'{frontend_base}{return_to}'
+        elif 'localhost:50110' in return_to or 'todo4ai.org' in return_to:
+            if return_to.startswith('http://localhost:50110'):
+                return_to = return_to.replace('http://localhost:50110', frontend_base)
+            elif return_to.startswith('https://todo4ai.org/todo-for-ai/api'):
+                return_to = return_to.replace('https://todo4ai.org/todo-for-ai/api/v1', frontend_base + '/todo-for-ai/pages')
+        elif frontend_base not in return_to:
+            return_to = f'{frontend_base}/todo-for-ai/pages/dashboard'
+
+        guest_email = os.environ.get('GUEST_EMAIL', 'guest@todo4ai.local')
+        user = User.query.filter_by(email=guest_email).first()
+
+        # 首次登录时创建游客账户
+        if not user:
+            guest_id = f"guest-{secrets.token_hex(8)}"
+            user = User(
+                email=guest_email,
+                email_verified=False,
+                username='guest',
+                name='Guest User',
+                nickname='Guest',
+                provider='guest',
+                provider_user_id=guest_id,
+                last_login=datetime.utcnow(),
+                last_active_at=datetime.utcnow(),
+            )
+            db.session.add(user)
+            db.session.commit()
+        else:
+            user.last_login = datetime.utcnow()
+            user.last_active_at = datetime.utcnow()
+            user.save()
+
+        tokens = github_service.generate_tokens(user)
+        if not tokens:
+            return ApiResponse.error("Failed to generate guest tokens", 500).to_response()
+
+        import urllib.parse
+        params = {
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
+        }
+        query_string = urllib.parse.urlencode(params)
+        return redirect(f"{return_to}?{query_string}")
 
     except Exception as e:
         return handle_api_error(e)
