@@ -7,7 +7,7 @@
 from datetime import datetime
 from flask import Blueprint, request
 from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
-from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
+from .base import ApiResponse, paginate_query, paginate_query_fast, validate_json_request, get_request_args, APIException, handle_api_error
 from core.auth import unified_auth_required, get_current_user
 
 # 创建蓝图
@@ -15,6 +15,7 @@ tasks_bp = Blueprint('tasks', __name__)
 
 
 @tasks_bp.route('', methods=['GET'])
+@tasks_bp.route('/', methods=['GET'])
 @unified_auth_required
 def list_tasks():
     """获取任务列表"""
@@ -25,9 +26,9 @@ def list_tasks():
         # 构建查询
         query = Task.query
 
-        # 用户权限控制 - 所有用户（包括管理员）只能看到自己项目的任务
+        # 用户权限控制 - 使用 tasks.owner_id 过滤，避免大表 JOIN 造成性能瓶颈
         if current_user:
-            query = query.join(Project).filter(Project.owner_id == current_user.id)
+            query = query.filter(Task.owner_id == current_user.id)
         else:
             # 未登录用户不能访问任务列表
             return ApiResponse.error("Authentication required", 401).to_response()
@@ -89,19 +90,33 @@ def list_tasks():
         else:
             query = query.order_by(order_column.asc())
         
-        # 分页
-        result = paginate_query(query, args['page'], args['per_page'])
+        # 分页：默认使用快速分页，避免大数据量下 COUNT(*) 成为瓶颈
+        include_total = request.args.get('include_total', 'false').lower() == 'true'
+        if include_total:
+            result = paginate_query(query, args['page'], args['per_page'])
+        else:
+            result = paginate_query_fast(query, args['page'], args['per_page'])
         
-        # 包含项目信息
+        # 批量加载项目基础信息，避免 N+1 查询
+        project_ids = list({item['project_id'] for item in result['items'] if item.get('project_id')})
+        project_map = {}
+        if project_ids:
+            projects = db.session.query(Project.id, Project.name, Project.color).filter(
+                Project.id.in_(project_ids)
+            ).all()
+            project_map = {
+                project.id: {
+                    'id': project.id,
+                    'name': project.name,
+                    'color': project.color
+                }
+                for project in projects
+            }
+
         for item in result['items']:
-            if 'project_id' in item:
-                project = Project.query.get(item['project_id'])
-                if project:
-                    item['project'] = {
-                        'id': project.id,
-                        'name': project.name,
-                        'color': project.color
-                    }
+            project_id = item.get('project_id')
+            if project_id and project_id in project_map:
+                item['project'] = project_map[project_id]
         
         return ApiResponse.success(result, "Tasks retrieved successfully").to_response()
         
@@ -110,6 +125,7 @@ def list_tasks():
 
 
 @tasks_bp.route('', methods=['POST'])
+@tasks_bp.route('/', methods=['POST'])
 @unified_auth_required
 def create_task():
     """创建新任务"""
@@ -180,6 +196,7 @@ def create_task():
         # 创建任务
         task = Task.create(
             project_id=data['project_id'],
+            owner_id=project.owner_id,
             title=title,
             content=data.get('content', ''),
             status=status,

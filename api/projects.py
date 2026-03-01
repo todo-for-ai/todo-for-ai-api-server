@@ -16,6 +16,7 @@ projects_bp = Blueprint('projects', __name__)
 
 
 @projects_bp.route('', methods=['GET'])
+@projects_bp.route('/', methods=['GET'])
 @unified_auth_required
 def list_projects():
     """获取项目列表"""
@@ -130,24 +131,44 @@ def list_projects():
         # 分页
         result = paginate_query(query, args['page'], args['per_page'])
 
-        # 为每个项目添加统计信息
-        for project_dict in result['items']:
-            project = Project.query.get(project_dict['id'])
-            if project:
-                # 添加任务统计信息
-                from models.task import Task
-                total_tasks = Task.query.filter_by(project_id=project.id).count()
-                pending_tasks = Task.query.filter_by(project_id=project.id).filter(
-                    Task.status.in_(['todo', 'in_progress', 'review'])
-                ).count()
-                completed_tasks = Task.query.filter_by(project_id=project.id).filter_by(status='done').count()
+        # 批量统计当前页项目的任务数据，避免 N+1 查询
+        project_ids = [item['id'] for item in result['items'] if item.get('id')]
+        task_stats_map = {}
 
-                project_dict.update({
-                    'total_tasks': total_tasks,
-                    'pending_tasks': pending_tasks,
-                    'completed_tasks': completed_tasks,
-                    'completion_rate': round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
-                })
+        if project_ids:
+            pending_statuses = [TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]
+            stats_rows = db.session.query(
+                Task.project_id.label('project_id'),
+                func.count(Task.id).label('total_tasks'),
+                func.sum(case((Task.status.in_(pending_statuses), 1), else_=0)).label('pending_tasks'),
+                func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('completed_tasks')
+            ).filter(
+                Task.project_id.in_(project_ids)
+            ).group_by(
+                Task.project_id
+            ).all()
+
+            task_stats_map = {
+                row.project_id: {
+                    'total_tasks': int(row.total_tasks or 0),
+                    'pending_tasks': int(row.pending_tasks or 0),
+                    'completed_tasks': int(row.completed_tasks or 0),
+                }
+                for row in stats_rows
+            }
+
+        for project_dict in result['items']:
+            stats = task_stats_map.get(project_dict['id'], {
+                'total_tasks': 0,
+                'pending_tasks': 0,
+                'completed_tasks': 0,
+            })
+            total_tasks = stats['total_tasks']
+            completed_tasks = stats['completed_tasks']
+            project_dict.update({
+                **stats,
+                'completion_rate': round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
+            })
 
         # 使用新的ApiResponse类，统一响应格式
         return ApiResponse.success(
@@ -160,6 +181,7 @@ def list_projects():
 
 
 @projects_bp.route('', methods=['POST'])
+@projects_bp.route('/', methods=['POST'])
 @unified_auth_required
 def create_project():
     """创建新项目"""
