@@ -10,9 +10,40 @@ from datetime import datetime, timedelta
 from models import db, Project, ProjectStatus, Task, TaskStatus
 from .base import paginate_query, validate_json_request, get_request_args, APIException, ApiResponse
 from core.auth import unified_auth_required, get_current_user
+from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
+from core.cache_invalidation import invalidate_user_caches
 
 # 创建蓝图
 projects_bp = Blueprint('projects', __name__)
+
+PROJECTS_LIST_CACHE_TTL_SECONDS = 20
+PROJECTS_LIST_HEAVY_CACHE_TTL_SECONDS = 120
+TASK_SORT_FIELDS = {'total_tasks', 'pending_tasks', 'completed_tasks'}
+projects_list_fallback_cache = {}
+
+
+def _projects_cache_get(key):
+    redis_key = f"projects:list:{key}"
+    cached = redis_get_json(redis_key)
+    if cached is not None:
+        return cached
+
+    item = projects_list_fallback_cache.get(key)
+    if item:
+        ttl_seconds = item.get('ttl', PROJECTS_LIST_CACHE_TTL_SECONDS)
+        if datetime.utcnow().timestamp() - item['cached_at'] <= ttl_seconds:
+            return item['value']
+    return None
+
+
+def _projects_cache_set(key, value, ttl=PROJECTS_LIST_CACHE_TTL_SECONDS):
+    redis_key = f"projects:list:{key}"
+    redis_set_json(redis_key, value, ttl)
+    projects_list_fallback_cache[key] = {
+        'cached_at': datetime.utcnow().timestamp(),
+        'ttl': ttl,
+        'value': value,
+    }
 
 
 @projects_bp.route('', methods=['GET'])
@@ -26,6 +57,7 @@ def list_projects():
 
         # 构建查询
         query = Project.query
+        pending_statuses = [TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]
 
         # 用户权限控制 - 所有用户（包括管理员）只能看到自己的项目
         if current_user:
@@ -33,6 +65,15 @@ def list_projects():
         else:
             # 未登录用户不能访问项目列表
             return ApiResponse.unauthorized("Authentication required").to_response()
+
+        # 缓存仅用于列表查询（按用户 + 查询参数隔离）
+        cache_key = f"user:{current_user.id}:q:{request.query_string.decode('utf-8')}"
+        cached_result = _projects_cache_get(cache_key)
+        if cached_result is not None:
+            return ApiResponse.success(
+                data=cached_result,
+                message="Projects retrieved successfully"
+            ).to_response()
         
         # 状态筛选
         if args['status']:
@@ -55,16 +96,15 @@ def list_projects():
 
         # 是否有未完成任务筛选
         has_pending_tasks = request.args.get('has_pending_tasks')
+        pending_tasks_exists = db.session.query(Task.id).filter(
+            Task.project_id == Project.id,
+            Task.owner_id == current_user.id,
+            Task.status.in_(pending_statuses)
+        ).exists()
         if has_pending_tasks == 'true':
-            query = query.join(Task).filter(
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW])
-            ).distinct()
+            query = query.filter(pending_tasks_exists)
         elif has_pending_tasks == 'false':
-            # 没有未完成任务的项目
-            pending_project_ids = db.session.query(Task.project_id).filter(
-                Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW])
-            ).distinct().subquery()
-            query = query.filter(~Project.id.in_(pending_project_ids))
+            query = query.filter(~pending_tasks_exists)
 
         # 时间范围筛选
         time_range = request.args.get('time_range')
@@ -92,83 +132,118 @@ def list_projects():
         sort_by = args.get('sort_by', 'last_activity_at')
         sort_order = args.get('sort_order', 'desc')
 
-        if sort_by == 'name':
-            order_column = Project.name
-        elif sort_by == 'created_at':
-            order_column = Project.created_at
-        elif sort_by == 'updated_at':
-            order_column = Project.updated_at
-        elif sort_by == 'last_activity_at':
-            # 使用 COALESCE 确保 NULL 值被替换为一个很早的时间，这样在倒序排序时会排在最后
-            order_column = func.coalesce(Project.last_activity_at, datetime(1970, 1, 1))
-        elif sort_by == 'total_tasks':
-            # 按任务总数排序
-            query = query.outerjoin(Task).group_by(Project.id)
-            order_column = func.count(Task.id)
-        elif sort_by == 'pending_tasks':
-            # 按未完成任务数排序
-            query = query.outerjoin(Task).filter(
-                (Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW])) |
-                (Task.id.is_(None))
-            ).group_by(Project.id)
-            order_column = func.count(Task.id)
-        elif sort_by == 'completed_tasks':
-            # 按已完成任务数排序
-            query = query.outerjoin(Task).filter(
-                (Task.status == TaskStatus.DONE) |
-                (Task.id.is_(None))
-            ).group_by(Project.id)
-            order_column = func.count(Task.id)
-        else:
-            # 默认按最后活跃时间排序，NULL 值排在最后
-            order_column = func.coalesce(Project.last_activity_at, datetime(1970, 1, 1))
-
-        if sort_order == 'desc':
-            query = query.order_by(order_column.desc())
-        else:
-            query = query.order_by(order_column.asc())
-        
-        # 分页
-        result = paginate_query(query, args['page'], args['per_page'])
-
-        # 批量统计当前页项目的任务数据，避免 N+1 查询
-        project_ids = [item['id'] for item in result['items'] if item.get('id')]
-        task_stats_map = {}
-
-        if project_ids:
-            pending_statuses = [TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]
-            stats_rows = db.session.query(
+        if sort_by in TASK_SORT_FIELDS:
+            task_stats_subquery = db.session.query(
                 Task.project_id.label('project_id'),
                 func.count(Task.id).label('total_tasks'),
                 func.sum(case((Task.status.in_(pending_statuses), 1), else_=0)).label('pending_tasks'),
                 func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('completed_tasks')
-            ).filter(
-                Task.project_id.in_(project_ids)
-            ).group_by(
-                Task.project_id
-            ).all()
+            ).group_by(Task.project_id).subquery()
 
-            task_stats_map = {
-                row.project_id: {
-                    'total_tasks': int(row.total_tasks or 0),
-                    'pending_tasks': int(row.pending_tasks or 0),
-                    'completed_tasks': int(row.completed_tasks or 0),
+            sorted_query = query.outerjoin(
+                task_stats_subquery,
+                task_stats_subquery.c.project_id == Project.id
+            )
+
+            if sort_by == 'total_tasks':
+                order_column = func.coalesce(task_stats_subquery.c.total_tasks, 0)
+            elif sort_by == 'pending_tasks':
+                order_column = func.coalesce(task_stats_subquery.c.pending_tasks, 0)
+            else:
+                order_column = func.coalesce(task_stats_subquery.c.completed_tasks, 0)
+
+            if sort_order == 'desc':
+                sorted_query = sorted_query.order_by(order_column.desc())
+            else:
+                sorted_query = sorted_query.order_by(order_column.asc())
+
+            page = max(args['page'], 1)
+            per_page = max(min(args['per_page'], 100), 1)
+            offset = (page - 1) * per_page
+
+            # 对任务统计排序场景，total 不依赖任务聚合，直接使用基础项目查询计数避免慢查询
+            total = query.count()
+            items = sorted_query.limit(per_page).offset(offset).all()
+            pages = (total + per_page - 1) // per_page if total > 0 else 1
+
+            result = {
+                'items': [item.to_dict() for item in items],
+                'pagination': {
+                    'page': page,
+                    'per_page': per_page,
+                    'total': total,
+                    'pages': pages,
+                    'has_prev': page > 1,
+                    'has_next': (offset + per_page) < total,
+                    'prev_num': page - 1 if page > 1 else None,
+                    'next_num': page + 1 if (offset + per_page) < total else None
                 }
-                for row in stats_rows
             }
+        else:
+            if sort_by == 'name':
+                order_column = Project.name
+            elif sort_by == 'created_at':
+                order_column = Project.created_at
+            elif sort_by == 'updated_at':
+                order_column = Project.updated_at
+            else:
+                # 默认按最后活跃时间排序，NULL 值排在最后
+                order_column = func.coalesce(Project.last_activity_at, datetime(1970, 1, 1))
 
-        for project_dict in result['items']:
-            stats = task_stats_map.get(project_dict['id'], {
-                'total_tasks': 0,
-                'pending_tasks': 0,
-                'completed_tasks': 0,
-            })
-            total_tasks = stats['total_tasks']
-            completed_tasks = stats['completed_tasks']
-            project_dict.update({
-                **stats,
-                'completion_rate': round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
-            })
+            if sort_order == 'desc':
+                query = query.order_by(order_column.desc())
+            else:
+                query = query.order_by(order_column.asc())
+
+            result = paginate_query(query, args['page'], args['per_page'])
+
+        include_stats = request.args.get('include_stats', 'true').lower() != 'false'
+        if include_stats:
+            # 批量统计当前页项目的任务数据，避免 N+1 查询
+            project_ids = [item['id'] for item in result['items'] if item.get('id')]
+            task_stats_map = {}
+
+            if project_ids:
+                stats_rows = db.session.query(
+                    Task.project_id.label('project_id'),
+                    func.count(Task.id).label('total_tasks'),
+                    func.sum(case((Task.status.in_(pending_statuses), 1), else_=0)).label('pending_tasks'),
+                    func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('completed_tasks')
+                ).filter(
+                    Task.owner_id == current_user.id,
+                    Task.project_id.in_(project_ids)
+                ).group_by(
+                    Task.project_id
+                ).all()
+
+                task_stats_map = {
+                    row.project_id: {
+                        'total_tasks': int(row.total_tasks or 0),
+                        'pending_tasks': int(row.pending_tasks or 0),
+                        'completed_tasks': int(row.completed_tasks or 0),
+                    }
+                    for row in stats_rows
+                }
+
+            for project_dict in result['items']:
+                stats = task_stats_map.get(project_dict['id'], {
+                    'total_tasks': 0,
+                    'pending_tasks': 0,
+                    'completed_tasks': 0,
+                })
+                total_tasks = stats['total_tasks']
+                completed_tasks = stats['completed_tasks']
+                project_dict.update({
+                    **stats,
+                    'completion_rate': round((completed_tasks / total_tasks * 100) if total_tasks > 0 else 0, 1)
+                })
+
+        cache_ttl = (
+            PROJECTS_LIST_HEAVY_CACHE_TTL_SECONDS
+            if sort_by in TASK_SORT_FIELDS or has_pending_tasks == 'true'
+            else PROJECTS_LIST_CACHE_TTL_SECONDS
+        )
+        _projects_cache_set(cache_key, result, ttl=cache_ttl)
 
         # 使用新的ApiResponse类，统一响应格式
         return ApiResponse.success(
@@ -222,6 +297,7 @@ def create_project():
         )
         
         db.session.commit()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.created(
             data=project.to_dict(include_stats=True),
@@ -304,6 +380,7 @@ def update_project(project_id):
         project.last_activity_at = datetime.utcnow()
 
         db.session.commit()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(
             project.to_dict(include_stats=True),
@@ -332,6 +409,7 @@ def delete_project(project_id):
         
         # 软删除
         project.soft_delete()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(None, "Project deleted successfully", 204).to_response()
         
@@ -356,6 +434,7 @@ def archive_project(project_id):
             return ApiResponse.error("Access denied: You can only archive your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         project.archive()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(
             project.to_dict(),
@@ -383,6 +462,7 @@ def restore_project(project_id):
             return ApiResponse.error("Access denied: You can only restore your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         project.restore()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(
             project.to_dict(),

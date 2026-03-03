@@ -9,9 +9,35 @@ from flask import Blueprint, request
 from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
 from .base import ApiResponse, paginate_query, paginate_query_fast, validate_json_request, get_request_args, APIException, handle_api_error
 from core.auth import unified_auth_required, get_current_user
+from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
+from core.cache_invalidation import invalidate_user_caches
 
 # 创建蓝图
 tasks_bp = Blueprint('tasks', __name__)
+
+TASKS_LIST_CACHE_TTL_SECONDS = 15
+tasks_list_fallback_cache = {}
+
+
+def _tasks_cache_get(key):
+    redis_key = f"tasks:list:{key}"
+    cached = redis_get_json(redis_key)
+    if cached is not None:
+        return cached
+
+    item = tasks_list_fallback_cache.get(key)
+    if item and (datetime.utcnow().timestamp() - item['cached_at'] <= TASKS_LIST_CACHE_TTL_SECONDS):
+        return item['value']
+    return None
+
+
+def _tasks_cache_set(key, value):
+    redis_key = f"tasks:list:{key}"
+    redis_set_json(redis_key, value, TASKS_LIST_CACHE_TTL_SECONDS)
+    tasks_list_fallback_cache[key] = {
+        'cached_at': datetime.utcnow().timestamp(),
+        'value': value,
+    }
 
 
 @tasks_bp.route('', methods=['GET'])
@@ -23,15 +49,18 @@ def list_tasks():
         args = get_request_args()
         current_user = get_current_user()
 
-        # 构建查询
-        query = Task.query
-
-        # 用户权限控制 - 使用 tasks.owner_id 过滤，避免大表 JOIN 造成性能瓶颈
-        if current_user:
-            query = query.filter(Task.owner_id == current_user.id)
-        else:
+        if not current_user:
             # 未登录用户不能访问任务列表
             return ApiResponse.error("Authentication required", 401).to_response()
+
+        # 缓存仅用于列表查询（按用户 + 查询参数隔离）
+        cache_key = f"user:{current_user.id}:q:{request.query_string.decode('utf-8')}"
+        cached_result = _tasks_cache_get(cache_key)
+        if cached_result is not None:
+            return ApiResponse.success(cached_result, "Tasks retrieved successfully").to_response()
+
+        # 构建查询
+        query = Task.query.filter(Task.owner_id == current_user.id)
         
         # 项目筛选
         if args['project_id']:
@@ -118,6 +147,7 @@ def list_tasks():
             if project_id and project_id in project_map:
                 item['project'] = project_map[project_id]
         
+        _tasks_cache_set(cache_key, result)
         return ApiResponse.success(result, "Tasks retrieved successfully").to_response()
         
     except Exception as e:
@@ -212,6 +242,7 @@ def create_task():
         project.last_activity_at = datetime.utcnow()
 
         db.session.commit()
+        invalidate_user_caches(current_user.id)
 
         # 记录历史
         TaskHistory.log_action(
@@ -345,6 +376,7 @@ def update_task(task_id):
             task.project.last_activity_at = datetime.utcnow()
 
         db.session.commit()
+        invalidate_user_caches(current_user.id)
 
         # 记录变更历史
         status_changed = False
@@ -410,6 +442,7 @@ def delete_task(task_id):
         
         # 删除任务
         task.delete()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(None, "Task deleted successfully", 204).to_response()
         

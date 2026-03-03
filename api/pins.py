@@ -2,12 +2,40 @@
 用户项目Pin API接口
 """
 
-from flask import Blueprint, request, jsonify, g
+from datetime import datetime
+from flask import Blueprint, request
+from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 from models import db, UserProjectPin, Project
 from core.auth import unified_auth_required, get_current_user
-from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
+from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
+from core.cache_invalidation import invalidate_user_caches
+from .base import ApiResponse, handle_api_error
 
 pins_bp = Blueprint('pins', __name__)
+PINS_CACHE_TTL_SECONDS = 20
+pins_fallback_cache = {}
+
+
+def _pins_cache_get(key):
+    redis_key = f"pins:{key}"
+    cached = redis_get_json(redis_key)
+    if cached is not None:
+        return cached
+
+    item = pins_fallback_cache.get(key)
+    if item and (datetime.utcnow().timestamp() - item['cached_at'] <= PINS_CACHE_TTL_SECONDS):
+        return item['value']
+    return None
+
+
+def _pins_cache_set(key, value):
+    redis_key = f"pins:{key}"
+    redis_set_json(redis_key, value, PINS_CACHE_TTL_SECONDS)
+    pins_fallback_cache[key] = {
+        'cached_at': datetime.utcnow().timestamp(),
+        'value': value,
+    }
 
 
 @pins_bp.route('', methods=['GET'])
@@ -16,9 +44,14 @@ def get_user_pins():
     """获取当前用户的Pin配置"""
     try:
         user_id = get_current_user().id
-        # 使用join来确保加载项目数据
+        cache_key = f"user:{user_id}:list"
+        cached = _pins_cache_get(cache_key)
+        if cached is not None:
+            return ApiResponse.success(cached, "User pins retrieved successfully").to_response()
+
+        # 显式预加载项目关系，避免 to_dict() 触发 N+1
         pins = UserProjectPin.query.filter_by(user_id=user_id, is_active=True)\
-            .join(Project)\
+            .options(joinedload(UserProjectPin.project))\
             .order_by(UserProjectPin.pin_order.asc(), UserProjectPin.created_at.asc())\
             .all()
 
@@ -28,10 +61,12 @@ def get_user_pins():
             pin_dict = pin.to_dict()
             result.append(pin_dict)
 
-        return ApiResponse.success({
+        response_data = {
             'pins': result,
             'total': len(result)
-        }, "User pins retrieved successfully").to_response()
+        }
+        _pins_cache_set(cache_key, response_data)
+        return ApiResponse.success(response_data, "User pins retrieved successfully").to_response()
 
     except Exception as e:
         return handle_api_error(e)
@@ -67,6 +102,7 @@ def pin_project():
         pin = UserProjectPin.pin_project(user_id, project_id, pin_order)
         db.session.add(pin)
         db.session.commit()
+        invalidate_user_caches(user_id)
         
         return ApiResponse.success({
             'pin': pin.to_dict()
@@ -91,6 +127,7 @@ def unpin_project(project_id):
 
         db.session.add(pin)
         db.session.commit()
+        invalidate_user_caches(user_id)
 
         return ApiResponse.success(None, 'Project unpinned successfully').to_response()
     
@@ -116,9 +153,21 @@ def reorder_pins():
             if not isinstance(item, dict) or 'project_id' not in item or 'pin_order' not in item:
                 return ApiResponse.error('Invalid pin_orders format', 400).to_response()
         
-        # 重新排序
-        UserProjectPin.reorder_pins(user_id, pin_orders)
+        # 批量读取后内存更新，避免循环中的 N 次查询
+        target_project_ids = [item['project_id'] for item in pin_orders]
+        pins = UserProjectPin.query.filter(
+            UserProjectPin.user_id == user_id,
+            UserProjectPin.is_active.is_(True),
+            UserProjectPin.project_id.in_(target_project_ids)
+        ).all()
+        pin_map = {pin.project_id: pin for pin in pins}
+        for item in pin_orders:
+            pin = pin_map.get(item['project_id'])
+            if pin:
+                pin.pin_order = item['pin_order']
+
         db.session.commit()
+        invalidate_user_caches(user_id)
         
         return ApiResponse.success(None, 'Pins reordered successfully').to_response()
     
@@ -150,13 +199,20 @@ def get_pin_stats():
     """获取Pin统计信息"""
     try:
         user_id = get_current_user().id
+        cache_key = f"user:{user_id}:stats"
+        cached = _pins_cache_get(cache_key)
+        if cached is not None:
+            return ApiResponse.success(cached, "Pin statistics retrieved successfully").to_response()
+
         pin_count = UserProjectPin.get_user_pin_count(user_id)
 
-        return ApiResponse.success({
+        response_data = {
             'pin_count': pin_count,
             'max_pins': 10,
             'remaining': max(0, 10 - pin_count)
-        }, "Pin statistics retrieved successfully").to_response()
+        }
+        _pins_cache_set(cache_key, response_data)
+        return ApiResponse.success(response_data, "Pin statistics retrieved successfully").to_response()
 
     except Exception as e:
         return handle_api_error(e)
@@ -168,43 +224,63 @@ def get_pinned_projects_task_counts():
     """获取Pin项目的待执行任务数量"""
     try:
         user_id = get_current_user().id
+        cache_key = f"user:{user_id}:task-counts"
+        cached = _pins_cache_get(cache_key)
+        if cached is not None:
+            return ApiResponse.success(cached, "Task counts retrieved successfully").to_response()
 
         # 获取用户的Pin项目
         pins = UserProjectPin.query.filter_by(user_id=user_id, is_active=True)\
-            .join(Project)\
+            .options(joinedload(UserProjectPin.project))\
             .order_by(UserProjectPin.pin_order.asc(), UserProjectPin.created_at.asc())\
             .all()
 
         if not pins:
-            return ApiResponse.success({
+            response_data = {
                 'task_counts': [],
                 'total_pins': 0
-            }, "Task counts retrieved successfully").to_response()
+            }
+            _pins_cache_set(cache_key, response_data)
+            return ApiResponse.success(response_data, "Task counts retrieved successfully").to_response()
 
-        # 批量查询每个项目的待执行任务数量
         from models.task import Task, TaskStatus
+        pending_statuses = [TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]
+        project_ids = [pin.project_id for pin in pins]
+
+        # 单次聚合查询待执行任务数量，避免 N+1 count
+        pending_rows = db.session.query(
+            Task.project_id.label('project_id'),
+            func.count(Task.id).label('pending_tasks')
+        ).filter(
+            Task.project_id.in_(project_ids),
+            Task.status.in_(pending_statuses)
+        ).group_by(
+            Task.project_id
+        ).all()
+
+        pending_map = {
+            row.project_id: int(row.pending_tasks or 0)
+            for row in pending_rows
+        }
 
         result = []
         for pin in pins:
             project = pin.project
             if project:
-                # 查询待执行任务数量（todo, in_progress, review）
-                pending_count = Task.query.filter_by(project_id=project.id).filter(
-                    Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW])
-                ).count()
-
                 result.append({
                     'project_id': project.id,
                     'project_name': project.name,
                     'project_color': project.color,
-                    'pending_tasks': pending_count,
+                    'pending_tasks': pending_map.get(project.id, 0),
                     'pin_order': pin.pin_order
                 })
 
-        return ApiResponse.success({
+        response_data = {
             'task_counts': result,
             'total_pins': len(result)
-        }, "Task counts retrieved successfully").to_response()
+        }
+        _pins_cache_set(cache_key, response_data)
+        return ApiResponse.success(response_data, "Task counts retrieved successfully").to_response()
 
     except Exception as e:
         return handle_api_error(e)

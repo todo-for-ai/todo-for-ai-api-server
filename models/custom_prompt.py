@@ -122,16 +122,23 @@ class CustomPrompt(db.Model):
             user_id: 用户ID
             prompt_orders: 列表，包含 {'id': prompt_id, 'order_index': new_order} 的字典
         """
+        prompt_ids = [order_data['id'] for order_data in prompt_orders if 'id' in order_data]
+        if not prompt_ids:
+            return
+
+        prompts = cls.query.filter(
+            cls.id.in_(prompt_ids),
+            cls.user_id == user_id,
+            cls.prompt_type == PromptType.TASK_BUTTON
+        ).all()
+        prompt_map = {prompt.id: prompt for prompt in prompts}
+        now = datetime.utcnow()
+
         for order_data in prompt_orders:
-            prompt = cls.query.filter(
-                cls.id == order_data['id'],
-                cls.user_id == user_id,
-                cls.prompt_type == PromptType.TASK_BUTTON
-            ).first()
-            
+            prompt = prompt_map.get(order_data.get('id'))
             if prompt:
                 prompt.order_index = order_data['order_index']
-                prompt.updated_at = datetime.utcnow()
+                prompt.updated_at = now
 
     @classmethod
     def get_default_project_template(cls, language='zh-CN'):

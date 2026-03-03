@@ -87,6 +87,17 @@ class Config:
     JWT_ACCESS_TOKEN_EXPIRES = 86400  # 1 day (24 hours)
     JWT_REFRESH_TOKEN_EXPIRES = 2592000  # 30 days (1 month)
 
+    # Redis 配置（默认本地启动无密码）
+    REDIS_ENABLED = os.environ.get('REDIS_ENABLED', 'true').lower() == 'true'
+    REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
+    REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
+    REDIS_DB = int(os.environ.get('REDIS_DB', 0))
+    REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD') or None
+    REDIS_URL = os.environ.get('REDIS_URL') or (
+        f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+        if REDIS_PASSWORD is None else
+        f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+    )
 
     
 

@@ -5,7 +5,7 @@
 import enum
 from sqlalchemy import Column, String, Text, Enum, DateTime, Integer, ForeignKey
 from sqlalchemy.orm import relationship
-from .base import BaseModel
+from .base import BaseModel, db
 
 
 class ProjectStatus(enum.Enum):
@@ -65,14 +65,33 @@ class Project(BaseModel):
         result['status'] = self.status.value if self.status else None
         
         if include_stats:
-            # 添加任务统计
+            from sqlalchemy import func, case
             from .task import TaskStatus
+            from .task import Task
+            from .context_rule import ContextRule
+
+            task_stats_row = db.session.query(
+                func.count(Task.id).label('total_tasks'),
+                func.sum(case((Task.status == TaskStatus.TODO, 1), else_=0)).label('todo_tasks'),
+                func.sum(case((Task.status == TaskStatus.IN_PROGRESS, 1), else_=0)).label('in_progress_tasks'),
+                func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('done_tasks')
+            ).filter(
+                Task.project_id == self.id
+            ).first()
+
+            context_rules_count = db.session.query(
+                func.count(ContextRule.id)
+            ).filter(
+                ContextRule.project_id == self.id,
+                ContextRule.is_active.is_(True)
+            ).scalar() or 0
+
             result['stats'] = {
-                'total_tasks': self.tasks.count(),
-                'todo_tasks': self.tasks.filter_by(status=TaskStatus.TODO).count(),
-                'in_progress_tasks': self.tasks.filter_by(status=TaskStatus.IN_PROGRESS).count(),
-                'done_tasks': self.tasks.filter_by(status=TaskStatus.DONE).count(),
-                'context_rules_count': self.context_rules.filter_by(is_active=True).count(),
+                'total_tasks': int((task_stats_row.total_tasks if task_stats_row else 0) or 0),
+                'todo_tasks': int((task_stats_row.todo_tasks if task_stats_row else 0) or 0),
+                'in_progress_tasks': int((task_stats_row.in_progress_tasks if task_stats_row else 0) or 0),
+                'done_tasks': int((task_stats_row.done_tasks if task_stats_row else 0) or 0),
+                'context_rules_count': int(context_rules_count),
             }
         
         return result

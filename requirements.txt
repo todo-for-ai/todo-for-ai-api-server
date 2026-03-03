@@ -10,6 +10,7 @@ PyMySQL==1.1.0
 
 # 工具库
 python-dotenv==1.0.0
+redis==5.0.1
 
 # HTTP 客户端
 requests==2.31.0

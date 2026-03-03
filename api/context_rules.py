@@ -9,9 +9,34 @@ from flask import Blueprint, request
 from models import db, ContextRule, Project
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 from core.auth import unified_auth_required, get_current_user
+from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
+from core.cache_invalidation import invalidate_user_caches
 
 # 创建蓝图
 context_rules_bp = Blueprint('context_rules', __name__)
+CONTEXT_RULES_CACHE_TTL_SECONDS = 20
+context_rules_fallback_cache = {}
+
+
+def _context_rules_cache_get(key):
+    redis_key = f"context-rules:{key}"
+    cached = redis_get_json(redis_key)
+    if cached is not None:
+        return cached
+
+    item = context_rules_fallback_cache.get(key)
+    if item and (datetime.utcnow().timestamp() - item['cached_at'] <= CONTEXT_RULES_CACHE_TTL_SECONDS):
+        return item['value']
+    return None
+
+
+def _context_rules_cache_set(key, value):
+    redis_key = f"context-rules:{key}"
+    redis_set_json(redis_key, value, CONTEXT_RULES_CACHE_TTL_SECONDS)
+    context_rules_fallback_cache[key] = {
+        'cached_at': datetime.utcnow().timestamp(),
+        'value': value,
+    }
 
 
 @context_rules_bp.route('', methods=['GET'])
@@ -80,17 +105,27 @@ def list_context_rules():
         
         # 分页
         result = paginate_query(query, args['page'], args['per_page'])
-        
-        # 包含项目信息
+
+        # 批量加载项目信息，避免 N+1 查询
+        project_ids = list({item['project_id'] for item in result['items'] if item.get('project_id')})
+        project_map = {}
+        if project_ids:
+            projects = db.session.query(Project.id, Project.name, Project.color).filter(
+                Project.id.in_(project_ids)
+            ).all()
+            project_map = {
+                project.id: {
+                    'id': project.id,
+                    'name': project.name,
+                    'color': project.color
+                }
+                for project in projects
+            }
+
         for item in result['items']:
-            if item.get('project_id'):
-                project = Project.query.get(item['project_id'])
-                if project:
-                    item['project'] = {
-                        'id': project.id,
-                        'name': project.name,
-                        'color': project.color
-                    }
+            project_id = item.get('project_id')
+            if project_id and project_id in project_map:
+                item['project'] = project_map[project_id]
         
         return ApiResponse.success(result, "Context rules retrieved successfully").to_response()
         
@@ -145,6 +180,7 @@ def create_context_rule():
         )
 
         db.session.commit()
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.created(
             context_rule.to_dict(include_project=True),
@@ -203,6 +239,7 @@ def update_context_rule(rule_id):
                 setattr(context_rule, field, data[field])
 
         db.session.commit()
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.success(
             context_rule.to_dict(include_project=True),
@@ -226,6 +263,7 @@ def delete_context_rule(rule_id):
 
         # 删除规则
         context_rule.delete()
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.success(None, "Context rule deleted successfully", 204).to_response()
 
@@ -245,6 +283,7 @@ def activate_context_rule(rule_id):
             return ApiResponse.error("Context rule not found", 404, error_details={"code": "CONTEXT_RULE_NOT_FOUND"}).to_response()
 
         context_rule.activate()
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.success(
             context_rule.to_dict(),
@@ -267,6 +306,7 @@ def deactivate_context_rule(rule_id):
             return ApiResponse.error("Context rule not found", 404, error_details={"code": "CONTEXT_RULE_NOT_FOUND"}).to_response()
 
         context_rule.deactivate()
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.success(
             context_rule.to_dict(),
@@ -420,6 +460,10 @@ def get_global_context_rules():
     try:
         current_user = get_current_user()
         args = get_request_args()
+        cache_key = f"user:{current_user.id}:global:q:{request.query_string.decode('utf-8')}"
+        cached = _context_rules_cache_get(cache_key)
+        if cached is not None:
+            return ApiResponse.success(cached, "Global context rules retrieved successfully").to_response()
 
         # 构建查询 - 获取全局规则（is_global=True 或 project_id为空且is_public=True）
         query = ContextRule.query.filter(
@@ -460,6 +504,7 @@ def get_global_context_rules():
 
         result = [rule.to_dict(include_project=True) for rule in rules]
 
+        _context_rules_cache_set(cache_key, result)
         return ApiResponse.success(result, "Global context rules retrieved successfully").to_response()
 
     except Exception as e:
@@ -473,6 +518,10 @@ def get_merged_context_rules():
     try:
         current_user = get_current_user()
         args = get_request_args()
+        cache_key = f"user:{current_user.id}:merged:q:{request.query_string.decode('utf-8')}"
+        cached = _context_rules_cache_get(cache_key)
+        if cached is not None:
+            return ApiResponse.success(cached, "Merged context rules retrieved successfully").to_response()
 
         project_id = args.get('project_id')
 
@@ -509,6 +558,7 @@ def get_merged_context_rules():
             'rules': [rule.to_dict(include_project=True) for rule in rules]
         }
 
+        _context_rules_cache_set(cache_key, result)
         return ApiResponse.success(result, "Merged context rules retrieved successfully").to_response()
 
     except Exception as e:

@@ -10,6 +10,7 @@ Todo for AI - Flask 应用入口
 """
 
 import os
+import threading
 from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_migrate import Migrate
@@ -20,6 +21,7 @@ from core.config import config
 from core.middleware import setup_all_middleware
 from core.github_config import github_service
 from core.google_config import google_service
+from core.redis_client import get_redis_client
 
 
 def create_app(config_name=None):
@@ -100,10 +102,20 @@ def register_blueprints(app):
         except Exception as e:
             db_status = f'error: {str(e)}'
 
+        try:
+            redis_client = get_redis_client()
+            if redis_client:
+                redis_status = 'connected'
+            else:
+                redis_status = 'disabled_or_unavailable'
+        except Exception as e:
+            redis_status = f'error: {str(e)}'
+
         return ApiResponse.success(
             data={
                 'status': 'healthy',
-                'database': db_status
+                'database': db_status,
+                'redis': redis_status
             },
             message='Service is healthy'
         ).to_response()
@@ -121,12 +133,22 @@ def register_blueprints(app):
         except Exception as e:
             db_status = f'error: {str(e)}'
 
+        try:
+            redis_client = get_redis_client()
+            if redis_client:
+                redis_status = 'connected'
+            else:
+                redis_status = 'disabled_or_unavailable'
+        except Exception as e:
+            redis_status = f'error: {str(e)}'
+
         return ApiResponse.success(
             data={
                 'status': 'healthy',
                 'service': 'Todo for AI API',
                 'version': '1.0.0',
                 'database': db_status,
+                'redis': redis_status,
                 'environment': app.config.get('ENV', 'development')
             },
             message='API service is healthy'
@@ -180,12 +202,66 @@ def register_commands(app):
         print('Database reset.')
 
 
+def _prewarm_dashboard_cache_on_startup(flask_app):
+    """启动后异步预热 dashboard 缓存，降低首个用户请求冷启动耗时"""
+    with flask_app.app_context():
+        try:
+            from models import User, UserStatus
+            from api.dashboard import (
+                _build_dashboard_stats,
+                _dashboard_cache_set,
+                DASHBOARD_STATS_CACHE_TTL_SECONDS,
+                DASHBOARD_STATS_STALE_TTL_SECONDS,
+            )
+
+            prewarm_users = int(os.environ.get('DASHBOARD_PREWARM_USERS', '3'))
+            active_users = User.query.filter(
+                User.status == UserStatus.ACTIVE
+            ).order_by(
+                User.last_active_at.desc(),
+                User.id.desc()
+            ).limit(
+                prewarm_users
+            ).all()
+
+            for user in active_users:
+                cache_key = f"user:{user.id}:stats"
+                data = _build_dashboard_stats(user.id)
+                _dashboard_cache_set(
+                    cache_key,
+                    data,
+                    DASHBOARD_STATS_CACHE_TTL_SECONDS,
+                    DASHBOARD_STATS_STALE_TTL_SECONDS
+                )
+            flask_app.logger.info(f"Dashboard cache prewarm finished for {len(active_users)} users")
+        except Exception as e:
+            flask_app.logger.warning(f"Dashboard cache prewarm failed: {e}")
+
+
+def start_dashboard_cache_prewarm(flask_app):
+    """根据开关启动 dashboard 预热线程"""
+    enabled = os.environ.get('DASHBOARD_PREWARM_ON_STARTUP', 'true').lower() == 'true'
+    if not enabled:
+        return
+    blocking = os.environ.get('DASHBOARD_PREWARM_BLOCKING', 'false').lower() == 'true'
+    if blocking:
+        _prewarm_dashboard_cache_on_startup(flask_app)
+        return
+    thread = threading.Thread(
+        target=_prewarm_dashboard_cache_on_startup,
+        args=(flask_app,),
+        daemon=True
+    )
+    thread.start()
+
+
 # 创建应用实例
 app = create_app()
 
 # 在应用启动时创建数据库表
 with app.app_context():
     db.create_all()
+    start_dashboard_cache_prewarm(app)
     print('✅ 数据库表已创建/更新')
 
 

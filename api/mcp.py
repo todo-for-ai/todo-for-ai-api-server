@@ -8,6 +8,8 @@ from flask import Blueprint, request, jsonify, g
 from models import db, Project, Task, TaskStatus, ContextRule, ApiToken
 from api.base import handle_api_error
 from core.github_config import require_auth
+from core.cache_invalidation import invalidate_user_caches
+from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
 from datetime import datetime, timedelta
 from functools import wraps
 import html
@@ -19,6 +21,45 @@ mcp_bp = Blueprint('mcp', __name__)
 
 # 简单的内存频率限制器
 rate_limiter = defaultdict(list)
+
+# 用户项目统计缓存，降低重复聚合查询开销
+project_stats_cache = {}
+PROJECT_STATS_CACHE_TTL_SECONDS = 30
+
+
+def _get_project_stats_cache(cache_key):
+    """读取项目统计缓存（优先 Redis，回退内存）"""
+    redis_key = f"mcp:project_stats:{cache_key}"
+    cached_value = redis_get_json(redis_key)
+    if cached_value is not None:
+        return cached_value, 'redis'
+
+    memory_item = project_stats_cache.get(cache_key)
+    if memory_item and (time.time() - memory_item['cached_at'] <= PROJECT_STATS_CACHE_TTL_SECONDS):
+        return {
+            'task_stats_map': memory_item['task_stats_map'],
+            'context_rules_map': memory_item['context_rules_map'],
+            'cached_at': memory_item['cached_at'],
+        }, 'memory'
+
+    return None, None
+
+
+def _set_project_stats_cache(cache_key, task_stats_map, context_rules_map):
+    """写入项目统计缓存（Redis + 内存）"""
+    now = time.time()
+    payload = {
+        'cached_at': now,
+        'task_stats_map': task_stats_map,
+        'context_rules_map': context_rules_map,
+    }
+    redis_key = f"mcp:project_stats:{cache_key}"
+    redis_set_json(redis_key, payload, PROJECT_STATS_CACHE_TTL_SECONDS)
+
+    project_stats_cache[cache_key] = payload
+    if len(project_stats_cache) > 200:
+        oldest_key = min(project_stats_cache.items(), key=lambda item: item[1]['cached_at'])[0]
+        project_stats_cache.pop(oldest_key, None)
 
 
 def rate_limit(max_requests=10, window_seconds=60):
@@ -631,6 +672,7 @@ def submit_task_feedback(arguments):
     project.last_activity_at = datetime.utcnow()
 
     db.session.commit()
+    invalidate_user_caches(g.current_user.id)
 
     # 记录用户活跃度
     user_id = None
@@ -735,6 +777,7 @@ def create_task(arguments):
 
         db.session.add(task)
         db.session.commit()
+        invalidate_user_caches(g.current_user.id)
 
         # 注意：标签和相关文件功能暂时不支持，因为相关模型尚未实现
         # 这些参数会被保存在返回结果中，但不会存储到数据库
@@ -856,12 +899,25 @@ def get_project_info(arguments):
         stats_start_time = time.time()
         current_app.logger.debug(f"[GET_PROJECT_INFO_STATS] {func_id} Starting statistics queries")
 
-        total_tasks = Task.query.filter_by(project_id=project.id).count()
-        todo_tasks = Task.query.filter_by(project_id=project.id, status='todo').count()
-        in_progress_tasks = Task.query.filter_by(project_id=project.id, status='in_progress').count()
-        review_tasks = Task.query.filter_by(project_id=project.id, status='review').count()
-        done_tasks = Task.query.filter_by(project_id=project.id, status='done').count()
-        cancelled_tasks = Task.query.filter_by(project_id=project.id, status='cancelled').count()
+        from sqlalchemy import func, case
+        stats_row = db.session.query(
+            func.count(Task.id).label('total_tasks'),
+            func.sum(case((Task.status == TaskStatus.TODO, 1), else_=0)).label('todo_tasks'),
+            func.sum(case((Task.status == TaskStatus.IN_PROGRESS, 1), else_=0)).label('in_progress_tasks'),
+            func.sum(case((Task.status == TaskStatus.REVIEW, 1), else_=0)).label('review_tasks'),
+            func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('done_tasks'),
+            func.sum(case((Task.status == TaskStatus.CANCELLED, 1), else_=0)).label('cancelled_tasks')
+        ).filter(
+            Task.project_id == project.id,
+            Task.owner_id == g.current_user.id
+        ).first()
+
+        total_tasks = int((stats_row.total_tasks if stats_row else 0) or 0)
+        todo_tasks = int((stats_row.todo_tasks if stats_row else 0) or 0)
+        in_progress_tasks = int((stats_row.in_progress_tasks if stats_row else 0) or 0)
+        review_tasks = int((stats_row.review_tasks if stats_row else 0) or 0)
+        done_tasks = int((stats_row.done_tasks if stats_row else 0) or 0)
+        cancelled_tasks = int((stats_row.cancelled_tasks if stats_row else 0) or 0)
 
         stats_duration = time.time() - stats_start_time
         current_app.logger.debug(f"[GET_PROJECT_INFO_STATS_RESULT] {func_id} Statistics queries completed", extra={
@@ -1013,6 +1069,90 @@ def list_user_projects(arguments):
             'status_filter': status_filter
         })
 
+        task_stats_map = {}
+        context_rules_map = {}
+        if include_stats and projects:
+            from sqlalchemy import func, case
+            project_ids = [project.id for project in projects]
+            cache_key = f"user:{g.current_user.id}"
+            now = time.time()
+            cache_item, cache_source = _get_project_stats_cache(cache_key)
+            cache_hit = cache_item is not None
+
+            if cache_hit:
+                task_stats_map = cache_item.get('task_stats_map', {})
+                context_rules_map = cache_item.get('context_rules_map', {})
+                current_app.logger.debug(
+                    f"[LIST_USER_PROJECTS_CACHE_HIT] {func_id} Using cached project stats",
+                    extra={
+                        'func_id': func_id,
+                        'cache_source': cache_source,
+                        'cache_key': cache_key,
+                        'cache_age_ms': round((now - cache_item['cached_at']) * 1000, 2),
+                        'task_stats_rows': len(task_stats_map),
+                        'context_rows': len(context_rules_map),
+                    }
+                )
+            else:
+                task_agg_start = time.time()
+                task_stats_rows = db.session.query(
+                    Task.project_id.label('project_id'),
+                    func.count(Task.id).label('total_tasks'),
+                    func.sum(case((Task.status == TaskStatus.TODO, 1), else_=0)).label('todo_tasks'),
+                    func.sum(case((Task.status == TaskStatus.IN_PROGRESS, 1), else_=0)).label('in_progress_tasks'),
+                    func.sum(case((Task.status == TaskStatus.REVIEW, 1), else_=0)).label('review_tasks'),
+                    func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('done_tasks'),
+                    func.sum(case((Task.status == TaskStatus.CANCELLED, 1), else_=0)).label('cancelled_tasks')
+                ).filter(
+                    Task.owner_id == g.current_user.id
+                ).group_by(
+                    Task.project_id
+                ).all()
+                task_agg_duration = time.time() - task_agg_start
+
+                task_stats_map = {
+                    row.project_id: {
+                        'total_tasks': int(row.total_tasks or 0),
+                        'todo_tasks': int(row.todo_tasks or 0),
+                        'in_progress_tasks': int(row.in_progress_tasks or 0),
+                        'review_tasks': int(row.review_tasks or 0),
+                        'done_tasks': int(row.done_tasks or 0),
+                        'cancelled_tasks': int(row.cancelled_tasks or 0),
+                    }
+                    for row in task_stats_rows
+                }
+
+                context_agg_start = time.time()
+                context_rows = db.session.query(
+                    ContextRule.project_id.label('project_id'),
+                    func.count(ContextRule.id).label('context_rules_count')
+                ).filter(
+                    ContextRule.user_id == g.current_user.id,
+                    ContextRule.is_active.is_(True)
+                ).group_by(
+                    ContextRule.project_id
+                ).all()
+                context_agg_duration = time.time() - context_agg_start
+
+                context_rules_map = {
+                    row.project_id: int(row.context_rules_count or 0)
+                    for row in context_rows
+                }
+
+                _set_project_stats_cache(cache_key, task_stats_map, context_rules_map)
+
+                current_app.logger.debug(
+                    f"[LIST_USER_PROJECTS_AGG] {func_id} Aggregation queries completed",
+                    extra={
+                        'func_id': func_id,
+                        'task_agg_duration_ms': round(task_agg_duration * 1000, 2),
+                        'context_agg_duration_ms': round(context_agg_duration * 1000, 2),
+                        'task_stats_rows': len(task_stats_rows),
+                        'context_rows': len(context_rows),
+                        'cache_key': cache_key,
+                    }
+                )
+
         # 构建返回数据
         projects_data = []
         for project in projects:
@@ -1034,24 +1174,26 @@ def list_user_projects(arguments):
 
             # 如果需要包含统计信息
             if include_stats:
-                stats_start_time = time.time()
-
-                # 获取任务统计
-                from models.task import TaskStatus
-                total_tasks = project.tasks.count()
-                todo_tasks = project.tasks.filter_by(status=TaskStatus.TODO).count()
-                in_progress_tasks = project.tasks.filter_by(status=TaskStatus.IN_PROGRESS).count()
-                review_tasks = project.tasks.filter_by(status=TaskStatus.REVIEW).count()
-                done_tasks = project.tasks.filter_by(status=TaskStatus.DONE).count()
-                cancelled_tasks = project.tasks.filter_by(status=TaskStatus.CANCELLED).count()
+                stats = task_stats_map.get(project.id, {
+                    'total_tasks': 0,
+                    'todo_tasks': 0,
+                    'in_progress_tasks': 0,
+                    'review_tasks': 0,
+                    'done_tasks': 0,
+                    'cancelled_tasks': 0
+                })
+                total_tasks = stats['total_tasks']
+                todo_tasks = stats['todo_tasks']
+                in_progress_tasks = stats['in_progress_tasks']
+                review_tasks = stats['review_tasks']
+                done_tasks = stats['done_tasks']
+                cancelled_tasks = stats['cancelled_tasks']
 
                 # 计算完成率
                 completion_rate = (done_tasks / total_tasks * 100) if total_tasks > 0 else 0
 
                 # 获取上下文规则数量
-                context_rules_count = project.context_rules.filter_by(is_active=True).count()
-
-                stats_duration = time.time() - stats_start_time
+                context_rules_count = context_rules_map.get(project.id, 0)
 
                 project_dict.update({
                     'total_tasks': total_tasks,
@@ -1069,15 +1211,6 @@ def list_user_projects(arguments):
                         'completion_rate': round(completion_rate, 2),
                         'context_rules_count': context_rules_count
                     }
-                })
-
-                current_app.logger.debug(f"[LIST_USER_PROJECTS_STATS] {func_id} Stats calculated for project {project.id}", extra={
-                    'func_id': func_id,
-                    'project_id': project.id,
-                    'project_name': project.name,
-                    'stats_duration_ms': round(stats_duration * 1000, 2),
-                    'total_tasks': total_tasks,
-                    'completion_rate': round(completion_rate, 2)
                 })
 
             projects_data.append(project_dict)
