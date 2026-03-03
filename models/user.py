@@ -110,6 +110,30 @@ class User(BaseModel):
         cascade='all, delete-orphan',
         lazy='dynamic'
     )
+    owned_organizations = relationship(
+        'Organization',
+        back_populates='owner',
+        foreign_keys='Organization.owner_id',
+        lazy='dynamic'
+    )
+    organization_memberships = relationship(
+        'OrganizationMember',
+        back_populates='user',
+        foreign_keys='OrganizationMember.user_id',
+        lazy='dynamic'
+    )
+    project_memberships = relationship(
+        'ProjectMember',
+        back_populates='user',
+        foreign_keys='ProjectMember.user_id',
+        lazy='dynamic'
+    )
+    task_labels = relationship(
+        'TaskLabel',
+        back_populates='owner',
+        foreign_keys='TaskLabel.owner_id',
+        lazy='dynamic'
+    )
     
     def __repr__(self):
         return f'<User {self.id}: {self.email}>'
@@ -214,8 +238,74 @@ class User(BaseModel):
         return self.status == UserStatus.ACTIVE
     
     def can_access_project(self, project):
-        """检查是否可以访问项目 - 所有用户（包括管理员）只能访问自己的项目"""
-        return project.owner_id == self.id
+        """检查是否可以访问项目（owner或项目成员）"""
+        if not project:
+            return False
+        if project.owner_id == self.id:
+            return True
+
+        from .project_member import ProjectMember, ProjectMemberStatus
+        member = ProjectMember.query.filter_by(
+            project_id=project.id,
+            user_id=self.id,
+            status=ProjectMemberStatus.ACTIVE
+        ).first()
+        return member is not None
+
+    def get_project_role(self, project):
+        """获取用户在项目中的角色"""
+        if not project:
+            return None
+        if project.owner_id == self.id:
+            return 'owner'
+
+        from .project_member import ProjectMember, ProjectMemberStatus
+        member = ProjectMember.query.filter_by(
+            project_id=project.id,
+            user_id=self.id,
+            status=ProjectMemberStatus.ACTIVE
+        ).first()
+        return member.role.value if member and member.role else None
+
+    def can_manage_project(self, project):
+        """是否可管理项目（owner/maintainer）"""
+        role = self.get_project_role(project)
+        return role in {'owner', 'maintainer'}
+
+    def can_access_organization(self, organization):
+        """检查是否可以访问组织（owner或组织成员）"""
+        if not organization:
+            return False
+        if organization.owner_id == self.id:
+            return True
+
+        from .organization import OrganizationMember, OrganizationMemberStatus
+        member = OrganizationMember.query.filter_by(
+            organization_id=organization.id,
+            user_id=self.id,
+            status=OrganizationMemberStatus.ACTIVE
+        ).first()
+        return member is not None
+
+    def get_organization_role(self, organization):
+        """获取用户在组织中的角色"""
+        if not organization:
+            return None
+        if organization.owner_id == self.id:
+            return 'owner'
+
+        from .organization import OrganizationMember, OrganizationMemberStatus
+        member = OrganizationMember.query.filter_by(
+            organization_id=organization.id,
+            user_id=self.id,
+            status=OrganizationMemberStatus.ACTIVE
+        ).first()
+        return member.role.value if member and member.role else None
+
+    def can_manage_organization(self, organization):
+        """是否可管理组织（owner/admin）"""
+        role = self.get_organization_role(organization)
+        return role in {'owner', 'admin'}
     
     def can_access_task(self, task):
         """检查是否可以访问任务 - 所有用户（包括管理员）只能访问自己项目的任务"""

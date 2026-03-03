@@ -6,7 +6,21 @@
 
 from datetime import datetime
 from flask import Blueprint, request
-from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
+from sqlalchemy import and_, or_
+from models import (
+    db,
+    Task,
+    TaskStatus,
+    TaskPriority,
+    Project,
+    ProjectMember,
+    ProjectMemberStatus,
+    TaskLabel,
+    BUILTIN_TASK_LABELS,
+    TaskHistory,
+    ActionType,
+    UserActivity,
+)
 from .base import ApiResponse, paginate_query, paginate_query_fast, validate_json_request, get_request_args, APIException, handle_api_error
 from core.auth import unified_auth_required, get_current_user
 from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
@@ -17,6 +31,93 @@ tasks_bp = Blueprint('tasks', __name__)
 
 TASKS_LIST_CACHE_TTL_SECONDS = 15
 tasks_list_fallback_cache = {}
+
+
+def _normalize_tags(raw_tags):
+    if not raw_tags:
+        return []
+    normalized = []
+    seen = set()
+    for raw in raw_tags:
+        tag = str(raw).strip().lower()
+        if not tag or tag in seen:
+            continue
+        seen.add(tag)
+        normalized.append(tag)
+    return normalized
+
+
+def _ensure_builtin_labels():
+    for item in BUILTIN_TASK_LABELS:
+        exists = TaskLabel.query.filter(
+            TaskLabel.is_builtin.is_(True),
+            TaskLabel.name == item['name'],
+            TaskLabel.owner_id.is_(None),
+            TaskLabel.project_id.is_(None)
+        ).first()
+        if exists:
+            # 如果内置标签被误禁用或属性漂移，自动修复
+            exists.is_active = True
+            exists.color = item['color']
+            exists.description = item['description']
+            continue
+        TaskLabel.create(
+            owner_id=None,
+            project_id=None,
+            name=item['name'],
+            color=item['color'],
+            description=item['description'],
+            is_builtin=True,
+            is_active=True,
+            created_by='system',
+            created_by_user_id=None,
+        )
+    db.session.flush()
+
+
+def _ensure_labels_for_tags(current_user, project_id, tags):
+    if not tags:
+        return
+    _ensure_builtin_labels()
+    for tag in tags:
+        exists = TaskLabel.query.filter(
+            or_(
+                and_(TaskLabel.is_builtin.is_(True), TaskLabel.name == tag),
+                and_(TaskLabel.owner_id == current_user.id, TaskLabel.project_id == project_id, TaskLabel.name == tag),
+                and_(TaskLabel.owner_id == current_user.id, TaskLabel.project_id.is_(None), TaskLabel.name == tag),
+            )
+        ).first()
+        if exists:
+            # 软删除标签在任务输入中再次出现时，自动恢复可见性
+            if not exists.is_active:
+                exists.is_active = True
+            continue
+        TaskLabel.create(
+            owner_id=current_user.id,
+            project_id=project_id,
+            name=tag,
+            color='#1677ff',
+            description='',
+            is_builtin=False,
+            is_active=True,
+            created_by=current_user.email,
+            created_by_user_id=current_user.id,
+        )
+    db.session.flush()
+
+
+def _invalidate_project_users(project_id):
+    project = Project.query.get(project_id)
+    if not project:
+        return
+    user_ids = {project.owner_id}
+    member_rows = db.session.query(ProjectMember.user_id).filter(
+        ProjectMember.project_id == project_id,
+        ProjectMember.status == ProjectMemberStatus.ACTIVE
+    ).all()
+    user_ids.update([row.user_id for row in member_rows])
+    for user_id in user_ids:
+        invalidate_user_caches(user_id)
 
 
 def _tasks_cache_get(key):
@@ -59,8 +160,20 @@ def list_tasks():
         if cached_result is not None:
             return ApiResponse.success(cached_result, "Tasks retrieved successfully").to_response()
 
-        # 构建查询
-        query = Task.query.filter(Task.owner_id == current_user.id)
+        member_project_ids = db.session.query(ProjectMember.project_id).filter(
+            ProjectMember.user_id == current_user.id,
+            ProjectMember.status == ProjectMemberStatus.ACTIVE
+        ).subquery()
+
+        accessible_project_ids = db.session.query(Project.id).filter(
+            or_(
+                Project.owner_id == current_user.id,
+                Project.id.in_(member_project_ids)
+            )
+        ).subquery()
+
+        # 构建查询（owner + member 可访问项目）
+        query = Task.query.filter(Task.project_id.in_(accessible_project_ids))
         
         # 项目筛选
         if args['project_id']:
@@ -167,7 +280,7 @@ def create_task():
             required_fields=['project_id'],
             optional_fields=[
                 'title', 'content', 'status', 'priority',
-                'due_date', 'tags', 'is_ai_task'
+                'due_date', 'tags', 'labels', 'is_ai_task'
             ]
         )
 
@@ -179,8 +292,8 @@ def create_task():
         if not project:
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
-        # 验证用户是否有权限在该项目中创建任务 - 只能在自己的项目中创建任务
-        if project.owner_id != current_user.id:
+        # 验证用户是否有权限在该项目中创建任务
+        if not current_user.can_access_project(project):
             return ApiResponse.error("Permission denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 处理日期字段
@@ -223,6 +336,10 @@ def create_task():
                 # 如果都没有，生成默认标题
                 title = f"新任务 - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
+        incoming_tags = data.get('labels', data.get('tags', []))
+        normalized_tags = _normalize_tags(incoming_tags)
+        _ensure_labels_for_tags(current_user, project.id, normalized_tags)
+
         # 创建任务
         task = Task.create(
             project_id=data['project_id'],
@@ -232,7 +349,7 @@ def create_task():
             status=status,
             priority=priority,
             due_date=due_date,
-            tags=data.get('tags', []),
+            tags=normalized_tags,
             is_ai_task=data.get('is_ai_task', False),
             creator_id=current_user.id,  # 设置创建者ID
             created_by=current_user.email  # 设置创建者邮箱
@@ -242,7 +359,7 @@ def create_task():
         project.last_activity_at = datetime.utcnow()
 
         db.session.commit()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(project.id)
 
         # 记录历史
         TaskHistory.log_action(
@@ -282,8 +399,8 @@ def get_task(task_id):
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
 
         # 权限检查 - 只能访问自己项目中的任务
-        if task.project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only access tasks from your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
         return ApiResponse.success(
             task.to_dict(include_project=True, include_stats=True),
@@ -306,14 +423,14 @@ def update_task(task_id):
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
 
         # 验证用户是否有权限更新该任务 - 只能更新自己项目的任务
-        if task.project.owner_id != current_user.id:
+        if not current_user.can_access_project(task.project):
             return ApiResponse.error("Permission denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 验证请求数据
         data = validate_json_request(
             optional_fields=[
                 'title', 'content', 'status', 'priority',
-                'due_date', 'completion_rate', 'tags'
+                'due_date', 'completion_rate', 'tags', 'labels'
             ]
         )
         
@@ -362,7 +479,7 @@ def update_task(task_id):
                 return ApiResponse.error(f"Invalid priority: {data['priority']}", 400).to_response()
         
         # 处理其他字段
-        simple_fields = ['title', 'content', 'completion_rate', 'tags']
+        simple_fields = ['title', 'content', 'completion_rate']
         for field in simple_fields:
             if field in data:
                 old_value = getattr(task, field)
@@ -371,12 +488,25 @@ def update_task(task_id):
                     changes.append((field, old_value, new_value))
                     setattr(task, field, new_value)
 
+        incoming_tags = None
+        if 'labels' in data:
+            incoming_tags = data.get('labels', [])
+        elif 'tags' in data:
+            incoming_tags = data.get('tags', [])
+
+        if incoming_tags is not None:
+            normalized_tags = _normalize_tags(incoming_tags)
+            _ensure_labels_for_tags(current_user, task.project_id, normalized_tags)
+            if task.tags != normalized_tags:
+                changes.append(('tags', task.tags, normalized_tags))
+                task.tags = normalized_tags
+
         # 更新项目最后活动时间
         if changes:  # 只有在有实际更改时才更新项目活跃时间
             task.project.last_activity_at = datetime.utcnow()
 
         db.session.commit()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(task.project_id)
 
         # 记录变更历史
         status_changed = False
@@ -429,8 +559,8 @@ def delete_task(task_id):
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
 
         # 与list权限一致 所有用户（包括管理员）只能删除自己项目中的任务
-        if task.project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only delete tasks from your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 记录删除历史
         TaskHistory.log_action(
@@ -442,7 +572,7 @@ def delete_task(task_id):
         
         # 删除任务
         task.delete()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(task.project_id)
         
         return ApiResponse.success(None, "Task deleted successfully", 204).to_response()
         
@@ -464,8 +594,8 @@ def get_task_history(task_id):
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
 
         # 权限检查 - 只能访问自己项目中的任务历史
-        if task.project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only access history from your own tasks", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
         # 获取任务历史记录
         history_records = TaskHistory.get_task_history(task_id, limit=100)  # 限制返回最近100条记录
@@ -494,8 +624,8 @@ def get_task_attachments(task_id):
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
 
         # 权限检查 - 只能访问自己项目中的任务附件
-        if task.project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only access attachments from your own tasks", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
         # TODO: 实现完整的附件功能
         # 目前返回空列表，避免前端调用出错
@@ -523,8 +653,8 @@ def delete_task_attachment(task_id, attachment_id):
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
 
         # 权限检查 - 只能删除自己项目中的任务附件
-        if task.project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only delete attachments from your own tasks", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
         # TODO: 实现完整的附件删除功能
         # 目前返回成功响应，避免前端调用出错

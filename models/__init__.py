@@ -7,7 +7,10 @@ Todo for AI - 数据模型包
 from .base import db
 from .user import User, UserRole, UserStatus
 from .project import Project, ProjectStatus
+from .organization import Organization, OrganizationStatus, OrganizationMember, OrganizationRole, OrganizationMemberStatus
+from .project_member import ProjectMember, ProjectMemberRole, ProjectMemberStatus
 from .task import Task, TaskStatus, TaskPriority
+from .task_label import TaskLabel, BUILTIN_TASK_LABELS
 from .context_rule import ContextRule
 from .task_history import TaskHistory, ActionType
 from .attachment import Attachment
@@ -24,9 +27,19 @@ __all__ = [
     'UserStatus',
     'Project',
     'ProjectStatus',
+    'Organization',
+    'OrganizationStatus',
+    'OrganizationMember',
+    'OrganizationRole',
+    'OrganizationMemberStatus',
+    'ProjectMember',
+    'ProjectMemberRole',
+    'ProjectMemberStatus',
     'Task',
     'TaskStatus',
     'TaskPriority',
+    'TaskLabel',
+    'BUILTIN_TASK_LABELS',
     'ContextRule',
     'RuleType',
     'TaskHistory',

@@ -5,10 +5,21 @@
 """
 
 from flask import Blueprint, request
-from sqlalchemy import func, case
+from sqlalchemy import func, case, or_
 from datetime import datetime, timedelta
-from models import db, Project, ProjectStatus, Task, TaskStatus
-from .base import paginate_query, validate_json_request, get_request_args, APIException, ApiResponse
+from models import (
+    db,
+    User,
+    Project,
+    ProjectStatus,
+    ProjectMember,
+    ProjectMemberRole,
+    ProjectMemberStatus,
+    Organization,
+    Task,
+    TaskStatus,
+)
+from .base import paginate_query, validate_json_request, get_request_args, ApiResponse
 from core.auth import unified_auth_required, get_current_user
 from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
 from core.cache_invalidation import invalidate_user_caches
@@ -46,6 +57,38 @@ def _projects_cache_set(key, value, ttl=PROJECTS_LIST_CACHE_TTL_SECONDS):
     }
 
 
+def _accessible_projects_query(current_user):
+    member_project_ids = db.session.query(ProjectMember.project_id).filter(
+        ProjectMember.user_id == current_user.id,
+        ProjectMember.status == ProjectMemberStatus.ACTIVE
+    ).subquery()
+    return Project.query.filter(
+        or_(
+            Project.owner_id == current_user.id,
+            Project.id.in_(member_project_ids)
+        )
+    )
+
+
+def _project_member_user_ids(project_id):
+    user_ids = set()
+    project = Project.query.get(project_id)
+    if not project:
+        return user_ids
+    user_ids.add(project.owner_id)
+    member_rows = db.session.query(ProjectMember.user_id).filter(
+        ProjectMember.project_id == project_id,
+        ProjectMember.status == ProjectMemberStatus.ACTIVE
+    ).all()
+    user_ids.update([row.user_id for row in member_rows])
+    return user_ids
+
+
+def _invalidate_project_users(project_id):
+    for user_id in _project_member_user_ids(project_id):
+        invalidate_user_caches(user_id)
+
+
 @projects_bp.route('', methods=['GET'])
 @projects_bp.route('/', methods=['GET'])
 @unified_auth_required
@@ -56,14 +99,11 @@ def list_projects():
         current_user = get_current_user()
 
         # 构建查询
-        query = Project.query
+        query = _accessible_projects_query(current_user)
         pending_statuses = [TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]
 
-        # 用户权限控制 - 所有用户（包括管理员）只能看到自己的项目
-        if current_user:
-            query = query.filter_by(owner_id=current_user.id)
-        else:
-            # 未登录用户不能访问项目列表
+        # 用户权限控制
+        if not current_user:
             return ApiResponse.unauthorized("Authentication required").to_response()
 
         # 缓存仅用于列表查询（按用户 + 查询参数隔离）
@@ -94,11 +134,15 @@ def list_projects():
             # 只显示活跃项目，排除已归档和已删除的项目
             query = query.filter_by(status=ProjectStatus.ACTIVE)
 
+        # 组织筛选
+        organization_id = request.args.get('organization_id', type=int)
+        if organization_id is not None:
+            query = query.filter(Project.organization_id == organization_id)
+
         # 是否有未完成任务筛选
         has_pending_tasks = request.args.get('has_pending_tasks')
         pending_tasks_exists = db.session.query(Task.id).filter(
             Task.project_id == Project.id,
-            Task.owner_id == current_user.id,
             Task.status.in_(pending_statuses)
         ).exists()
         if has_pending_tasks == 'true':
@@ -197,10 +241,27 @@ def list_projects():
 
             result = paginate_query(query, args['page'], args['per_page'])
 
+        project_ids = [item['id'] for item in result['items'] if item.get('id')]
+        role_map = {}
+        if project_ids:
+            role_rows = ProjectMember.query.filter(
+                ProjectMember.project_id.in_(project_ids),
+                ProjectMember.user_id == current_user.id,
+                ProjectMember.status == ProjectMemberStatus.ACTIVE
+            ).all()
+            role_map = {
+                row.project_id: row.role.value
+                for row in role_rows
+            }
+        for project_dict in result['items']:
+            project_dict['current_user_role'] = (
+                'owner' if project_dict.get('owner_id') == current_user.id
+                else role_map.get(project_dict.get('id'))
+            )
+
         include_stats = request.args.get('include_stats', 'true').lower() != 'false'
         if include_stats:
             # 批量统计当前页项目的任务数据，避免 N+1 查询
-            project_ids = [item['id'] for item in result['items'] if item.get('id')]
             task_stats_map = {}
 
             if project_ids:
@@ -210,7 +271,6 @@ def list_projects():
                     func.sum(case((Task.status.in_(pending_statuses), 1), else_=0)).label('pending_tasks'),
                     func.sum(case((Task.status == TaskStatus.DONE, 1), else_=0)).label('completed_tasks')
                 ).filter(
-                    Task.owner_id == current_user.id,
                     Task.project_id.in_(project_ids)
                 ).group_by(
                     Task.project_id
@@ -266,7 +326,7 @@ def create_project():
         # 验证请求数据
         data = validate_json_request(
             required_fields=['name'],
-            optional_fields=['description', 'color', 'status', 'github_url', 'local_url', 'production_url', 'project_context']
+            optional_fields=['description', 'color', 'status', 'github_url', 'local_url', 'production_url', 'project_context', 'organization_id']
         )
 
         if isinstance(data, tuple):  # 错误响应
@@ -281,6 +341,14 @@ def create_project():
             return ApiResponse.error("Project name already exists", 409,
                                    error_details={"code": "DUPLICATE_NAME"}).to_response()
 
+        organization_id = data.get('organization_id')
+        if organization_id is not None:
+            organization = Organization.query.get(organization_id)
+            if not organization:
+                return ApiResponse.not_found("Organization not found").to_response()
+            if not current_user.can_access_organization(organization):
+                return ApiResponse.forbidden("Access denied to organization").to_response()
+
         # 创建项目
         current_time = datetime.utcnow()
         project = Project.create(
@@ -288,6 +356,7 @@ def create_project():
             description=data.get('description', ''),
             color=data.get('color', '#1890ff'),
             owner_id=current_user.id,
+            organization_id=organization_id,
             created_by=current_user.email,
             github_url=data.get('github_url', ''),
             local_url=data.get('local_url', ''),
@@ -295,12 +364,26 @@ def create_project():
             project_context=data.get('project_context', ''),
             last_activity_at=current_time  # 设置最后活跃时间为创建时间
         )
-        
+        db.session.flush()
+
+        ProjectMember.create(
+            project_id=project.id,
+            user_id=current_user.id,
+            role=ProjectMemberRole.OWNER,
+            status=ProjectMemberStatus.ACTIVE,
+            invited_by=current_user.id,
+            joined_at=current_time,
+            created_by=current_user.email,
+        )
+
         db.session.commit()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(project.id)
         
+        payload = project.to_dict(include_stats=True)
+        payload['current_user_role'] = current_user.get_project_role(project)
+
         return ApiResponse.created(
-            data=project.to_dict(include_stats=True),
+            data=payload,
             message="Project created successfully"
         ).to_response()
         
@@ -328,8 +411,10 @@ def get_project(project_id):
         else:
             return ApiResponse.unauthorized("Authentication required").to_response()
 
+        payload = project.to_dict(include_stats=True)
+        payload['current_user_role'] = current_user.get_project_role(project)
         return ApiResponse.success(
-            project.to_dict(include_stats=True),
+            payload,
             "Project retrieved successfully"
         ).to_response()
         
@@ -349,12 +434,12 @@ def update_project(project_id):
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
         # 权限检查
-        if not current_user.can_access_project(project):
+        if not current_user.can_manage_project(project):
             return ApiResponse.error("Access denied", 403).to_response()
         
         # 验证请求数据
         data = validate_json_request(
-            optional_fields=['name', 'description', 'color', 'status', 'github_url', 'local_url', 'production_url', 'project_context']
+            optional_fields=['name', 'description', 'color', 'status', 'github_url', 'local_url', 'production_url', 'project_context', 'organization_id']
         )
         
         if isinstance(data, tuple):  # 错误响应
@@ -362,9 +447,25 @@ def update_project(project_id):
         
         # 检查项目名称是否已被其他项目使用
         if 'name' in data and data['name'] != project.name:
-            existing_project = Project.query.filter_by(name=data['name']).first()
+            existing_project = Project.query.filter(
+                Project.name == data['name'],
+                Project.owner_id == project.owner_id,
+                Project.id != project.id
+            ).first()
             if existing_project:
                 return ApiResponse.error("Project name already exists", 409, error_details={"code": "DUPLICATE_NAME"}).to_response()
+
+        if 'organization_id' in data:
+            org_id = data['organization_id']
+            if org_id is None:
+                project.organization_id = None
+            else:
+                organization = Organization.query.get(org_id)
+                if not organization:
+                    return ApiResponse.not_found("Organization not found").to_response()
+                if not current_user.can_access_organization(organization):
+                    return ApiResponse.forbidden("Access denied to organization").to_response()
+                project.organization_id = org_id
         
         # 更新项目
         project.update_from_dict(data)
@@ -374,22 +475,24 @@ def update_project(project_id):
             try:
                 project.status = ProjectStatus(data['status'])
             except ValueError:
-                return api_error(f"Invalid status: {data['status']}", 400)
+                return ApiResponse.error(f"Invalid status: {data['status']}", 400).to_response()
 
         # 更新项目最后活动时间
         project.last_activity_at = datetime.utcnow()
 
         db.session.commit()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(project.id)
         
+        payload = project.to_dict(include_stats=True)
+        payload['current_user_role'] = current_user.get_project_role(project)
         return ApiResponse.success(
-            project.to_dict(include_stats=True),
+            payload,
             "Project updated successfully"
         ).to_response()
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to update project: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to update project: {str(e)}", 500).to_response()
 
 
 @projects_bp.route('/<int:project_id>', methods=['DELETE'])
@@ -403,19 +506,19 @@ def delete_project(project_id):
         if not project:
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
-        # 权限检查 - 只能删除自己的项目
-        if project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only delete your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        # 权限检查
+        if not current_user.can_manage_project(project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 软删除
         project.soft_delete()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(project.id)
         
         return ApiResponse.success(None, "Project deleted successfully", 204).to_response()
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to delete project: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to delete project: {str(e)}", 500).to_response()
 
 
 @projects_bp.route('/<int:project_id>/archive', methods=['POST'])
@@ -429,12 +532,12 @@ def archive_project(project_id):
         if not project:
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
-        # 权限检查 - 只能归档自己的项目
-        if project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only archive your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        # 权限检查
+        if not current_user.can_manage_project(project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         project.archive()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(project.id)
         
         return ApiResponse.success(
             project.to_dict(),
@@ -443,7 +546,7 @@ def archive_project(project_id):
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to archive project: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to archive project: {str(e)}", 500).to_response()
 
 
 @projects_bp.route('/<int:project_id>/restore', methods=['POST'])
@@ -457,12 +560,12 @@ def restore_project(project_id):
         if not project:
             return ApiResponse.error("Project not found", 404, error_details={"code": "PROJECT_NOT_FOUND"}).to_response()
 
-        # 权限检查 - 只能恢复自己的项目
-        if project.owner_id != current_user.id:
-            return ApiResponse.error("Access denied: You can only restore your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+        # 权限检查
+        if not current_user.can_manage_project(project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         project.restore()
-        invalidate_user_caches(current_user.id)
+        _invalidate_project_users(project.id)
         
         return ApiResponse.success(
             project.to_dict(),
@@ -471,7 +574,175 @@ def restore_project(project_id):
         
     except Exception as e:
         db.session.rollback()
-        return api_error(f"Failed to restore project: {str(e)}", 500)
+        return ApiResponse.error(f"Failed to restore project: {str(e)}", 500).to_response()
+
+
+@projects_bp.route('/<int:project_id>/members', methods=['GET'])
+@unified_auth_required
+def list_project_members(project_id):
+    """获取项目成员"""
+    try:
+        current_user = get_current_user()
+        project = Project.query.get(project_id)
+        if not project:
+            return ApiResponse.not_found("Project not found").to_response()
+        if not current_user.can_access_project(project):
+            return ApiResponse.forbidden("Access denied").to_response()
+
+        members = ProjectMember.query.filter(
+            ProjectMember.project_id == project_id,
+            ProjectMember.status != ProjectMemberStatus.REMOVED
+        ).order_by(ProjectMember.joined_at.asc()).all()
+
+        items = [member.to_dict(include_user=True) for member in members]
+        return ApiResponse.success(
+            {
+                'items': items,
+                'project_id': project_id
+            },
+            "Project members retrieved successfully"
+        ).to_response()
+    except Exception as e:
+        return ApiResponse.error(f"Failed to retrieve project members: {str(e)}", 500).to_response()
+
+
+@projects_bp.route('/<int:project_id>/members/invite', methods=['POST'])
+@unified_auth_required
+def invite_project_member(project_id):
+    """邀请项目成员"""
+    try:
+        current_user = get_current_user()
+        project = Project.query.get(project_id)
+        if not project:
+            return ApiResponse.not_found("Project not found").to_response()
+        if not current_user.can_manage_project(project):
+            return ApiResponse.forbidden("Access denied").to_response()
+
+        data = validate_json_request(
+            required_fields=['email'],
+            optional_fields=['role']
+        )
+        if isinstance(data, tuple):
+            return data
+
+        target_user = User.query.filter_by(email=data['email']).first()
+        if not target_user:
+            return ApiResponse.not_found("Target user not found").to_response()
+        if target_user.id == project.owner_id:
+            return ApiResponse.error("Project owner is already a member", 409).to_response()
+
+        role_value = data.get('role', 'member')
+        try:
+            role = ProjectMemberRole(role_value)
+        except ValueError:
+            return ApiResponse.error(f"Invalid role: {role_value}", 400).to_response()
+
+        member = ProjectMember.query.filter_by(
+            project_id=project_id,
+            user_id=target_user.id
+        ).first()
+        if member:
+            member.role = role
+            member.status = ProjectMemberStatus.ACTIVE
+            member.invited_by = current_user.id
+            member.joined_at = datetime.utcnow()
+        else:
+            member = ProjectMember.create(
+                project_id=project_id,
+                user_id=target_user.id,
+                role=role,
+                status=ProjectMemberStatus.ACTIVE,
+                invited_by=current_user.id,
+                joined_at=datetime.utcnow(),
+                created_by=current_user.email,
+            )
+
+        db.session.commit()
+        _invalidate_project_users(project_id)
+        return ApiResponse.success(
+            member.to_dict(include_user=True),
+            "Project member invited successfully"
+        ).to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to invite project member: {str(e)}", 500).to_response()
+
+
+@projects_bp.route('/<int:project_id>/members/<int:user_id>', methods=['PUT'])
+@unified_auth_required
+def update_project_member(project_id, user_id):
+    """更新项目成员"""
+    try:
+        current_user = get_current_user()
+        project = Project.query.get(project_id)
+        if not project:
+            return ApiResponse.not_found("Project not found").to_response()
+        if not current_user.can_manage_project(project):
+            return ApiResponse.forbidden("Access denied").to_response()
+        if user_id == project.owner_id:
+            return ApiResponse.error("Cannot modify project owner role", 400).to_response()
+
+        member = ProjectMember.query.filter_by(
+            project_id=project_id,
+            user_id=user_id
+        ).first()
+        if not member:
+            return ApiResponse.not_found("Project member not found").to_response()
+
+        data = validate_json_request(optional_fields=['role', 'status'])
+        if isinstance(data, tuple):
+            return data
+
+        if 'role' in data:
+            try:
+                member.role = ProjectMemberRole(data['role'])
+            except ValueError:
+                return ApiResponse.error(f"Invalid role: {data['role']}", 400).to_response()
+        if 'status' in data:
+            try:
+                member.status = ProjectMemberStatus(data['status'])
+            except ValueError:
+                return ApiResponse.error(f"Invalid status: {data['status']}", 400).to_response()
+
+        db.session.commit()
+        _invalidate_project_users(project_id)
+        return ApiResponse.success(
+            member.to_dict(include_user=True),
+            "Project member updated successfully"
+        ).to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to update project member: {str(e)}", 500).to_response()
+
+
+@projects_bp.route('/<int:project_id>/members/<int:user_id>', methods=['DELETE'])
+@unified_auth_required
+def remove_project_member(project_id, user_id):
+    """移除项目成员"""
+    try:
+        current_user = get_current_user()
+        project = Project.query.get(project_id)
+        if not project:
+            return ApiResponse.not_found("Project not found").to_response()
+        if not current_user.can_manage_project(project):
+            return ApiResponse.forbidden("Access denied").to_response()
+        if user_id == project.owner_id:
+            return ApiResponse.error("Cannot remove project owner", 400).to_response()
+
+        member = ProjectMember.query.filter_by(
+            project_id=project_id,
+            user_id=user_id
+        ).first()
+        if not member:
+            return ApiResponse.not_found("Project member not found").to_response()
+
+        db.session.delete(member)
+        db.session.commit()
+        _invalidate_project_users(project_id)
+        return ApiResponse.success(None, "Project member removed successfully").to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to remove project member: {str(e)}", 500).to_response()
 
 # TODO: 我感觉这个接口并没有任何作用，因为tasks.py有list接口,确定没用的话之后整个删掉吧
 # @projects_bp.route('/<int:project_id>/tasks', methods=['GET'])

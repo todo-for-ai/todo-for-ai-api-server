@@ -22,6 +22,7 @@ class Project(BaseModel):
 
     # 用户关联
     owner_id = Column(Integer, ForeignKey('users.id'), nullable=False, comment='项目所有者ID')
+    organization_id = Column(Integer, ForeignKey('organizations.id'), nullable=True, index=True, comment='所属组织ID')
 
     # 基本信息
     name = Column(String(255), nullable=False, comment='项目名称')
@@ -43,6 +44,18 @@ class Project(BaseModel):
     
     # 关系
     owner = relationship('User', back_populates='projects')
+    organization = relationship('Organization', back_populates='projects')
+    members = relationship(
+        'ProjectMember',
+        back_populates='project',
+        cascade='all, delete-orphan',
+        lazy='dynamic'
+    )
+    task_labels = relationship(
+        'TaskLabel',
+        back_populates='project',
+        lazy='dynamic'
+    )
     tasks = relationship(
         'Task',
         back_populates='project',
