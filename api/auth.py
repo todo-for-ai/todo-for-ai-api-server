@@ -7,6 +7,7 @@
 import os
 import secrets
 from datetime import datetime
+from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 from flask import Blueprint, request, jsonify, redirect, url_for, session
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from models import db, User
@@ -35,6 +36,15 @@ def _normalize_return_to(return_to: str, frontend_base: str) -> str:
         return return_to
 
     return f'{frontend_base}/todo-for-ai/pages/dashboard'
+
+
+def _append_query_params(url: str, params: dict) -> str:
+    """Append params to URL while preserving existing query parameters."""
+    parsed = urlparse(url)
+    existing = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    existing.update(params)
+    query = urlencode(existing)
+    return urlunparse(parsed._replace(query=query))
 
 
 @auth_bp.route('/login', methods=['GET'])
@@ -147,14 +157,12 @@ def guest_login():
         if not tokens:
             return ApiResponse.error("Failed to generate guest tokens", 500).to_response()
 
-        import urllib.parse
         params = {
             'access_token': tokens['access_token'],
             'refresh_token': tokens['refresh_token'],
             'token_type': tokens['token_type']
         }
-        query_string = urllib.parse.urlencode(params)
-        return redirect(f"{return_to}?{query_string}")
+        return redirect(_append_query_params(return_to, params))
 
     except Exception as e:
         return handle_api_error(e)
@@ -197,14 +205,12 @@ def github_callback():
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
-        import urllib.parse
         params = {
             'access_token': tokens['access_token'],
             'refresh_token': tokens['refresh_token'],
             'token_type': tokens['token_type']
         }
-        query_string = urllib.parse.urlencode(params)
-        return redirect(f"{redirect_url}?{query_string}")
+        return redirect(_append_query_params(redirect_url, params))
 
     except Exception as e:
         return handle_api_error(e)
@@ -241,14 +247,12 @@ def google_callback():
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
-        import urllib.parse
         params = {
             'access_token': tokens['access_token'],
             'refresh_token': tokens['refresh_token'],
             'token_type': tokens['token_type']
         }
-        query_string = urllib.parse.urlencode(params)
-        return redirect(f"{redirect_url}?{query_string}")
+        return redirect(_append_query_params(redirect_url, params))
 
     except Exception as e:
         return handle_api_error(e)
