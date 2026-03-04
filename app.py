@@ -30,6 +30,8 @@ def create_app(config_name=None):
         config_name = os.environ.get('FLASK_ENV', 'development')
     
     app = Flask(__name__)
+    # 兼容 /path 与 /path/，避免前端请求尾斜杠时出现误判 404
+    app.url_map.strict_slashes = False
     app.config.from_object(config[config_name])
     
     # 初始化配置
