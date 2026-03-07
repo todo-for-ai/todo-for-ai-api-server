@@ -171,6 +171,18 @@ def register_blueprints(app):
     from api.custom_prompts import custom_prompts_bp
     from api.organizations import organizations_bp
     from api.task_labels import task_labels_bp
+    from api.agent_workspace_agents import agent_workspace_agents_bp
+    from api.agent_workspace_keys import agent_workspace_keys_bp
+    from api.agent_workspace_soul import agent_workspace_soul_bp
+    from api.agent_workspace_secrets import agent_workspace_secrets_bp
+    from api.agent_runtime_auth import agent_runtime_auth_bp
+    from api.agent_runtime_pull import agent_runtime_pull_bp
+    from api.agent_runtime_commit import agent_runtime_commit_bp
+    from api.agent_automation import agent_automation_bp
+    from api.organization_agent_members import organization_agent_members_bp
+    from api.task_logs import task_logs_bp
+    from api.agent_workspace_insights import agent_workspace_insights_bp
+    from api.notifications import notifications_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -186,6 +198,18 @@ def register_blueprints(app):
     app.register_blueprint(custom_prompts_bp, url_prefix='/todo-for-ai/api/v1/custom-prompts')
     app.register_blueprint(organizations_bp, url_prefix='/todo-for-ai/api/v1/organizations')
     app.register_blueprint(task_labels_bp, url_prefix='/todo-for-ai/api/v1/task-labels')
+    app.register_blueprint(agent_workspace_agents_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_keys_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_soul_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_secrets_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_auth_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_pull_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_commit_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_automation_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(organization_agent_members_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(task_logs_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_insights_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(notifications_bp, url_prefix='/todo-for-ai/api/v1/notifications')
 
 
 
@@ -231,7 +255,7 @@ def _prewarm_dashboard_cache_on_startup(flask_app):
             ).all()
 
             for user in active_users:
-                cache_key = f"user:{user.id}:stats"
+                cache_key = f"user:{user.id}:stats:v2"
                 data = _build_dashboard_stats(user.id)
                 _dashboard_cache_set(
                     cache_key,

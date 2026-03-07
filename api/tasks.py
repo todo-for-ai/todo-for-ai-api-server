@@ -5,8 +5,11 @@
 """
 
 from datetime import datetime
-from flask import Blueprint, request
+import os
+import uuid
+from flask import Blueprint, request, send_file
 from sqlalchemy import and_, or_
+from werkzeug.utils import secure_filename
 from models import (
     db,
     Task,
@@ -20,17 +23,27 @@ from models import (
     TaskHistory,
     ActionType,
     UserActivity,
+    Attachment,
 )
 from .base import ApiResponse, paginate_query, paginate_query_fast, validate_json_request, get_request_args, APIException, handle_api_error
 from core.auth import unified_auth_required, get_current_user
 from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
 from core.cache_invalidation import invalidate_user_caches
+from .agent_trigger_engine import emit_task_event
+from .notification_service import create_task_notifications, enqueue_pending_deliveries_for_events
 
 # 创建蓝图
 tasks_bp = Blueprint('tasks', __name__)
 
 TASKS_LIST_CACHE_TTL_SECONDS = 15
 tasks_list_fallback_cache = {}
+MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
+ALLOWED_ATTACHMENT_EXTENSIONS = {
+    '.txt', '.md', '.json', '.csv', '.pdf',
+    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg',
+    '.zip', '.tar', '.gz',
+    '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.sql', '.yaml', '.yml'
+}
 
 
 def _normalize_tags(raw_tags):
@@ -104,6 +117,33 @@ def _ensure_labels_for_tags(current_user, project_id, tags):
             created_by_user_id=current_user.id,
         )
     db.session.flush()
+
+
+def _normalize_participants(raw_items):
+    if not raw_items:
+        return []
+
+    normalized = []
+    seen = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+
+        ptype = str(item.get('type') or '').strip().lower()
+        if ptype not in {'human', 'agent'}:
+            continue
+
+        try:
+            pid = int(item.get('id'))
+        except Exception:
+            continue
+
+        key = f"{ptype}:{pid}"
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append({'type': ptype, 'id': pid})
+    return normalized
 
 
 def _invalidate_project_users(project_id):
@@ -280,7 +320,8 @@ def create_task():
             required_fields=['project_id'],
             optional_fields=[
                 'title', 'content', 'status', 'priority',
-                'due_date', 'tags', 'labels', 'is_ai_task'
+                'due_date', 'tags', 'labels', 'is_ai_task',
+                'assignees', 'mentions'
             ]
         )
 
@@ -338,6 +379,8 @@ def create_task():
 
         incoming_tags = data.get('labels', data.get('tags', []))
         normalized_tags = _normalize_tags(incoming_tags)
+        normalized_assignees = _normalize_participants(data.get('assignees'))
+        normalized_mentions = _normalize_participants(data.get('mentions'))
         _ensure_labels_for_tags(current_user, project.id, normalized_tags)
 
         # 创建任务
@@ -350,15 +393,89 @@ def create_task():
             priority=priority,
             due_date=due_date,
             tags=normalized_tags,
+            assignees=normalized_assignees,
+            mentions=normalized_mentions,
+            revision=1,
             is_ai_task=data.get('is_ai_task', False),
             creator_id=current_user.id,  # 设置创建者ID
             created_by=current_user.email  # 设置创建者邮箱
         )
+        db.session.flush()
 
         # 更新项目最后活动时间
         project.last_activity_at = datetime.utcnow()
 
+        queued_notification_event_ids = []
+
+        created_event_id = emit_task_event(
+            task,
+            'created',
+            {
+                'title': task.title,
+                'status': task.status.value if task.status else None,
+                'priority': task.priority.value if task.priority else None,
+                'tags': task.tags or [],
+            },
+            actor=current_user.email,
+        )
+
+        create_task_notifications(
+            task,
+            'created',
+            actor_user=current_user,
+            payload={
+                'title': task.title,
+                'status': task.status.value if task.status else None,
+                'priority': task.priority.value if task.priority else None,
+                'tags': task.tags or [],
+            },
+            event_id=created_event_id,
+        )
+        if created_event_id:
+            queued_notification_event_ids.append(created_event_id)
+
+        if normalized_assignees:
+            assigned_event_id = emit_task_event(
+                task,
+                'assigned',
+                {
+                    'assignees': normalized_assignees,
+                },
+                actor=current_user.email,
+            )
+            create_task_notifications(
+                task,
+                'assigned',
+                actor_user=current_user,
+                payload={'assignees': normalized_assignees},
+                event_id=assigned_event_id,
+                previous_assignees=[],
+            )
+            if assigned_event_id:
+                queued_notification_event_ids.append(assigned_event_id)
+
+        if normalized_mentions:
+            mentioned_event_id = emit_task_event(
+                task,
+                'mentioned',
+                {
+                    'mentions': normalized_mentions,
+                },
+                actor=current_user.email,
+            )
+            create_task_notifications(
+                task,
+                'mentioned',
+                actor_user=current_user,
+                payload={'mentions': normalized_mentions},
+                event_id=mentioned_event_id,
+                previous_mentions=[],
+            )
+            if mentioned_event_id:
+                queued_notification_event_ids.append(mentioned_event_id)
+
         db.session.commit()
+        enqueue_pending_deliveries_for_events(queued_notification_event_ids)
         _invalidate_project_users(project.id)
 
         # 记录历史
@@ -430,15 +547,36 @@ def update_task(task_id):
         data = validate_json_request(
             optional_fields=[
                 'title', 'content', 'status', 'priority',
-                'due_date', 'completion_rate', 'tags', 'labels'
+                'due_date', 'completion_rate', 'tags', 'labels',
+                'assignees', 'mentions', 'expected_revision'
             ]
         )
         
         if isinstance(data, tuple):  # 错误响应
             return data
+
+        if 'expected_revision' in data:
+            try:
+                expected_revision = int(data['expected_revision'])
+            except Exception:
+                return ApiResponse.error("expected_revision must be integer", 400).to_response()
+
+            if expected_revision != task.revision:
+                return ApiResponse.error(
+                    "Revision conflict. Please refresh and retry.",
+                    409,
+                    error_details={
+                        "code": "REVISION_CONFLICT",
+                        "current_revision": task.revision,
+                        "expected_revision": expected_revision,
+                    }
+                ).to_response()
         
         # 记录变更
         changes = []
+        queued_notification_event_ids = []
+        previous_assignees = list(task.assignees or [])
+        previous_mentions = list(task.mentions or [])
         
         # 处理日期字段
         if 'due_date' in data and data['due_date']:
@@ -501,11 +639,108 @@ def update_task(task_id):
                 changes.append(('tags', task.tags, normalized_tags))
                 task.tags = normalized_tags
 
+        if 'assignees' in data:
+            normalized_assignees = _normalize_participants(data.get('assignees'))
+            if task.assignees != normalized_assignees:
+                changes.append(('assignees', task.assignees, normalized_assignees))
+                task.assignees = normalized_assignees
+
+        if 'mentions' in data:
+            normalized_mentions = _normalize_participants(data.get('mentions'))
+            if task.mentions != normalized_mentions:
+                changes.append(('mentions', task.mentions, normalized_mentions))
+                task.mentions = normalized_mentions
+
         # 更新项目最后活动时间
         if changes:  # 只有在有实际更改时才更新项目活跃时间
             task.project.last_activity_at = datetime.utcnow()
+            task.revision = (task.revision or 1) + 1
+
+            changed_field_names = [field_name for field_name, _, _ in changes]
+            status_change = next((item for item in changes if item[0] == 'status'), None)
+            if status_change:
+                from_status_value = status_change[1].value if hasattr(status_change[1], 'value') else status_change[1]
+                to_status_value = status_change[2].value if hasattr(status_change[2], 'value') else status_change[2]
+                status_event_id = emit_task_event(
+                    task,
+                    'status_changed',
+                    {
+                        'from_status': from_status_value,
+                        'to_status': to_status_value,
+                        'changed_fields': changed_field_names,
+                    },
+                    actor=current_user.email,
+                )
+                if str(to_status_value or '').strip().lower() == TaskStatus.DONE.value:
+                    create_task_notifications(
+                        task,
+                        'completed',
+                        actor_user=current_user,
+                        payload={
+                            'from_status': from_status_value,
+                            'to_status': to_status_value,
+                            'changed_fields': changed_field_names,
+                        },
+                        event_id=status_event_id,
+                        previous_assignees=previous_assignees,
+                        previous_mentions=previous_mentions,
+                    )
+                    if status_event_id:
+                        queued_notification_event_ids.append(status_event_id)
+            else:
+                emit_task_event(
+                    task,
+                    'updated',
+                    {
+                        'changed_fields': changed_field_names,
+                    },
+                    actor=current_user.email,
+                )
+
+            assignee_change = next((item for item in changes if item[0] == 'assignees'), None)
+            if assignee_change:
+                assigned_event_id = emit_task_event(
+                    task,
+                    'assigned',
+                    {
+                        'assignees': task.assignees or [],
+                    },
+                    actor=current_user.email,
+                )
+                create_task_notifications(
+                    task,
+                    'assigned',
+                    actor_user=current_user,
+                    payload={'assignees': task.assignees or []},
+                    event_id=assigned_event_id,
+                    previous_assignees=assignee_change[1] or [],
+                )
+                if assigned_event_id:
+                    queued_notification_event_ids.append(assigned_event_id)
+
+            mention_change = next((item for item in changes if item[0] == 'mentions'), None)
+            if mention_change:
+                mentioned_event_id = emit_task_event(
+                    task,
+                    'mentioned',
+                    {
+                        'mentions': task.mentions or [],
+                    },
+                    actor=current_user.email,
+                )
+                create_task_notifications(
+                    task,
+                    'mentioned',
+                    actor_user=current_user,
+                    payload={'mentions': task.mentions or []},
+                    event_id=mentioned_event_id,
+                    previous_mentions=mention_change[1] or [],
+                )
+                if mentioned_event_id:
+                    queued_notification_event_ids.append(mentioned_event_id)
 
         db.session.commit()
+        enqueue_pending_deliveries_for_events(queued_notification_event_ids)
         _invalidate_project_users(task.project_id)
 
         # 记录变更历史
@@ -627,13 +862,11 @@ def get_task_attachments(task_id):
         if not current_user.can_access_project(task.project):
             return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
-        # TODO: 实现完整的附件功能
-        # 目前返回空列表，避免前端调用出错
-        result = []
+        result = [item.to_dict() for item in Attachment.get_task_attachments(task_id)]
 
         return ApiResponse.success(
             result,
-            "Task attachments retrieved successfully (feature not fully implemented)"
+            "Task attachments retrieved successfully"
         ).to_response()
 
     except Exception as e:
@@ -656,12 +889,99 @@ def delete_task_attachment(task_id, attachment_id):
         if not current_user.can_access_project(task.project):
             return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
-        # TODO: 实现完整的附件删除功能
-        # 目前返回成功响应，避免前端调用出错
+        attachment = Attachment.query.filter_by(id=attachment_id, task_id=task_id).first()
+        if not attachment:
+            return ApiResponse.not_found("Attachment not found").to_response()
+
+        attachment.delete_file()
+
         return ApiResponse.success(
             None,
-            f"Task attachment {attachment_id} deleted successfully (feature not fully implemented)"
+            f"Task attachment {attachment_id} deleted successfully"
         ).to_response()
 
     except Exception as e:
         return ApiResponse.error(f"Failed to delete task attachment: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/<int:task_id>/attachments', methods=['POST'])
+@unified_auth_required
+def upload_task_attachment(task_id):
+    """上传任务附件"""
+    try:
+        current_user = get_current_user()
+        task = Task.query.get(task_id)
+        if not task:
+            return ApiResponse.not_found("Task not found").to_response()
+
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.forbidden("Access denied").to_response()
+
+        uploaded_file = request.files.get('file')
+        if not uploaded_file:
+            return ApiResponse.error("Missing file field", 400).to_response()
+
+        original_filename = uploaded_file.filename or ''
+        if not original_filename.strip():
+            return ApiResponse.error("Empty filename", 400).to_response()
+
+        ext = os.path.splitext(original_filename)[1].lower()
+        if ext and ext not in ALLOWED_ATTACHMENT_EXTENSIONS:
+            return ApiResponse.error(f"File extension {ext} is not allowed", 400).to_response()
+
+        upload_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads', 'tasks', str(task_id))
+        os.makedirs(upload_root, exist_ok=True)
+
+        safe_name = secure_filename(original_filename) or f"file{ext or ''}"
+        stored_name = f"{uuid.uuid4().hex}_{safe_name}"
+        abs_path = os.path.join(upload_root, stored_name)
+        uploaded_file.save(abs_path)
+
+        file_size = os.path.getsize(abs_path)
+        if file_size > MAX_ATTACHMENT_SIZE_BYTES:
+            os.remove(abs_path)
+            return ApiResponse.error(f"File too large. Max size is {MAX_ATTACHMENT_SIZE_BYTES} bytes", 400).to_response()
+
+        attachment = Attachment.create_attachment(
+            task_id=task_id,
+            filename=stored_name,
+            original_filename=original_filename,
+            file_path=abs_path,
+            file_size=file_size,
+            mime_type=uploaded_file.mimetype,
+            uploaded_by=current_user.email,
+        )
+
+        return ApiResponse.created(attachment.to_dict(), "Task attachment uploaded successfully").to_response()
+    except Exception as e:
+        return ApiResponse.error(f"Failed to upload task attachment: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/<int:task_id>/attachments/<int:attachment_id>/download', methods=['GET'])
+@unified_auth_required
+def download_task_attachment(task_id, attachment_id):
+    """下载任务附件"""
+    try:
+        current_user = get_current_user()
+        task = Task.query.get(task_id)
+        if not task:
+            return ApiResponse.not_found("Task not found").to_response()
+
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.forbidden("Access denied").to_response()
+
+        attachment = Attachment.query.filter_by(id=attachment_id, task_id=task_id).first()
+        if not attachment:
+            return ApiResponse.not_found("Attachment not found").to_response()
+
+        if not os.path.exists(attachment.file_path):
+            return ApiResponse.not_found("Attachment file not found").to_response()
+
+        return send_file(
+            attachment.file_path,
+            as_attachment=True,
+            download_name=attachment.original_filename,
+            mimetype=attachment.mime_type or 'application/octet-stream',
+        )
+    except Exception as e:
+        return ApiResponse.error(f"Failed to download task attachment: {str(e)}", 500).to_response()

@@ -27,16 +27,17 @@ def load_env_files():
         else:
             print(f"⚠️  指定的环境变量文件不存在: {env_file_path}")
 
-    # 检查是否在Docker环境中（通过检查特定环境变量）
-    if os.environ.get('DOCKER_ENV') == 'true' or os.environ.get('DATABASE_URL'):
+    # Docker 环境：优先使用注入环境变量，不从项目根目录加载 .env
+    if os.environ.get('DOCKER_ENV') == 'true':
         print("🐳 Docker环境检测到，使用环境变量配置")
         return "environment_variables"
 
     # 本地启动：读取根目录.env
     root_env = os.path.join(project_root, '.env')
     if os.path.exists(root_env):
-        print(f"📄 本地启动 - 加载环境变量: {root_env}")
-        load_dotenv(root_env)
+        print(f"📄 本地启动 - 加载环境变量(覆盖旧值): {root_env}")
+        # 本地开发常见场景是 shell 中遗留了旧 DATABASE_URL，这里强制以项目 .env 为准
+        load_dotenv(root_env, override=True)
         return root_env
     else:
         print("⚠️  未找到环境变量文件，使用默认配置")

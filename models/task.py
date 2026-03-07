@@ -64,6 +64,9 @@ class Task(BaseModel):
     # 扩展信息
     tags = Column(JSON, comment='任务标签 (JSON数组)')
     related_files = Column(JSON, comment='任务相关的文件列表 (JSON数组)')
+    assignees = Column(JSON, comment='任务指派对象列表 (JSON数组)')
+    mentions = Column(JSON, comment='任务提及对象列表 (JSON数组)')
+    revision = Column(Integer, nullable=False, default=1, comment='任务乐观锁版本号')
     is_ai_task = Column(Boolean, default=True, comment='是否是分配给AI的任务')
     creator_type = Column(String(20), default='human', comment='创建者类型: human, ai')
     creator_identifier = Column(String(100), comment='创建者标识符 (AI的标识或用户ID)')
@@ -86,6 +89,11 @@ class Task(BaseModel):
         cascade='all, delete-orphan',
         lazy='dynamic'
     )
+    logs = relationship(
+        'TaskLog',
+        cascade='all, delete-orphan',
+        lazy='dynamic'
+    )
     
     def __repr__(self):
         return f'<Task {self.id}: {self.title[:50]}>'
@@ -96,6 +104,8 @@ class Task(BaseModel):
         result['status'] = self.status.value if self.status else None
         result['priority'] = self.priority.value if self.priority else None
         result['tags'] = self.tags or []
+        result['assignees'] = self.assignees or []
+        result['mentions'] = self.mentions or []
         
         # 格式化时间字段
         if self.due_date:

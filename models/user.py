@@ -6,7 +6,7 @@ import enum
 from datetime import datetime
 from sqlalchemy import Column, String, Text, Enum, Boolean, DateTime, JSON
 from sqlalchemy.orm import relationship
-from .base import BaseModel
+from .base import BaseModel, db
 
 
 class UserRole(enum.Enum):
@@ -287,25 +287,74 @@ class User(BaseModel):
         ).first()
         return member is not None
 
-    def get_organization_role(self, organization):
-        """获取用户在组织中的角色"""
+    def get_organization_roles(self, organization):
+        """获取用户在组织中的全部角色键列表"""
         if not organization:
-            return None
+            return []
         if organization.owner_id == self.id:
-            return 'owner'
+            return ['owner']
 
-        from .organization import OrganizationMember, OrganizationMemberStatus
+        from .organization import (
+            OrganizationMember,
+            OrganizationMemberStatus,
+            OrganizationMemberRole,
+            OrganizationRoleDefinition,
+        )
+
         member = OrganizationMember.query.filter_by(
             organization_id=organization.id,
             user_id=self.id,
             status=OrganizationMemberStatus.ACTIVE
         ).first()
-        return member.role.value if member and member.role else None
+
+        if not member:
+            return []
+
+        rows = (
+            db.session.query(OrganizationRoleDefinition.key)
+            .join(OrganizationMemberRole, OrganizationMemberRole.role_id == OrganizationRoleDefinition.id)
+            .filter(
+                OrganizationMemberRole.member_id == member.id,
+                OrganizationRoleDefinition.is_active.is_(True),
+            )
+            .all()
+        )
+        role_keys = [str(row.key).strip().lower() for row in rows if row.key]
+
+        # 去重并保持稳定顺序
+        seen = set()
+        deduped = []
+        for key in role_keys:
+            if key not in seen:
+                deduped.append(key)
+                seen.add(key)
+        if deduped:
+            return deduped
+
+        # 兼容旧数据：若尚未迁移到 organization_member_roles，则回退到成员旧 role 字段
+        legacy_role = None
+        if member and member.role:
+            legacy_role = (
+                member.role.value
+                if hasattr(member.role, 'value')
+                else str(member.role)
+            )
+        legacy_key = str(legacy_role or '').strip().lower()
+        return [legacy_key] if legacy_key else []
+
+    def get_organization_role(self, organization):
+        """获取用户在组织中的角色"""
+        role_keys = self.get_organization_roles(organization)
+        priority = ['owner', 'admin', 'member', 'viewer']
+        for key in priority:
+            if key in role_keys:
+                return key
+        return role_keys[0] if role_keys else None
 
     def can_manage_organization(self, organization):
         """是否可管理组织（owner/admin）"""
-        role = self.get_organization_role(organization)
-        return role in {'owner', 'admin'}
+        role_keys = set(self.get_organization_roles(organization))
+        return 'owner' in role_keys or 'admin' in role_keys
     
     def can_access_task(self, task):
         """检查是否可以访问任务 - 所有用户（包括管理员）只能访问自己项目的任务"""

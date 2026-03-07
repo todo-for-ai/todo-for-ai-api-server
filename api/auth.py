@@ -318,9 +318,14 @@ def update_current_user():
         
         # 处理偏好设置
         if 'preferences' in data:
-            if not current_user.preferences:
-                current_user.preferences = {}
-            current_user.preferences.update(data['preferences'])
+            incoming_preferences = data.get('preferences') or {}
+            if not isinstance(incoming_preferences, dict):
+                return ApiResponse.error("preferences must be an object", 400).to_response()
+
+            # JSON字段需要重新赋值，避免原地update导致ORM变更检测失效
+            merged_preferences = dict(current_user.preferences or {})
+            merged_preferences.update(incoming_preferences)
+            current_user.preferences = merged_preferences
         
         current_user.save()
         
