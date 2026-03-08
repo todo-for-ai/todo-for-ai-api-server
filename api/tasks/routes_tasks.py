@@ -1,15 +1,10 @@
-"""
-任务 API 蓝图
-
-提供任务的 CRUD 操作接口
-"""
+"""Task CRUD and history routes."""
 
 from datetime import datetime
-import os
-import uuid
-from flask import Blueprint, request, send_file
-from sqlalchemy import and_, or_
-from werkzeug.utils import secure_filename
+
+from flask import request
+from sqlalchemy import or_
+
 from models import (
     db,
     Task,
@@ -18,168 +13,25 @@ from models import (
     Project,
     ProjectMember,
     ProjectMemberStatus,
-    TaskLabel,
-    BUILTIN_TASK_LABELS,
     TaskHistory,
     ActionType,
     UserActivity,
-    Attachment,
+    TaskEventOutbox,
 )
-from .base import ApiResponse, paginate_query, paginate_query_fast, validate_json_request, get_request_args, APIException, handle_api_error
+from ..base import ApiResponse, paginate_query, paginate_query_fast, validate_json_request, get_request_args
 from core.auth import unified_auth_required, get_current_user
-from core.redis_client import get_json as redis_get_json, set_json as redis_set_json
-from core.cache_invalidation import invalidate_user_caches
-from .agent_trigger_engine import emit_task_event
-from .notification_service import create_task_notifications, enqueue_pending_deliveries_for_events
+from ..agent_trigger_engine import emit_task_event
+from ..notification_service import create_task_notifications, enqueue_pending_deliveries_for_events
 
-# 创建蓝图
-tasks_bp = Blueprint('tasks', __name__)
-
-TASKS_LIST_CACHE_TTL_SECONDS = 15
-tasks_list_fallback_cache = {}
-MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024
-ALLOWED_ATTACHMENT_EXTENSIONS = {
-    '.txt', '.md', '.json', '.csv', '.pdf',
-    '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg',
-    '.zip', '.tar', '.gz',
-    '.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.sql', '.yaml', '.yml'
-}
-
-
-def _normalize_tags(raw_tags):
-    if not raw_tags:
-        return []
-    normalized = []
-    seen = set()
-    for raw in raw_tags:
-        tag = str(raw).strip().lower()
-        if not tag or tag in seen:
-            continue
-        seen.add(tag)
-        normalized.append(tag)
-    return normalized
-
-
-def _ensure_builtin_labels():
-    for item in BUILTIN_TASK_LABELS:
-        exists = TaskLabel.query.filter(
-            TaskLabel.is_builtin.is_(True),
-            TaskLabel.name == item['name'],
-            TaskLabel.owner_id.is_(None),
-            TaskLabel.project_id.is_(None)
-        ).first()
-        if exists:
-            # 如果内置标签被误禁用或属性漂移，自动修复
-            exists.is_active = True
-            exists.color = item['color']
-            exists.description = item['description']
-            continue
-        TaskLabel.create(
-            owner_id=None,
-            project_id=None,
-            name=item['name'],
-            color=item['color'],
-            description=item['description'],
-            is_builtin=True,
-            is_active=True,
-            created_by='system',
-            created_by_user_id=None,
-        )
-    db.session.flush()
-
-
-def _ensure_labels_for_tags(current_user, project_id, tags):
-    if not tags:
-        return
-    _ensure_builtin_labels()
-    for tag in tags:
-        exists = TaskLabel.query.filter(
-            or_(
-                and_(TaskLabel.is_builtin.is_(True), TaskLabel.name == tag),
-                and_(TaskLabel.owner_id == current_user.id, TaskLabel.project_id == project_id, TaskLabel.name == tag),
-                and_(TaskLabel.owner_id == current_user.id, TaskLabel.project_id.is_(None), TaskLabel.name == tag),
-            )
-        ).first()
-        if exists:
-            # 软删除标签在任务输入中再次出现时，自动恢复可见性
-            if not exists.is_active:
-                exists.is_active = True
-            continue
-        TaskLabel.create(
-            owner_id=current_user.id,
-            project_id=project_id,
-            name=tag,
-            color='#1677ff',
-            description='',
-            is_builtin=False,
-            is_active=True,
-            created_by=current_user.email,
-            created_by_user_id=current_user.id,
-        )
-    db.session.flush()
-
-
-def _normalize_participants(raw_items):
-    if not raw_items:
-        return []
-
-    normalized = []
-    seen = set()
-    for item in raw_items:
-        if not isinstance(item, dict):
-            continue
-
-        ptype = str(item.get('type') or '').strip().lower()
-        if ptype not in {'human', 'agent'}:
-            continue
-
-        try:
-            pid = int(item.get('id'))
-        except Exception:
-            continue
-
-        key = f"{ptype}:{pid}"
-        if key in seen:
-            continue
-        seen.add(key)
-        normalized.append({'type': ptype, 'id': pid})
-    return normalized
-
-
-def _invalidate_project_users(project_id):
-    project = Project.query.get(project_id)
-    if not project:
-        return
-    user_ids = {project.owner_id}
-    member_rows = db.session.query(ProjectMember.user_id).filter(
-        ProjectMember.project_id == project_id,
-        ProjectMember.status == ProjectMemberStatus.ACTIVE
-    ).all()
-    user_ids.update([row.user_id for row in member_rows])
-    for user_id in user_ids:
-        invalidate_user_caches(user_id)
-
-
-def _tasks_cache_get(key):
-    redis_key = f"tasks:list:{key}"
-    cached = redis_get_json(redis_key)
-    if cached is not None:
-        return cached
-
-    item = tasks_list_fallback_cache.get(key)
-    if item and (datetime.utcnow().timestamp() - item['cached_at'] <= TASKS_LIST_CACHE_TTL_SECONDS):
-        return item['value']
-    return None
-
-
-def _tasks_cache_set(key, value):
-    redis_key = f"tasks:list:{key}"
-    redis_set_json(redis_key, value, TASKS_LIST_CACHE_TTL_SECONDS)
-    tasks_list_fallback_cache[key] = {
-        'cached_at': datetime.utcnow().timestamp(),
-        'value': value,
-    }
-
+from . import tasks_bp
+from .shared import (
+    _ensure_labels_for_tags,
+    _invalidate_project_users,
+    _normalize_participants,
+    _normalize_tags,
+    _tasks_cache_get,
+    _tasks_cache_set,
+)
 
 @tasks_bp.route('', methods=['GET'])
 @tasks_bp.route('/', methods=['GET'])
@@ -805,6 +657,11 @@ def delete_task(task_id):
             comment='Task deleted via API'
         )
         
+        # 删除任务前清理 outbox 记录，避免外键约束阻断删除
+        db.session.query(TaskEventOutbox).filter(
+            TaskEventOutbox.task_id == task.id
+        ).delete(synchronize_session=False)
+
         # 删除任务
         task.delete()
         _invalidate_project_users(task.project_id)
@@ -844,144 +701,3 @@ def get_task_history(task_id):
 
     except Exception as e:
         return ApiResponse.error(f"Failed to retrieve task history: {str(e)}", 500).to_response()
-
-
-@tasks_bp.route('/<int:task_id>/attachments', methods=['GET'])
-@unified_auth_required
-def get_task_attachments(task_id):
-    """获取任务附件列表"""
-    try:
-        current_user = get_current_user()
-
-        # 验证任务是否存在
-        task = Task.query.get(task_id)
-        if not task:
-            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
-
-        # 权限检查 - 只能访问自己项目中的任务附件
-        if not current_user.can_access_project(task.project):
-            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
-
-        result = [item.to_dict() for item in Attachment.get_task_attachments(task_id)]
-
-        return ApiResponse.success(
-            result,
-            "Task attachments retrieved successfully"
-        ).to_response()
-
-    except Exception as e:
-        return ApiResponse.error(f"Failed to retrieve task attachments: {str(e)}", 500).to_response()
-
-
-@tasks_bp.route('/<int:task_id>/attachments/<int:attachment_id>', methods=['DELETE'])
-@unified_auth_required
-def delete_task_attachment(task_id, attachment_id):
-    """删除任务附件"""
-    try:
-        current_user = get_current_user()
-
-        # 验证任务是否存在
-        task = Task.query.get(task_id)
-        if not task:
-            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
-
-        # 权限检查 - 只能删除自己项目中的任务附件
-        if not current_user.can_access_project(task.project):
-            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
-
-        attachment = Attachment.query.filter_by(id=attachment_id, task_id=task_id).first()
-        if not attachment:
-            return ApiResponse.not_found("Attachment not found").to_response()
-
-        attachment.delete_file()
-
-        return ApiResponse.success(
-            None,
-            f"Task attachment {attachment_id} deleted successfully"
-        ).to_response()
-
-    except Exception as e:
-        return ApiResponse.error(f"Failed to delete task attachment: {str(e)}", 500).to_response()
-
-
-@tasks_bp.route('/<int:task_id>/attachments', methods=['POST'])
-@unified_auth_required
-def upload_task_attachment(task_id):
-    """上传任务附件"""
-    try:
-        current_user = get_current_user()
-        task = Task.query.get(task_id)
-        if not task:
-            return ApiResponse.not_found("Task not found").to_response()
-
-        if not current_user.can_access_project(task.project):
-            return ApiResponse.forbidden("Access denied").to_response()
-
-        uploaded_file = request.files.get('file')
-        if not uploaded_file:
-            return ApiResponse.error("Missing file field", 400).to_response()
-
-        original_filename = uploaded_file.filename or ''
-        if not original_filename.strip():
-            return ApiResponse.error("Empty filename", 400).to_response()
-
-        ext = os.path.splitext(original_filename)[1].lower()
-        if ext and ext not in ALLOWED_ATTACHMENT_EXTENSIONS:
-            return ApiResponse.error(f"File extension {ext} is not allowed", 400).to_response()
-
-        upload_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads', 'tasks', str(task_id))
-        os.makedirs(upload_root, exist_ok=True)
-
-        safe_name = secure_filename(original_filename) or f"file{ext or ''}"
-        stored_name = f"{uuid.uuid4().hex}_{safe_name}"
-        abs_path = os.path.join(upload_root, stored_name)
-        uploaded_file.save(abs_path)
-
-        file_size = os.path.getsize(abs_path)
-        if file_size > MAX_ATTACHMENT_SIZE_BYTES:
-            os.remove(abs_path)
-            return ApiResponse.error(f"File too large. Max size is {MAX_ATTACHMENT_SIZE_BYTES} bytes", 400).to_response()
-
-        attachment = Attachment.create_attachment(
-            task_id=task_id,
-            filename=stored_name,
-            original_filename=original_filename,
-            file_path=abs_path,
-            file_size=file_size,
-            mime_type=uploaded_file.mimetype,
-            uploaded_by=current_user.email,
-        )
-
-        return ApiResponse.created(attachment.to_dict(), "Task attachment uploaded successfully").to_response()
-    except Exception as e:
-        return ApiResponse.error(f"Failed to upload task attachment: {str(e)}", 500).to_response()
-
-
-@tasks_bp.route('/<int:task_id>/attachments/<int:attachment_id>/download', methods=['GET'])
-@unified_auth_required
-def download_task_attachment(task_id, attachment_id):
-    """下载任务附件"""
-    try:
-        current_user = get_current_user()
-        task = Task.query.get(task_id)
-        if not task:
-            return ApiResponse.not_found("Task not found").to_response()
-
-        if not current_user.can_access_project(task.project):
-            return ApiResponse.forbidden("Access denied").to_response()
-
-        attachment = Attachment.query.filter_by(id=attachment_id, task_id=task_id).first()
-        if not attachment:
-            return ApiResponse.not_found("Attachment not found").to_response()
-
-        if not os.path.exists(attachment.file_path):
-            return ApiResponse.not_found("Attachment file not found").to_response()
-
-        return send_file(
-            attachment.file_path,
-            as_attachment=True,
-            download_name=attachment.original_filename,
-            mimetype=attachment.mime_type or 'application/octet-stream',
-        )
-    except Exception as e:
-        return ApiResponse.error(f"Failed to download task attachment: {str(e)}", 500).to_response()
