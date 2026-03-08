@@ -8,8 +8,9 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set
 
-from flask import Blueprint, request
+from flask import Blueprint, current_app, request
 from sqlalchemy import case, func, or_
+from sqlalchemy.exc import OperationalError
 
 from core.auth import get_current_user, unified_auth_required
 from models import (
@@ -178,6 +179,27 @@ def _serialize_activity_item(item: Dict[str, Any]) -> Dict[str, Any]:
             result[key] = _iso(value)
     result.pop('_sort_id', None)
     return result
+
+
+def _fetch_agent_audit_rows(audit_query, scan_limit: int, endpoint_name: str):
+    """兼容历史库缺少新审计字段时的降级查询，避免整页失败。"""
+    try:
+        return (
+            audit_query
+            .order_by(AgentAuditEvent.occurred_at.desc(), AgentAuditEvent.id.desc())
+            .limit(scan_limit)
+            .all()
+        )
+    except OperationalError as exc:
+        error_text = str(exc).lower()
+        if 'unknown column' in error_text and 'agent_audit_events' in error_text:
+            current_app.logger.warning(
+                '[%s] Skip agent audit events due to schema mismatch: %s',
+                endpoint_name,
+                exc,
+            )
+            return []
+        raise
 
 
 def _build_task_context_map(task_ids: Set[int]) -> Dict[int, Dict[str, Any]]:
@@ -429,7 +451,11 @@ def list_agent_activity(workspace_id: int, agent_id: int):
         audit_query = audit_query.filter(AgentAuditEvent.occurred_at >= since)
     if until:
         audit_query = audit_query.filter(AgentAuditEvent.occurred_at <= until)
-    audit_rows = audit_query.order_by(AgentAuditEvent.occurred_at.desc(), AgentAuditEvent.id.desc()).limit(scan_limit).all()
+    audit_rows = _fetch_agent_audit_rows(
+        audit_query=audit_query,
+        scan_limit=scan_limit,
+        endpoint_name='list_agent_activity',
+    )
     for row in audit_rows:
         level = str(row.level or '').strip().lower()
         if level not in {'info', 'warn', 'error'}:
@@ -1200,7 +1226,11 @@ def list_workspace_activities(workspace_id: int):
         audit_query = audit_query.filter(AgentAuditEvent.occurred_at >= since)
     if until:
         audit_query = audit_query.filter(AgentAuditEvent.occurred_at <= until)
-    audit_rows = audit_query.order_by(AgentAuditEvent.occurred_at.desc(), AgentAuditEvent.id.desc()).limit(scan_limit).all()
+    audit_rows = _fetch_agent_audit_rows(
+        audit_query=audit_query,
+        scan_limit=scan_limit,
+        endpoint_name='list_workspace_activities',
+    )
     for row in audit_rows:
         actor_agent_id = _parse_int_optional(getattr(row, 'actor_agent_id', None))
         target_agent_id = _parse_int_optional(getattr(row, 'target_agent_id', None))

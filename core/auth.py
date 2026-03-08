@@ -110,20 +110,22 @@ def unified_auth_required(f):
                 return f(*args, **kwargs)
 
         # 2. 尝试JWT认证
+        # 注意：仅捕获JWT解析/校验异常，不能吞掉业务处理函数内部异常
+        user_id = None
         try:
             verify_jwt_in_request()
             user_id = get_jwt_identity()
-            if user_id:
-                current_user = User.query.get(user_id)
-                if current_user and current_user.is_active():
-                    auth_method = 'jwt'
-                    g.current_user = current_user
-                    g.current_token = None
-                    g.auth_method = auth_method
-                    return f(*args, **kwargs)
         except Exception:
             # JWT验证失败，继续尝试其他认证方式
-            pass
+            user_id = None
+        if user_id:
+            current_user = User.query.get(user_id)
+            if current_user and current_user.is_active():
+                auth_method = 'jwt'
+                g.current_user = current_user
+                g.current_token = None
+                g.auth_method = auth_method
+                return f(*args, **kwargs)
 
         # 3. 认证失败
         return ApiResponse.unauthorized('Authentication required').to_response()
@@ -159,20 +161,22 @@ def optional_unified_auth(f):
                 return f(*args, **kwargs)
 
         # 2. 尝试JWT认证
+        # 注意：仅捕获JWT解析/校验异常，不能吞掉业务处理函数内部异常
+        user_id = None
         try:
             verify_jwt_in_request(optional=True)
             user_id = get_jwt_identity()
-            if user_id:
-                current_user = User.query.get(user_id)
-                if current_user and current_user.is_active():
-                    auth_method = 'jwt'
-                    g.current_user = current_user
-                    g.current_token = None
-                    g.auth_method = auth_method
-                    return f(*args, **kwargs)
         except Exception:
             # JWT验证失败，继续
-            pass
+            user_id = None
+        if user_id:
+            current_user = User.query.get(user_id)
+            if current_user and current_user.is_active():
+                auth_method = 'jwt'
+                g.current_user = current_user
+                g.current_token = None
+                g.auth_method = auth_method
+                return f(*args, **kwargs)
 
         # 3. 没有认证或认证失败，设置为None
         g.current_user = None
