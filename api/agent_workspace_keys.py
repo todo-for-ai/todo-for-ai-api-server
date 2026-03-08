@@ -9,12 +9,12 @@ from models import db, Agent, AgentKey, AgentConnectLink
 from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse, validate_json_request
 from .agent_common import (
-    ensure_workspace_access,
     ensure_agent_manage_access,
     write_agent_audit,
     sign_link_payload,
     now_utc,
 )
+from .agent_access_control import ensure_agent_detail_access
 
 
 agent_workspace_keys_bp = Blueprint('agent_workspace_keys', __name__)
@@ -28,7 +28,7 @@ def list_agent_keys(workspace_id, agent_id):
     if not agent:
         return ApiResponse.not_found('Agent not found').to_response()
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 

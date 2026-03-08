@@ -9,7 +9,8 @@ from sqlalchemy import func, or_
 from models import db, Agent, AgentSecret, AgentSecretShare, Project
 from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse, validate_json_request
-from .agent_common import ensure_workspace_access, ensure_agent_manage_access, write_agent_audit
+from .agent_common import ensure_agent_manage_access, write_agent_audit
+from .agent_access_control import ensure_agent_detail_access
 
 
 agent_workspace_secrets_bp = Blueprint('agent_workspace_secrets', __name__)
@@ -159,7 +160,7 @@ def list_agent_secrets(workspace_id, agent_id):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
@@ -581,7 +582,7 @@ def get_agent_secret_collaboration(workspace_id, agent_id):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 

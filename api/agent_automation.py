@@ -23,7 +23,8 @@ from models import (
 )
 from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse, validate_json_request, get_request_args
-from .agent_common import ensure_agent_manage_access, ensure_workspace_access, now_utc
+from .agent_common import ensure_agent_manage_access, now_utc
+from .agent_access_control import ensure_agent_detail_access
 from .notification_service import (
     SUPPORTED_NOTIFICATION_CHANNEL_TYPES,
     normalize_notification_event_types,
@@ -310,7 +311,7 @@ def list_agent_triggers(workspace_id, agent_id):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
@@ -538,7 +539,7 @@ def list_agent_runs(workspace_id, agent_id):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
@@ -580,7 +581,7 @@ def get_agent_run(workspace_id, agent_id, run_id):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 

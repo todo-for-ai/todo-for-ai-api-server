@@ -28,6 +28,7 @@ from models import (
     db,
 )
 from .agent_common import ensure_workspace_access, get_workspace_or_404
+from .agent_access_control import ensure_agent_detail_access
 from .base import ApiResponse, get_request_args
 
 
@@ -258,7 +259,7 @@ def list_agent_activity(workspace_id: int, agent_id: int):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
@@ -585,7 +586,7 @@ def list_agent_projects(workspace_id: int, agent_id: int):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
@@ -757,7 +758,7 @@ def list_agent_interactions(workspace_id: int, agent_id: int):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
@@ -853,7 +854,7 @@ def list_agent_tasks(workspace_id: int, agent_id: int):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 

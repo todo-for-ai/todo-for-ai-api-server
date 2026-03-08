@@ -12,6 +12,7 @@ from .agent_common import (
     ensure_agent_manage_access,
     write_agent_audit,
 )
+from .agent_access_control import ensure_agent_detail_access
 
 
 agent_workspace_agents_bp = Blueprint('agent_workspace_agents', __name__)
@@ -230,13 +231,13 @@ def get_agent(workspace_id, agent_id):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, workspace)
-    if access_err:
-        return access_err
-
     agent = Agent.query.filter_by(id=agent_id, workspace_id=workspace_id).first()
     if not agent:
         return ApiResponse.not_found('Agent not found').to_response()
+
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
+    if access_err:
+        return access_err
 
     return ApiResponse.success(agent.to_dict(), 'Agent retrieved successfully').to_response()
 

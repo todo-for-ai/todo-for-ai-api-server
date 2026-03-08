@@ -6,7 +6,8 @@ from flask import Blueprint
 from models import db, Agent, AgentSoulVersion
 from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse, validate_json_request, get_request_args
-from .agent_common import ensure_workspace_access, ensure_agent_manage_access, write_agent_audit
+from .agent_common import ensure_agent_manage_access, write_agent_audit
+from .agent_access_control import ensure_agent_detail_access
 
 
 agent_workspace_soul_bp = Blueprint('agent_workspace_soul', __name__)
@@ -27,7 +28,7 @@ def list_soul_versions(workspace_id, agent_id):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
@@ -64,7 +65,7 @@ def get_soul_version(workspace_id, agent_id, version):
     if err:
         return err
 
-    access_err = ensure_workspace_access(user, agent.workspace)
+    access_err = ensure_agent_detail_access(actor_user=user, target_agent=agent)
     if access_err:
         return access_err
 
