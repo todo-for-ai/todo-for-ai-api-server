@@ -18,8 +18,34 @@ from core.google_config import google_service
 # 创建蓝图
 auth_bp = Blueprint('auth', __name__)
 
+def _normalize_local_loopback_url(url: str) -> str:
+    """在本地开发场景下统一回环地址，减少 localhost 解析抖动。"""
+    if not url:
+        return url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+
+    # 仅处理本地 localhost，避免影响生产域名与外部地址
+    if parsed.hostname != 'localhost':
+        return url
+
+    netloc = parsed.netloc
+    if '@' in netloc:
+        userinfo, hostport = netloc.rsplit('@', 1)
+        hostport = hostport.replace('localhost', '127.0.0.1', 1)
+        netloc = f'{userinfo}@{hostport}'
+    else:
+        netloc = netloc.replace('localhost', '127.0.0.1', 1)
+
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
 def _normalize_return_to(return_to: str, frontend_base: str) -> str:
     """规范化登录后回跳地址，优先保留用户当前前端域名。"""
+    frontend_base = _normalize_local_loopback_url(frontend_base)
+
     if not return_to:
         return f'{frontend_base}/todo-for-ai/pages/dashboard'
 
@@ -29,8 +55,11 @@ def _normalize_return_to(return_to: str, frontend_base: str) -> str:
 
     # 显式URL：仅当它指向后端地址时，替换到前端地址
     if return_to.startswith('http://') or return_to.startswith('https://'):
+        return_to = _normalize_local_loopback_url(return_to)
         if 'localhost:50110' in return_to:
             return return_to.replace('http://localhost:50110', frontend_base)
+        if '127.0.0.1:50110' in return_to:
+            return return_to.replace('http://127.0.0.1:50110', frontend_base)
         if '/todo-for-ai/api/v1' in return_to:
             return return_to.replace('/todo-for-ai/api/v1', '/todo-for-ai/pages')
         return return_to
@@ -123,7 +152,7 @@ def guest_login():
     try:
         # 根据环境确定前端地址
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        frontend_base = 'https://todo4ai.org' if is_docker else (request.headers.get('Origin') or 'http://localhost:50111')
+        frontend_base = 'https://todo4ai.org' if is_docker else (request.headers.get('Origin') or 'http://127.0.0.1:50111')
 
         # return_to 兼容相对路径与错误域名
         return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
@@ -201,7 +230,7 @@ def github_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
+        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
@@ -243,7 +272,7 @@ def google_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
+        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
@@ -271,7 +300,7 @@ def logout():
         current_user.save()
 
         # 简单的登出响应（不再使用Auth0）
-        return_to = request.json.get('return_to', 'http://localhost:50111/todo-for-ai/pages')
+        return_to = request.json.get('return_to', 'http://127.0.0.1:50111/todo-for-ai/pages')
 
         return ApiResponse.success({
             'message': 'Logout successful',
