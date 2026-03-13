@@ -7,6 +7,7 @@ from models import db, Task, TaskLog, TaskLogActorType
 from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse, validate_json_request, get_request_args
 from .agent_common import agent_session_required
+from api.organizations.events import record_organization_event
 
 
 task_logs_bp = Blueprint('task_logs', __name__)
@@ -81,6 +82,27 @@ def append_task_log_by_user(task_id):
         created_by=current_user.email,
     )
     db.session.add(row)
+
+    record_organization_event(
+        organization_id=task.project.organization_id if task.project else None,
+        event_type='task.log.appended',
+        actor_type='user',
+        actor_id=current_user.id,
+        actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+        target_type='task',
+        target_id=task.id,
+        project_id=task.project_id,
+        task_id=task.id,
+        message=f"Task log appended: {task.title}",
+        payload={
+            'task_title': task.title,
+            'project_name': task.project.name if task.project else None,
+            'content_preview': content[:200],
+            'content_type': (data.get('content_type') or 'text/markdown')[:32],
+        },
+        created_by=current_user.email,
+    )
+
     db.session.commit()
 
     return ApiResponse.created(row.to_dict(), 'Task log appended successfully').to_response()
@@ -129,6 +151,27 @@ def append_task_log_by_agent(task_id):
         created_by=f'agent:{agent.id}',
     )
     db.session.add(row)
+
+    record_organization_event(
+        organization_id=task.project.organization_id if task.project else None,
+        event_type='task.log.appended',
+        actor_type='agent',
+        actor_id=agent.id,
+        actor_name=agent.name,
+        target_type='task',
+        target_id=task.id,
+        project_id=task.project_id,
+        task_id=task.id,
+        message=f"Task log appended by agent: {task.title}",
+        payload={
+            'task_title': task.title,
+            'project_name': task.project.name if task.project else None,
+            'content_preview': content[:200],
+            'content_type': (data.get('content_type') or 'text/markdown')[:32],
+        },
+        created_by=f'agent:{agent.id}',
+    )
+
     db.session.commit()
 
     return ApiResponse.created(row.to_dict(), 'Task log appended successfully').to_response()

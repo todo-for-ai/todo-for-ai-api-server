@@ -15,6 +15,7 @@ from models import (
 from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse, validate_json_request
 from .agent_common import agent_session_required, write_agent_audit
+from api.organizations.events import record_organization_event
 
 organization_agent_members_bp = Blueprint('organization_agent_members', __name__)
 
@@ -93,6 +94,19 @@ def create_organization_agent(organization_id):
     )
     db.session.add(member)
 
+    record_organization_event(
+        organization_id=organization_id,
+        event_type='agent.created',
+        actor_type='user',
+        actor_id=current_user.id,
+        actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+        target_type='agent',
+        target_id=agent.id,
+        message=f"Agent created: {agent.name}",
+        payload={'agent_name': agent.name},
+        created_by=current_user.email,
+    )
+
     write_agent_audit(
         event_type='org.agent.created',
         actor_type='user',
@@ -154,6 +168,19 @@ def invite_organization_agent_member(organization_id):
         )
         db.session.add(member)
 
+    record_organization_event(
+        organization_id=organization_id,
+        event_type='agent.invited',
+        actor_type='user',
+        actor_id=current_user.id,
+        actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+        target_type='agent',
+        target_id=agent.id,
+        message=f"Agent invited: {agent.name}",
+        payload={'agent_name': agent.name},
+        created_by=current_user.email,
+    )
+
     write_agent_audit(
         event_type='org.agent.invited',
         actor_type='user',
@@ -183,6 +210,19 @@ def remove_organization_agent_member(organization_id, membership_id):
         return ApiResponse.not_found('Organization agent member not found').to_response()
 
     member.status = OrganizationAgentMemberStatus.REMOVED
+
+    record_organization_event(
+        organization_id=organization_id,
+        event_type='agent.removed',
+        actor_type='user',
+        actor_id=current_user.id,
+        actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+        target_type='agent',
+        target_id=member.agent_id,
+        message=f"Agent removed: {member.agent_id}",
+        payload={'agent_id': member.agent_id},
+        created_by=current_user.email,
+    )
 
     write_agent_audit(
         event_type='org.agent.removed',
@@ -230,6 +270,18 @@ def accept_agent_organization_invitation(membership_id):
         return ApiResponse.error('Invitation is not pending', 409).to_response()
 
     member.mark_active()
+    record_organization_event(
+        organization_id=member.organization_id,
+        event_type='agent.accepted',
+        actor_type='agent',
+        actor_id=agent.id,
+        actor_name=agent.name,
+        target_type='agent',
+        target_id=agent.id,
+        message=f"Agent accepted invitation: {agent.name}",
+        payload={'agent_name': agent.name},
+        created_by=f'agent:{agent.id}',
+    )
     db.session.commit()
 
     return ApiResponse.success(member.to_dict(include_agent=False), 'Invitation accepted').to_response()
@@ -247,6 +299,18 @@ def reject_agent_organization_invitation(membership_id):
         return ApiResponse.error('Invitation is not pending', 409).to_response()
 
     member.mark_rejected()
+    record_organization_event(
+        organization_id=member.organization_id,
+        event_type='agent.rejected',
+        actor_type='agent',
+        actor_id=agent.id,
+        actor_name=agent.name,
+        target_type='agent',
+        target_id=agent.id,
+        message=f"Agent rejected invitation: {agent.name}",
+        payload={'agent_name': agent.name},
+        created_by=f'agent:{agent.id}',
+    )
     db.session.commit()
 
     return ApiResponse.success(member.to_dict(include_agent=False), 'Invitation rejected').to_response()

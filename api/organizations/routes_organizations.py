@@ -24,6 +24,7 @@ from .shared import (
     _get_user_org_roles_map,
     _invalidate_org_users,
 )
+from .events import record_organization_event
 
 @organizations_bp.route('', methods=['GET'])
 @organizations_bp.route('/', methods=['GET'])
@@ -135,6 +136,19 @@ def create_organization():
                 created_by=current_user.email,
             )
 
+        record_organization_event(
+            organization_id=organization.id,
+            event_type='org.created',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+            target_type='organization',
+            target_id=organization.id,
+            message=f"Organization created: {organization.name}",
+            payload={'organization_name': organization.name},
+            created_by=current_user.email,
+        )
+
         db.session.commit()
         invalidate_user_caches(current_user.id)
 
@@ -198,6 +212,23 @@ def update_organization(organization_id):
         for key in ['name', 'description']:
             if key in data:
                 setattr(organization, key, data[key])
+
+        event_type = 'org.updated'
+        if str(data.get('status') or '').lower() == 'archived':
+            event_type = 'org.archived'
+
+        record_organization_event(
+            organization_id=organization.id,
+            event_type=event_type,
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+            target_type='organization',
+            target_id=organization.id,
+            message=f"Organization updated: {organization.name}",
+            payload={'changed_fields': list(data.keys())},
+            created_by=current_user.email,
+        )
 
         db.session.commit()
         _invalidate_org_users(organization_id)

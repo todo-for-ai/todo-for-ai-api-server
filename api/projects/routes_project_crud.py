@@ -16,6 +16,13 @@ from ..base import validate_json_request, ApiResponse
 
 from . import projects_bp
 from .shared import _invalidate_project_users
+from api.organizations.events import record_organization_event
+
+
+def _user_display_name(user):
+    if not user:
+        return None
+    return user.full_name or user.nickname or user.username or user.email or str(user.id)
 
 
 @projects_bp.route('', methods=['POST'])
@@ -76,6 +83,23 @@ def create_project():
             status=ProjectMemberStatus.ACTIVE,
             invited_by=current_user.id,
             joined_at=current_time,
+            created_by=current_user.email,
+        )
+
+        record_organization_event(
+            organization_id=project.organization_id,
+            event_type='project.created',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=_user_display_name(current_user),
+            target_type='project',
+            target_id=project.id,
+            project_id=project.id,
+            message=f"Project created: {project.name}",
+            payload={
+                'project_name': project.name,
+                'project_status': project.status.value if hasattr(project.status, 'value') else project.status,
+            },
             created_by=current_user.email,
         )
 
@@ -183,6 +207,23 @@ def update_project(project_id):
         # 更新项目最后活动时间
         project.last_activity_at = datetime.utcnow()
 
+        record_organization_event(
+            organization_id=project.organization_id,
+            event_type='project.updated',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=_user_display_name(current_user),
+            target_type='project',
+            target_id=project.id,
+            project_id=project.id,
+            message=f"Project updated: {project.name}",
+            payload={
+                'project_name': project.name,
+                'changed_fields': list(data.keys()),
+            },
+            created_by=current_user.email,
+        )
+
         db.session.commit()
         _invalidate_project_users(project.id)
 
@@ -214,6 +255,19 @@ def delete_project(project_id):
             return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
         # 软删除
+        record_organization_event(
+            organization_id=project.organization_id,
+            event_type='project.deleted',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=_user_display_name(current_user),
+            target_type='project',
+            target_id=project.id,
+            project_id=project.id,
+            message=f"Project deleted: {project.name}",
+            payload={'project_name': project.name},
+            created_by=current_user.email,
+        )
         project.soft_delete()
         _invalidate_project_users(project.id)
 
@@ -239,6 +293,19 @@ def archive_project(project_id):
         if not current_user.can_manage_project(project):
             return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
+        record_organization_event(
+            organization_id=project.organization_id,
+            event_type='project.archived',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=_user_display_name(current_user),
+            target_type='project',
+            target_id=project.id,
+            project_id=project.id,
+            message=f"Project archived: {project.name}",
+            payload={'project_name': project.name},
+            created_by=current_user.email,
+        )
         project.archive()
         _invalidate_project_users(project.id)
 
@@ -267,6 +334,19 @@ def restore_project(project_id):
         if not current_user.can_manage_project(project):
             return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
 
+        record_organization_event(
+            organization_id=project.organization_id,
+            event_type='project.restored',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=_user_display_name(current_user),
+            target_type='project',
+            target_id=project.id,
+            project_id=project.id,
+            message=f"Project restored: {project.name}",
+            payload={'project_name': project.name},
+            created_by=current_user.email,
+        )
         project.restore()
         _invalidate_project_users(project.id)
 

@@ -22,6 +22,7 @@ from ..base import ApiResponse, paginate_query, paginate_query_fast, validate_js
 from core.auth import unified_auth_required, get_current_user
 from ..agent_trigger_engine import emit_task_event
 from ..notification_service import create_task_notifications, enqueue_pending_deliveries_for_events
+from api.organizations.events import record_organization_event
 
 from . import tasks_bp
 from .shared import (
@@ -32,6 +33,12 @@ from .shared import (
     _tasks_cache_get,
     _tasks_cache_set,
 )
+
+
+def _user_display_name(user):
+    if not user:
+        return None
+    return user.full_name or user.nickname or user.username or user.email or str(user.id)
 
 @tasks_bp.route('', methods=['GET'])
 @tasks_bp.route('/', methods=['GET'])
@@ -326,6 +333,26 @@ def create_task():
             if mentioned_event_id:
                 queued_notification_event_ids.append(mentioned_event_id)
 
+        record_organization_event(
+            organization_id=project.organization_id,
+            event_type='task.created',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=_user_display_name(current_user),
+            target_type='task',
+            target_id=task.id,
+            project_id=project.id,
+            task_id=task.id,
+            message=f"Task created: {task.title}",
+            payload={
+                'task_title': task.title,
+                'task_status': task.status.value if task.status else None,
+                'task_priority': task.priority.value if task.priority else None,
+                'project_name': project.name,
+            },
+            created_by=current_user.email,
+        )
+
         db.session.commit()
         enqueue_pending_deliveries_for_events(queued_notification_event_ids)
         _invalidate_project_users(project.id)
@@ -591,6 +618,34 @@ def update_task(task_id):
                 if mentioned_event_id:
                     queued_notification_event_ids.append(mentioned_event_id)
 
+            event_payload = {
+                'changed_fields': changed_field_names,
+                'task_title': task.title,
+                'project_name': task.project.name if task.project else None,
+            }
+            event_type = 'task.updated'
+            if status_change:
+                from_status_value = status_change[1].value if hasattr(status_change[1], 'value') else status_change[1]
+                to_status_value = status_change[2].value if hasattr(status_change[2], 'value') else status_change[2]
+                event_type = 'task.status_changed'
+                event_payload['from_status'] = from_status_value
+                event_payload['to_status'] = to_status_value
+
+            record_organization_event(
+                organization_id=task.project.organization_id if task.project else None,
+                event_type=event_type,
+                actor_type='user',
+                actor_id=current_user.id,
+                actor_name=_user_display_name(current_user),
+                target_type='task',
+                target_id=task.id,
+                project_id=task.project_id,
+                task_id=task.id,
+                message=f"Task updated: {task.title}",
+                payload=event_payload,
+                created_by=current_user.email,
+            )
+
         db.session.commit()
         enqueue_pending_deliveries_for_events(queued_notification_event_ids)
         _invalidate_project_users(task.project_id)
@@ -661,6 +716,24 @@ def delete_task(task_id):
         db.session.query(TaskEventOutbox).filter(
             TaskEventOutbox.task_id == task.id
         ).delete(synchronize_session=False)
+
+        record_organization_event(
+            organization_id=task.project.organization_id if task.project else None,
+            event_type='task.deleted',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=_user_display_name(current_user),
+            target_type='task',
+            target_id=task.id,
+            project_id=task.project_id,
+            task_id=task.id,
+            message=f"Task deleted: {task.title}",
+            payload={
+                'task_title': task.title,
+                'project_name': task.project.name if task.project else None,
+            },
+            created_by=current_user.email,
+        )
 
         # 删除任务
         task.delete()

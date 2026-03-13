@@ -24,6 +24,7 @@ from .shared import (
     _replace_member_roles,
     _invalidate_org_users,
 )
+from .events import record_organization_event
 
 @organizations_bp.route('/<int:organization_id>/members', methods=['GET'])
 @unified_auth_required
@@ -123,6 +124,23 @@ def invite_organization_member(organization_id):
 
         _replace_member_roles(member, role_ids or [], created_by=current_user.email)
 
+        record_organization_event(
+            organization_id=organization_id,
+            event_type='member.invited',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+            target_type='member',
+            target_id=target_user.id,
+            message=f"Member invited: {target_user.email}",
+            payload={
+                'member_user_id': target_user.id,
+                'member_email': target_user.email,
+                'role_ids': role_ids or [],
+            },
+            created_by=current_user.email,
+        )
+
         db.session.commit()
         _invalidate_org_users(organization_id)
         return ApiResponse.success(
@@ -160,6 +178,7 @@ def update_organization_member(organization_id, user_id):
         if isinstance(data, tuple):
             return data
 
+        role_ids = None
         if 'role_ids' in data or 'role' in data:
             try:
                 role_ids = _resolve_role_ids_from_payload(organization_id, data, default_role_key=None)
@@ -180,6 +199,25 @@ def update_organization_member(organization_id, user_id):
                 member.status = OrganizationMemberStatus(data['status'])
             except ValueError:
                 return ApiResponse.error(f"Invalid status: {data['status']}", 400).to_response()
+
+        event_payload = {}
+        if 'role_ids' in data or 'role' in data:
+            event_payload['role_ids'] = role_ids or []
+        if 'status' in data:
+            event_payload['status'] = data['status']
+
+        record_organization_event(
+            organization_id=organization_id,
+            event_type='member.updated',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+            target_type='member',
+            target_id=user_id,
+            message=f"Member updated: {user_id}",
+            payload=event_payload,
+            created_by=current_user.email,
+        )
 
         db.session.commit()
         _invalidate_org_users(organization_id)
@@ -211,6 +249,19 @@ def remove_organization_member(organization_id, user_id):
         ).first()
         if not member:
             return ApiResponse.not_found("Organization member not found").to_response()
+
+        record_organization_event(
+            organization_id=organization_id,
+            event_type='member.removed',
+            actor_type='user',
+            actor_id=current_user.id,
+            actor_name=current_user.full_name or current_user.nickname or current_user.username or current_user.email,
+            target_type='member',
+            target_id=user_id,
+            message=f"Member removed: {user_id}",
+            payload={'member_user_id': user_id},
+            created_by=current_user.email,
+        )
 
         db.session.delete(member)
         db.session.commit()
