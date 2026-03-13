@@ -44,6 +44,7 @@ from .agent_connect_link import AgentConnectLink
 from .agent_audit_event import AgentAuditEvent
 from .task_log import TaskLog, TaskLogActorType
 from .task_event_outbox import TaskEventOutbox
+from .organization_event import OrganizationEvent
 from .notification_channel import NotificationChannel, NotificationScopeType, NotificationChannelType
 from .notification_delivery import NotificationDelivery, NotificationDeliveryStatus
 from .notification_event import NotificationEvent
@@ -106,6 +107,7 @@ __all__ = [
     'TaskLog',
     'TaskLogActorType',
     'TaskEventOutbox',
+    'OrganizationEvent',
     'NotificationChannel',
     'NotificationScopeType',
     'NotificationChannelType',
