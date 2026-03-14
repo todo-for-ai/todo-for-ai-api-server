@@ -15,6 +15,8 @@ from .base import BaseModel
 
 class ApiToken(BaseModel):
     """API Token模型"""
+
+    TOKEN_PREFIX = 'todo4ai-'
     
     __tablename__ = 'api_tokens'
 
@@ -82,7 +84,7 @@ class ApiToken(BaseModel):
     def generate_token(cls, name, description=None, expires_days=None):
         """生成新的API Token"""
         # 生成随机token
-        token = secrets.token_urlsafe(32)
+        token = f"{cls.TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
         prefix = token[:8]
 
         # 计算哈希值
