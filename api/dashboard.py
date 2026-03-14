@@ -143,19 +143,13 @@ def _build_scope_stats(project_query, task_query):
     }
 
 
-def _get_participated_project_ids(user_id):
-    owned_project_ids = [
-        int(row.id)
-        for row in Project.query.with_entities(Project.id).filter(Project.owner_id == user_id).all()
-    ]
-    member_project_ids = [
-        int(row.project_id)
-        for row in ProjectMember.query.with_entities(ProjectMember.project_id).filter(
-            ProjectMember.user_id == user_id,
-            ProjectMember.status == ProjectMemberStatus.ACTIVE,
-        ).all()
-    ]
-    return sorted(set(owned_project_ids + member_project_ids))
+def _get_participated_project_ids_subquery(user_id):
+    owned_ids = db.session.query(Project.id.label('project_id')).filter(Project.owner_id == user_id)
+    member_ids = db.session.query(ProjectMember.project_id.label('project_id')).filter(
+        ProjectMember.user_id == user_id,
+        ProjectMember.status == ProjectMemberStatus.ACTIVE,
+    )
+    return owned_ids.union(member_ids).subquery()
 
 
 def _get_accessible_organizations(user_id):
@@ -243,49 +237,60 @@ def _build_organization_agent_stats(org_map):
 
     cutoff = datetime.utcnow() - timedelta(days=7)
 
-    total_rows = db.session.query(
-        OrganizationAgentMember.organization_id,
-        func.count(func.distinct(OrganizationAgentMember.agent_id)).label('total_agents'),
+    org_agents_subquery = db.session.query(
+        OrganizationAgentMember.organization_id.label('org_id'),
+        OrganizationAgentMember.agent_id.label('agent_id'),
     ).filter(
         OrganizationAgentMember.organization_id.in_(org_ids),
         OrganizationAgentMember.status != OrganizationAgentMemberStatus.REMOVED,
-    ).group_by(
-        OrganizationAgentMember.organization_id
-    ).all()
-    total_by_org = {int(row.organization_id): int(row.total_agents or 0) for row in total_rows}
+    ).subquery()
 
-    active_rows = db.session.query(
-        OrganizationAgentMember.organization_id,
-        func.count(func.distinct(OrganizationAgentMember.agent_id)).label('active_agents_7d'),
+    attempts_subquery = db.session.query(
+        AgentTaskAttempt.agent_id.label('agent_id'),
+        func.max(AgentTaskAttempt.started_at).label('last_started_at'),
+        func.max(
+            case(
+                (
+                    (AgentTaskAttempt.started_at >= cutoff) &
+                    (AgentTaskAttempt.state.in_([AgentTaskAttemptState.ACTIVE, AgentTaskAttemptState.COMMITTED])),
+                    1,
+                ),
+                else_=0,
+            )
+        ).label('active_in_window'),
     ).join(
-        Agent, Agent.id == OrganizationAgentMember.agent_id
-    ).join(
-        AgentTaskAttempt, AgentTaskAttempt.agent_id == Agent.id
-    ).filter(
-        OrganizationAgentMember.organization_id.in_(org_ids),
-        OrganizationAgentMember.status != OrganizationAgentMemberStatus.REMOVED,
-        Agent.status == AgentStatus.ACTIVE,
-        AgentTaskAttempt.started_at >= cutoff,
-        AgentTaskAttempt.state.in_([AgentTaskAttemptState.ACTIVE, AgentTaskAttemptState.COMMITTED]),
+        org_agents_subquery,
+        org_agents_subquery.c.agent_id == AgentTaskAttempt.agent_id,
     ).group_by(
-        OrganizationAgentMember.organization_id
-    ).all()
-    active_by_org = {int(row.organization_id): int(row.active_agents_7d or 0) for row in active_rows}
+        AgentTaskAttempt.agent_id
+    ).subquery()
 
-    last_rows = db.session.query(
-        OrganizationAgentMember.organization_id,
-        func.max(AgentTaskAttempt.started_at).label('last_agent_activity_at'),
+    stats_rows = db.session.query(
+        org_agents_subquery.c.org_id,
+        func.count(func.distinct(org_agents_subquery.c.agent_id)).label('total_agents'),
+        func.sum(
+            case(
+                (
+                    (Agent.status == AgentStatus.ACTIVE) &
+                    (attempts_subquery.c.active_in_window == 1),
+                    1,
+                ),
+                else_=0,
+            )
+        ).label('active_agents_7d'),
+        func.max(attempts_subquery.c.last_started_at).label('last_agent_activity_at'),
     ).join(
-        Agent, Agent.id == OrganizationAgentMember.agent_id
-    ).join(
-        AgentTaskAttempt, AgentTaskAttempt.agent_id == Agent.id
-    ).filter(
-        OrganizationAgentMember.organization_id.in_(org_ids),
-        OrganizationAgentMember.status != OrganizationAgentMemberStatus.REMOVED,
+        Agent, Agent.id == org_agents_subquery.c.agent_id
+    ).outerjoin(
+        attempts_subquery,
+        attempts_subquery.c.agent_id == org_agents_subquery.c.agent_id
     ).group_by(
-        OrganizationAgentMember.organization_id
+        org_agents_subquery.c.org_id
     ).all()
-    last_by_org = {int(row.organization_id): row.last_agent_activity_at for row in last_rows}
+
+    total_by_org = {int(row.org_id): int(row.total_agents or 0) for row in stats_rows}
+    active_by_org = {int(row.org_id): int(row.active_agents_7d or 0) for row in stats_rows}
+    last_by_org = {int(row.org_id): row.last_agent_activity_at for row in stats_rows}
 
     items = []
     for org_id in org_ids:
@@ -339,16 +344,10 @@ def _build_dashboard_stats(user_id):
     owned_task_query = Task.query.filter(Task.owner_id == user_id)
     owned_scope = _build_scope_stats(owned_project_query, owned_task_query)
 
-    participated_project_ids = _get_participated_project_ids(user_id)
-    if participated_project_ids:
-        participated_project_query = Project.query.filter(Project.id.in_(participated_project_ids))
-        participated_task_query = Task.query.filter(Task.project_id.in_(participated_project_ids))
-        participated_scope = _build_scope_stats(participated_project_query, participated_task_query)
-    else:
-        participated_scope = {
-            'projects': _empty_project_stats(),
-            'tasks': _empty_task_stats(),
-        }
+    participated_project_ids = _get_participated_project_ids_subquery(user_id)
+    participated_project_query = Project.query.filter(Project.id.in_(participated_project_ids))
+    participated_task_query = Task.query.filter(Task.project_id.in_(participated_project_ids))
+    participated_scope = _build_scope_stats(participated_project_query, participated_task_query)
 
     if owned_scope['tasks']['total'] > LARGE_DATASET_THRESHOLD:
         recent_tasks = []
