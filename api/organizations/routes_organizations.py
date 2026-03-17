@@ -1,16 +1,20 @@
 """Organization list/detail routes."""
 
 from datetime import datetime
+from sqlalchemy import func
 
 from models import (
     db,
     Organization,
     OrganizationStatus,
     OrganizationMember,
+    OrganizationAgentMember,
+    OrganizationAgentMemberStatus,
     OrganizationRole,
     OrganizationMemberStatus,
     OrganizationRoleDefinition,
     OrganizationMemberRole,
+    Project,
 )
 from ..base import ApiResponse, validate_json_request, get_request_args, paginate_query
 from core.auth import unified_auth_required, get_current_user
@@ -67,8 +71,100 @@ def list_organizations():
 
         org_ids = [item['id'] for item in result['items']]
         roles_map = _get_user_org_roles_map(org_ids, current_user.id)
+        member_counts = {}
+        agent_counts = {}
+        project_counts = {}
+        active_role_counts = {}
+        last_activity_at_map = {}
+
+        if org_ids:
+            member_counts = {
+                int(row.organization_id): int(row.total or 0)
+                for row in (
+                    db.session.query(
+                        OrganizationMember.organization_id,
+                        func.count(OrganizationMember.id).label('total'),
+                    )
+                    .filter(
+                        OrganizationMember.organization_id.in_(org_ids),
+                        OrganizationMember.status == OrganizationMemberStatus.ACTIVE,
+                    )
+                    .group_by(OrganizationMember.organization_id)
+                    .all()
+                )
+            }
+            agent_counts = {
+                int(row.organization_id): int(row.total or 0)
+                for row in (
+                    db.session.query(
+                        OrganizationAgentMember.organization_id,
+                        func.count(func.distinct(OrganizationAgentMember.agent_id)).label('total'),
+                    )
+                    .filter(
+                        OrganizationAgentMember.organization_id.in_(org_ids),
+                        OrganizationAgentMember.status != OrganizationAgentMemberStatus.REMOVED,
+                    )
+                    .group_by(OrganizationAgentMember.organization_id)
+                    .all()
+                )
+            }
+            project_counts = {
+                int(row.organization_id): int(row.total or 0)
+                for row in (
+                    db.session.query(
+                        Project.organization_id,
+                        func.count(Project.id).label('total'),
+                    )
+                    .filter(Project.organization_id.in_(org_ids))
+                    .group_by(Project.organization_id)
+                    .all()
+                )
+            }
+            active_role_counts = {
+                int(row.organization_id): int(row.total or 0)
+                for row in (
+                    db.session.query(
+                        OrganizationRoleDefinition.organization_id,
+                        func.count(OrganizationRoleDefinition.id).label('total'),
+                    )
+                    .filter(
+                        OrganizationRoleDefinition.organization_id.in_(org_ids),
+                        OrganizationRoleDefinition.is_active.is_(True),
+                    )
+                    .group_by(OrganizationRoleDefinition.organization_id)
+                    .all()
+                )
+            }
+            last_activity_at_map = {
+                int(row.organization_id): row.last_activity_at
+                for row in (
+                    db.session.query(
+                        Project.organization_id,
+                        func.max(
+                            func.coalesce(
+                                Project.last_activity_at,
+                                Project.updated_at,
+                                Project.created_at,
+                            )
+                        ).label('last_activity_at'),
+                    )
+                    .filter(Project.organization_id.in_(org_ids))
+                    .group_by(Project.organization_id)
+                    .all()
+                )
+            }
 
         for item in result['items']:
+            item['member_count'] = member_counts.get(item['id'], 0)
+            item['agent_count'] = agent_counts.get(item['id'], 0)
+            item['project_count'] = project_counts.get(item['id'], 0)
+            item['active_role_count'] = active_role_counts.get(item['id'], 0)
+            project_last_activity = last_activity_at_map.get(item['id'])
+            project_last_activity_iso = project_last_activity.isoformat() if project_last_activity else None
+            item['last_activity_at'] = max(
+                [value for value in [item.get('updated_at'), project_last_activity_iso] if value],
+                default=None,
+            )
             if item.get('owner_id') == current_user.id:
                 item['current_user_roles'] = ['owner']
                 item['current_user_role'] = 'owner'

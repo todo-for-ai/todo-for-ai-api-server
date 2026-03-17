@@ -10,7 +10,15 @@ from datetime import datetime
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 from flask import Blueprint, request, jsonify, redirect, url_for, session
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, User
+from models import (
+    db,
+    User,
+    Organization,
+    OrganizationMember,
+    OrganizationMemberStatus,
+    OrganizationMemberRole,
+    OrganizationRoleDefinition,
+)
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 from core.github_config import github_service, require_auth, get_current_user
 from core.google_config import google_service
@@ -74,6 +82,64 @@ def _append_query_params(url: str, params: dict) -> str:
     existing.update(params)
     query = urlencode(existing)
     return urlunparse(parsed._replace(query=query))
+
+
+def _collect_accessible_org_ids(user_id: int) -> set:
+    """收集用户可访问组织（owner 或 active member）。"""
+    owner_ids = {
+        row.id for row in db.session.query(Organization.id).filter(Organization.owner_id == user_id).all()
+    }
+    member_ids = {
+        row.organization_id
+        for row in db.session.query(OrganizationMember.organization_id).filter(
+            OrganizationMember.user_id == user_id,
+            OrganizationMember.status == OrganizationMemberStatus.ACTIVE,
+        ).all()
+    }
+    return owner_ids | member_ids
+
+
+def _collect_user_org_role_keys(organization: Organization, user_id: int) -> list:
+    """获取用户在组织中的角色键（兼容 owner + 旧 role 字段）。"""
+    if organization.owner_id == user_id:
+        return ['owner']
+
+    member = OrganizationMember.query.filter(
+        OrganizationMember.organization_id == organization.id,
+        OrganizationMember.user_id == user_id,
+        OrganizationMember.status == OrganizationMemberStatus.ACTIVE,
+    ).first()
+    if not member:
+        return []
+
+    role_rows = (
+        db.session.query(OrganizationRoleDefinition.key)
+        .join(OrganizationMemberRole, OrganizationMemberRole.role_id == OrganizationRoleDefinition.id)
+        .filter(
+            OrganizationMemberRole.member_id == member.id,
+            OrganizationRoleDefinition.is_active.is_(True),
+        )
+        .all()
+    )
+
+    role_keys = []
+    seen = set()
+    for row in role_rows:
+        key = str(row.key or '').strip().lower()
+        if key and key not in seen:
+            role_keys.append(key)
+            seen.add(key)
+
+    if role_keys:
+        return role_keys
+
+    # 兼容尚未迁移到 organization_member_roles 的旧数据
+    if member.role:
+        legacy_role = member.role.value if hasattr(member.role, 'value') else str(member.role)
+        legacy_role = str(legacy_role or '').strip().lower()
+        if legacy_role:
+            return [legacy_role]
+    return []
 
 
 @auth_bp.route('/login', methods=['GET'])
@@ -477,16 +543,57 @@ def get_user(user_id):
     """获取指定用户信息"""
     try:
         current_user = get_current_user()
-        
-        # 只有管理员或用户本人可以查看详细信息
-        if not current_user.is_admin() and current_user.id != user_id:
-            return ApiResponse.error("Access denied", 403).to_response()
-        
+
         user = User.query.get(user_id)
         if not user:
             return ApiResponse.error("User not found", 404).to_response()
-        
-        return ApiResponse.success(user.to_dict(), "User information retrieved successfully").to_response()
+
+        # 管理员或用户本人：完整视图
+        if current_user.is_admin() or current_user.id == user_id:
+            payload = user.to_dict()
+            payload['is_self'] = current_user.id == user_id
+            payload['view_mode'] = 'self' if current_user.id == user_id else 'admin'
+            payload['shared_organization_count'] = 0
+            payload['shared_organizations'] = []
+            return ApiResponse.success(payload, "User information retrieved successfully").to_response()
+
+        # 其他用户：仅允许查看共享组织内成员的公开档案
+        viewer_org_ids = _collect_accessible_org_ids(current_user.id)
+        target_org_ids = _collect_accessible_org_ids(user_id)
+        shared_org_ids = viewer_org_ids.intersection(target_org_ids)
+        if not shared_org_ids:
+            return ApiResponse.error("Access denied", 403).to_response()
+
+        shared_orgs = (
+            Organization.query
+            .filter(Organization.id.in_(shared_org_ids))
+            .order_by(Organization.name.asc())
+            .all()
+        )
+
+        shared_organizations = []
+        for org in shared_orgs:
+            shared_organizations.append({
+                'id': org.id,
+                'name': org.name,
+                'slug': org.slug,
+                'status': org.status.value if org.status else None,
+                'target_roles': _collect_user_org_role_keys(org, user_id),
+                'viewer_roles': _collect_user_org_role_keys(org, current_user.id),
+            })
+
+        payload = user.to_public_dict()
+        payload['name'] = user.name
+        payload['timezone'] = user.timezone
+        payload['locale'] = user.locale
+        payload['last_active_at'] = user.last_active_at.isoformat() if user.last_active_at else None
+        payload['updated_at'] = user.updated_at.isoformat() if user.updated_at else None
+        payload['is_self'] = False
+        payload['view_mode'] = 'public'
+        payload['shared_organization_count'] = len(shared_organizations)
+        payload['shared_organizations'] = shared_organizations
+
+        return ApiResponse.success(payload, "User public profile retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)
