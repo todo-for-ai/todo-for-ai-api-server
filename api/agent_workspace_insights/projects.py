@@ -26,6 +26,8 @@ def list_agent_projects(workspace_id: int, agent_id: int):
     page = max(args['page'], 1)
     per_page = min(max(args['per_page'], 1), 100)
     search_text = str(args.get('search') or '').strip().lower()
+    sort_by = args.get('sort_by') or 'last_activity_at'
+    sort_order = args.get('sort_order') or 'desc'
 
     allowed_project_ids = set(_value_to_int_list(agent.allowed_project_ids))
 
@@ -40,6 +42,7 @@ def list_agent_projects(workspace_id: int, agent_id: int):
                 )
             ).label('committed_count'),
             func.max(func.coalesce(AgentTaskAttempt.ended_at, AgentTaskAttempt.started_at)).label('last_attempt_at'),
+            func.count(func.distinct(func.date(AgentTaskAttempt.started_at))).label('attempt_interaction_days'),
         )
         .join(Task, Task.id == AgentTaskAttempt.task_id)
         .join(Project, Project.id == Task.project_id)
@@ -59,6 +62,7 @@ def list_agent_projects(workspace_id: int, agent_id: int):
             func.count(TaskLog.id).label('log_count'),
             func.count(func.distinct(TaskLog.task_id)).label('log_task_count'),
             func.max(TaskLog.created_at).label('last_log_at'),
+            func.count(func.distinct(func.date(TaskLog.created_at))).label('log_interaction_days'),
         )
         .join(Task, Task.id == TaskLog.task_id)
         .join(Project, Project.id == Task.project_id)
@@ -107,10 +111,26 @@ def list_agent_projects(workspace_id: int, agent_id: int):
         interaction_log_count = int(getattr(log_row, 'log_count', 0) or 0)
         last_attempt_at = getattr(attempt_row, 'last_attempt_at', None)
         last_log_at = getattr(log_row, 'last_log_at', None)
+        attempt_interaction_days = int(getattr(attempt_row, 'attempt_interaction_days', 0) or 0)
+        log_interaction_days = int(getattr(log_row, 'log_interaction_days', 0) or 0)
+        interaction_days = max(attempt_interaction_days, log_interaction_days)
 
         last_activity_at = last_attempt_at
         if last_log_at and (not last_activity_at or last_log_at > last_activity_at):
             last_activity_at = last_log_at
+
+        # 计算提交率 (避免除以0)
+        submission_rate = (committed_count / touched_task_count * 100) if touched_task_count > 0 else 0
+
+        # 计算活跃度分数 (基于多个因素)
+        # 因素: 提交率(40%) + 交互日数(30%) + 最后活动时间(30%)
+        now = datetime.utcnow()
+        days_since_last_activity = (now - last_activity_at).days if last_activity_at else 999
+
+        # 活跃度衰减: 30天内活跃为满分，超过30天线性衰减
+        recency_score = max(0, 100 - (days_since_last_activity * 100 / 30)) if days_since_last_activity < 30 else 0
+        activity_score = (submission_rate * 0.4) + (min(interaction_days * 10, 30)) + (recency_score * 0.3)
+        activity_score = min(100, max(0, activity_score))
 
         item = {
             'project_id': project.id,
@@ -122,6 +142,9 @@ def list_agent_projects(workspace_id: int, agent_id: int):
             'committed_task_count': committed_count,
             'interaction_log_count': interaction_log_count,
             'last_activity_at': _iso(last_activity_at),
+            'interaction_days': interaction_days,
+            'submission_rate': round(submission_rate, 2),
+            'activity_score': round(activity_score, 2),
         }
         items.append(item)
 
@@ -132,13 +155,34 @@ def list_agent_projects(workspace_id: int, agent_id: int):
             if search_text in str(row.get('project_name') or '').lower()
         ]
 
-    items.sort(
-        key=lambda row: (
-            _parse_iso_datetime(row.get('last_activity_at')) or datetime.min,
-            int(row.get('project_id') or 0),
-        ),
-        reverse=True,
-    )
+    # 支持的排序字段
+    allowed_sort_fields = {
+        'project_id': 'project_id',
+        'project_name': 'project_name',
+        'touched_task_count': 'touched_task_count',
+        'committed_task_count': 'committed_task_count',
+        'interaction_log_count': 'interaction_log_count',
+        'interaction_days': 'interaction_days',
+        'submission_rate': 'submission_rate',
+        'activity_score': 'activity_score',
+        'last_activity_at': 'last_activity_at',
+    }
+
+    # 获取排序字段和方向
+    sort_field = allowed_sort_fields.get(sort_by, 'last_activity_at')
+    reverse_order = sort_order.lower() == 'desc'
+
+    # 执行排序
+    def get_sort_key(row):
+        value = row.get(sort_field)
+        if sort_field == 'last_activity_at':
+            return _parse_iso_datetime(value) or datetime.min
+        elif sort_field == 'project_name':
+            return str(value or '').lower()
+        else:
+            return value if value is not None else 0
+
+    items.sort(key=get_sort_key, reverse=reverse_order)
 
     total = len(items)
     start = (page - 1) * per_page
