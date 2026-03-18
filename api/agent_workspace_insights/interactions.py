@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+from flask import request
 from sqlalchemy import func, or_, and_
 
 from core.auth import get_current_user, unified_auth_required
@@ -27,15 +28,15 @@ def list_agent_interactions(workspace_id: int, agent_id: int):
     per_page = min(max(args['per_page'], 1), 100)
     search_text = str(args.get('search') or '').strip().lower()
 
-    # 新增筛选参数
-    min_interactions = args.get('min_interactions', type=int)
-    max_interactions = args.get('max_interactions', type=int)
-    min_tasks = args.get('min_tasks', type=int)
-    max_tasks = args.get('max_tasks', type=int)
-    from_date = _parse_iso_datetime(args.get('from'))
-    to_date = _parse_iso_datetime(args.get('to'))
-    sort_by = args.get('sort_by', 'last_interaction_at')
-    sort_order = args.get('sort_order', 'desc')
+    # 新增筛选参数 - 使用 request.args 获取带类型转换的参数
+    min_interactions = request.args.get('min_interactions', type=int)
+    max_interactions = request.args.get('max_interactions', type=int)
+    min_tasks = request.args.get('min_tasks', type=int)
+    max_tasks = request.args.get('max_tasks', type=int)
+    from_date = _parse_iso_datetime(request.args.get('from'))
+    to_date = _parse_iso_datetime(request.args.get('to'))
+    sort_by = request.args.get('sort_by', 'last_interaction_at')
+    sort_order = request.args.get('sort_order', 'desc')
 
     touched_task_ids = _touched_task_ids_subquery(workspace_id, agent_id)
 
@@ -51,12 +52,13 @@ def list_agent_interactions(workspace_id: int, agent_id: int):
             User.last_login_at.label('user_last_login_at'),
             func.count(TaskLog.id).label('interaction_count'),
             func.count(func.distinct(TaskLog.task_id)).label('task_count'),
-            func.count(func.distinct(TaskLog.project_id)).label('project_count'),
+            func.count(func.distinct(Task.project_id)).label('project_count'),
             func.sum(func.length(TaskLog.content)).label('total_content_length'),
             func.max(TaskLog.created_at).label('last_interaction_at'),
             func.min(TaskLog.created_at).label('first_interaction_at'),
         )
         .join(User, User.id == TaskLog.actor_user_id)
+        .join(Task, Task.id == TaskLog.task_id)
         .filter(
             TaskLog.task_id.in_(db.session.query(touched_task_ids.c.task_id)),
             TaskLog.actor_user_id.isnot(None),
@@ -110,7 +112,7 @@ def list_agent_interactions(workspace_id: int, agent_id: int):
         'user_id': TaskLog.actor_user_id,
         'interaction_count': func.count(TaskLog.id),
         'task_count': func.count(func.distinct(TaskLog.task_id)),
-        'project_count': func.count(func.distinct(TaskLog.project_id)),
+        'project_count': func.count(func.distinct(Task.project_id)),
         'last_interaction_at': func.max(TaskLog.created_at),
         'first_interaction_at': func.min(TaskLog.created_at),
     }
