@@ -32,6 +32,7 @@ from .agent import Agent, AgentStatus
 from .agent_soul_version import AgentSoulVersion
 from .agent_secret import AgentSecret
 from .agent_secret_share import AgentSecretShare
+from .agent_secret_grant import AgentSecretGrant
 from .agent_key import AgentKey
 from .agent_session import AgentSession
 from .agent_task_attempt import AgentTaskAttempt, AgentTaskAttemptState
@@ -91,6 +92,7 @@ __all__ = [
     'AgentSoulVersion',
     'AgentSecret',
     'AgentSecretShare',
+    'AgentSecretGrant',
     'AgentKey',
     'AgentSession',
     'AgentTaskAttempt',

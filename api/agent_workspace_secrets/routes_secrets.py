@@ -3,7 +3,7 @@ from datetime import datetime
 from flask import request
 from sqlalchemy import func, or_
 
-from models import AgentSecret, AgentSecretShare, Project, db
+from models import AgentSecret, AgentSecretGrant, AgentSecretShare, Project, db
 from core.auth import get_current_user, unified_auth_required
 from ..agent_access_control import ensure_agent_detail_access
 from ..agent_common import ensure_agent_manage_access, write_agent_audit
@@ -389,6 +389,15 @@ def revoke_agent_secret(workspace_id, agent_id, secret_id):
         share.is_active = False
         share.revoked_by_user_id = user.id
 
+    active_grants = AgentSecretGrant.query.filter_by(
+        workspace_id=workspace_id,
+        secret_id=secret.id,
+        status='active',
+    ).all()
+    for grant in active_grants:
+        grant.status = 'revoked'
+        grant.revoked_by_user_id = user.id
+
     write_agent_audit(
         event_type='agent_secret.revoked',
         actor_type='user',
@@ -396,7 +405,12 @@ def revoke_agent_secret(workspace_id, agent_id, secret_id):
         target_type='agent_secret',
         target_id=secret.id,
         workspace_id=workspace_id,
-        payload={'agent_id': agent_id, 'name': secret.name},
+        payload={
+            'agent_id': agent_id,
+            'name': secret.name,
+            'revoked_share_count': len(active_shares),
+            'revoked_grant_count': len(active_grants),
+        },
         risk_score=75,
     )
 

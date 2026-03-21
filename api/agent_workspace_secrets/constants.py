@@ -2,3 +2,5 @@ SECRET_TYPES = {'api_key', 'oauth_token', 'session_cookie', 'webhook_secret', 'c
 SCOPE_TYPES = {'agent_private', 'project_shared', 'workspace_shared'}
 SHARE_ACCESS_MODES = {'read'}
 TARGET_SELECTOR_MODES = {'manual', 'project_agents', 'workspace_active'}
+GRANT_MODES = {'ephemeral', 'leased', 'persistent'}
+GRANT_STATUSES = {'active', 'revoked', 'expired'}

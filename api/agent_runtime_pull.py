@@ -3,11 +3,13 @@ Agent Runtime Pull / Lease API
 """
 
 from datetime import timedelta
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, g
 from models import (
     db,
     AgentSecret,
+    AgentSecretGrant,
     AgentTaskAttempt,
     AgentTaskAttemptState,
     AgentTaskLease,
@@ -22,15 +24,92 @@ from .agent_common import generate_id, now_utc, write_agent_audit, agent_session
 agent_runtime_pull_bp = Blueprint('agent_runtime_pull', __name__)
 
 
+def _capability_keys_for_secret(secret_type):
+    normalized = str(secret_type or 'custom').strip().lower()
+    mapping = {
+        'api_key': ['credential.api.invoke'],
+        'oauth_token': ['credential.oauth.invoke'],
+        'session_cookie': ['credential.session.use'],
+        'webhook_secret': ['credential.webhook.sign'],
+        'custom': ['credential.custom.use'],
+    }
+    return mapping.get(normalized, ['credential.custom.use'])
+
+
+def _build_secret_capability_ref(secret, source, grant=None):
+    grant_payload = None
+    if grant is not None:
+        remaining_uses = None
+        if grant.max_uses is not None:
+            remaining_uses = max(int(grant.max_uses) - int(grant.used_count or 0), 0)
+        grant_payload = {
+            'grant_id': grant.grant_id,
+            'from_agent_id': int(grant.from_agent_id),
+            'to_agent_id': int(grant.to_agent_id),
+            'grant_mode': grant.grant_mode,
+            'status': grant.status,
+            'max_uses': int(grant.max_uses) if grant.max_uses is not None else None,
+            'used_count': int(grant.used_count or 0),
+            'remaining_uses': remaining_uses,
+            'expires_at': grant.expires_at.isoformat() if grant.expires_at else None,
+            'task_id': int(grant.task_id) if grant.task_id is not None else None,
+            'attempt_id': grant.attempt_id,
+            'chain_id': int(grant.chain_id) if grant.chain_id is not None else None,
+        }
+
+    return {
+        'secret_id': int(secret.id),
+        'name': secret.name,
+        'secret_type': secret.secret_type,
+        'scope_type': secret.scope_type,
+        'project_id': int(secret.project_id) if secret.project_id is not None else None,
+        'source': source,
+        'capability_keys': _capability_keys_for_secret(secret.secret_type),
+        'allowed_actions': ['consume', 'proxy_execute'] if source == 'granted' else ['manage', 'consume', 'proxy_execute'],
+        'grant': grant_payload,
+    }
+
+
+def _build_secret_capability_refs(agent):
+    refs = []
+    names = set()
+    active_grant_ids = []
+
+    owned_secrets = AgentSecret.query.filter_by(
+        workspace_id=agent.workspace_id,
+        agent_id=agent.id,
+        is_active=True,
+    ).all()
+    for secret in owned_secrets:
+        names.add(secret.name)
+        refs.append(_build_secret_capability_ref(secret, source='owned', grant=None))
+
+    now = now_utc()
+    grant_rows = AgentSecretGrant.query.filter(
+        AgentSecretGrant.workspace_id == agent.workspace_id,
+        AgentSecretGrant.to_agent_id == agent.id,
+        AgentSecretGrant.status == 'active',
+        or_(
+            AgentSecretGrant.expires_at.is_(None),
+            AgentSecretGrant.expires_at > now,
+        ),
+    ).order_by(
+        AgentSecretGrant.updated_at.desc(),
+        AgentSecretGrant.id.desc(),
+    ).all()
+    for grant in grant_rows:
+        secret = grant.secret
+        if not secret or not secret.is_active:
+            continue
+        names.add(secret.name)
+        active_grant_ids.append(grant.grant_id)
+        refs.append(_build_secret_capability_ref(secret, source='granted', grant=grant))
+
+    return sorted(names), refs, active_grant_ids
+
+
 def _build_agent_profile(agent):
-    active_secret_names = [
-        row.name
-        for row in AgentSecret.query.with_entities(AgentSecret.name).filter_by(
-            workspace_id=agent.workspace_id,
-            agent_id=agent.id,
-            is_active=True,
-        )
-    ]
+    active_secret_names, secret_capability_refs, active_grant_ids = _build_secret_capability_refs(agent)
     return {
         'id': agent.id,
         'workspace_id': agent.workspace_id,
@@ -64,6 +143,8 @@ def _build_agent_profile(agent):
         'config_version': agent.config_version or 1,
         'runner_config_version': agent.runner_config_version or 1,
         'active_secret_names': active_secret_names,
+        'active_grant_ids': active_grant_ids,
+        'secret_capability_refs': secret_capability_refs,
     }
 
 
