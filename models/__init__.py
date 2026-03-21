@@ -42,6 +42,7 @@ from .agent_trigger import AgentTrigger, AgentTriggerType, AgentMisfirePolicy
 from .agent_run import AgentRun, AgentRunState
 from .agent_connect_link import AgentConnectLink
 from .agent_audit_event import AgentAuditEvent
+from .agent_activity_event import AgentActivityEvent
 from .task_log import TaskLog, TaskLogActorType
 from .task_event_outbox import TaskEventOutbox
 from .organization_event import OrganizationEvent
@@ -104,6 +105,7 @@ __all__ = [
     'AgentRunState',
     'AgentConnectLink',
     'AgentAuditEvent',
+    'AgentActivityEvent',
     'TaskLog',
     'TaskLogActorType',
     'TaskEventOutbox',

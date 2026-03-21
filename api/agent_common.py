@@ -10,14 +10,19 @@ from datetime import datetime
 from functools import wraps
 from typing import Any, Optional
 from flask import g, request
+from sqlalchemy import inspect
 from models import (
     db,
     Agent,
     AgentSession,
     AgentAuditEvent,
+    AgentActivityEvent,
     Organization,
 )
 from .base import ApiResponse
+
+
+_AGENT_ACTIVITY_EVENTS_TABLE_AVAILABLE: Optional[bool] = None
 
 
 def now_utc():
@@ -86,6 +91,104 @@ def _derive_audit_level(risk_score: int, payload: dict) -> str:
     return 'info'
 
 
+def _agent_activity_events_table_exists() -> bool:
+    global _AGENT_ACTIVITY_EVENTS_TABLE_AVAILABLE
+    if _AGENT_ACTIVITY_EVENTS_TABLE_AVAILABLE is not None:
+        return _AGENT_ACTIVITY_EVENTS_TABLE_AVAILABLE
+    try:
+        _AGENT_ACTIVITY_EVENTS_TABLE_AVAILABLE = bool(
+            inspect(db.engine).has_table('agent_activity_events')
+        )
+    except Exception:
+        _AGENT_ACTIVITY_EVENTS_TABLE_AVAILABLE = False
+    return _AGENT_ACTIVITY_EVENTS_TABLE_AVAILABLE
+
+
+def _derive_primary_agent_id(
+    actor_agent_id: Optional[int],
+    target_agent_id: Optional[int],
+    actor_type: Any,
+    actor_id: Any,
+    target_type: Any,
+    target_id: Any,
+) -> Optional[int]:
+    if actor_agent_id is not None:
+        return actor_agent_id
+    if target_agent_id is not None:
+        return target_agent_id
+
+    actor_type_text = str(actor_type or '').strip().lower()
+    target_type_text = str(target_type or '').strip().lower()
+    if actor_type_text == 'agent':
+        return _to_int_optional(actor_id)
+    if target_type_text == 'agent':
+        return _to_int_optional(target_id)
+    return None
+
+
+def _build_activity_message(event_type: Any, actor_type: Any, actor_id: Any, target_type: Any, target_id: Any) -> str:
+    event_text = str(event_type or 'event').strip()
+    actor_text = f"{str(actor_type or '').strip() or 'unknown'}:{str(actor_id or '').strip() or '-'}"
+    target_text = f"{str(target_type or '').strip() or 'unknown'}:{str(target_id or '').strip() or '-'}"
+    return f"{event_text} {actor_text} -> {target_text}"
+
+
+def _write_agent_activity_event(
+    *,
+    workspace_id: Any,
+    event_type: Any,
+    level: str,
+    actor_type: Any,
+    actor_id: Any,
+    target_type: Any,
+    target_id: Any,
+    source: str,
+    payload_data: dict,
+    task_id: Optional[int],
+    project_id: Optional[int],
+    run_id: Optional[str],
+    attempt_id: Optional[str],
+    correlation_id: Optional[str],
+    request_id: Optional[str],
+    actor_agent_id: Optional[int],
+    target_agent_id: Optional[int],
+) -> None:
+    if not _agent_activity_events_table_exists():
+        return
+    workspace_id_int = _to_int_optional(workspace_id)
+    if workspace_id_int is None:
+        return
+
+    event = AgentActivityEvent(
+        workspace_id=workspace_id_int,
+        agent_id=_derive_primary_agent_id(
+            actor_agent_id=actor_agent_id,
+            target_agent_id=target_agent_id,
+            actor_type=actor_type,
+            actor_id=actor_id,
+            target_type=target_type,
+            target_id=target_id,
+        ),
+        source=str(source or 'agent_audit')[:32],
+        event_type=str(event_type or 'event')[:64],
+        level=str(level or 'info')[:16],
+        message=_build_activity_message(event_type, actor_type, actor_id, target_type, target_id)[:512],
+        payload=payload_data,
+        occurred_at=now_utc(),
+        task_id=task_id,
+        project_id=project_id,
+        run_id=run_id,
+        attempt_id=attempt_id,
+        correlation_id=correlation_id,
+        request_id=request_id,
+        actor_type=_to_text_optional(actor_type),
+        actor_id=_to_text_optional(actor_id),
+        target_type=_to_text_optional(target_type),
+        target_id=_to_text_optional(target_id),
+    )
+    db.session.add(event)
+
+
 def write_agent_audit(event_type, actor_type, actor_id, target_type, target_id, workspace_id, payload=None, risk_score=0):
     payload_data = dict(payload or {}) if isinstance(payload, dict) else {}
     if payload and not isinstance(payload, dict):
@@ -143,6 +246,29 @@ def write_agent_audit(event_type, actor_type, actor_id, target_type, target_id, 
         occurred_at=now_utc(),
     )
     db.session.add(event)
+    try:
+        _write_agent_activity_event(
+            workspace_id=workspace_id,
+            event_type=event_type,
+            level=_derive_audit_level(int(risk_score or 0), payload_data),
+            actor_type=actor_type,
+            actor_id=actor_id,
+            target_type=target_type,
+            target_id=target_id,
+            source=source,
+            payload_data=payload_data,
+            task_id=task_id,
+            project_id=project_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            correlation_id=correlation_id,
+            request_id=request_id,
+            actor_agent_id=actor_agent_id,
+            target_agent_id=target_agent_id,
+        )
+    except Exception:
+        # Keep legacy audit write non-blocking when new unified event table is unavailable.
+        pass
 
 
 def agent_session_required(f):
