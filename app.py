@@ -178,6 +178,7 @@ def register_blueprints(app):
     from api.agent_runtime_auth import agent_runtime_auth_bp
     from api.agent_runtime_pull import agent_runtime_pull_bp
     from api.agent_runtime_commit import agent_runtime_commit_bp
+    from api.agent_runtime_interactions import agent_runtime_interactions_bp
     from api.agent_automation import agent_automation_bp
     from api.organization_agent_members import organization_agent_members_bp
     from api.task_logs import task_logs_bp
@@ -205,6 +206,7 @@ def register_blueprints(app):
     app.register_blueprint(agent_runtime_auth_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_pull_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_commit_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_interactions_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_automation_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(organization_agent_members_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(task_logs_bp, url_prefix='/todo-for-ai/api/v1')
