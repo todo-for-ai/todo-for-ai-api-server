@@ -18,6 +18,7 @@ agent_runtime_interactions_bp = Blueprint('agent_runtime_interactions', __name__
 
 INTERACTION_REQUEST_EVENT_TYPE = 'interaction_request'
 INTERACTION_RESOLVE_EVENT_TYPE = 'interaction_resolve'
+INTERACTION_APPROVAL_EVENT_TYPE = 'interaction_approval'
 
 
 def _parse_positive_int(raw_value):
@@ -82,6 +83,65 @@ def _risk_score_for_sensitivity(level: str) -> int:
     return 5
 
 
+def _evaluate_interaction_governance(interaction_type, security_context):
+    sensitivity = str((security_context or {}).get('sensitivity_level') or 'medium').strip().lower()
+    required_capabilities = (security_context or {}).get('required_capabilities') or []
+    if not isinstance(required_capabilities, list):
+        required_capabilities = []
+
+    if sensitivity in {'critical', 'high'}:
+        return {
+            'risk_tier': 'high',
+            'requires_approval': True,
+            'reason': f'sensitivity={sensitivity}',
+        }
+
+    if interaction_type == 'request_capability' and len(required_capabilities) > 0:
+        return {
+            'risk_tier': 'high',
+            'requires_approval': True,
+            'reason': 'capability_request_requires_human_approval',
+        }
+
+    if interaction_type in {'proxy_execute', 'critique_feedback'}:
+        return {
+            'risk_tier': 'medium',
+            'requires_approval': False,
+            'reason': 'interactive_collaboration',
+        }
+
+    return {
+        'risk_tier': 'low',
+        'requires_approval': False,
+        'reason': 'default_policy',
+    }
+
+
+def _latest_interaction_approval(
+    *,
+    workspace_id: int,
+    task_id: int,
+    interaction_id: str,
+    scan_limit: int = 300,
+):
+    rows = (
+        AgentTaskEvent.query
+        .filter(
+            AgentTaskEvent.workspace_id == workspace_id,
+            AgentTaskEvent.task_id == task_id,
+            AgentTaskEvent.event_type == INTERACTION_APPROVAL_EVENT_TYPE,
+        )
+        .order_by(AgentTaskEvent.event_timestamp.desc(), AgentTaskEvent.id.desc())
+        .limit(scan_limit)
+        .all()
+    )
+    for row in rows:
+        payload = row.payload or {}
+        if str(payload.get('interaction_id') or '').strip() == interaction_id:
+            return row
+    return None
+
+
 @agent_runtime_interactions_bp.route('/agent/interactions/request', methods=['POST'])
 @agent_session_required
 def request_interaction():
@@ -118,6 +178,11 @@ def request_interaction():
     attempt_id = normalized.get('attempt_id') or generate_id('ia')
     security_context = normalized.get('security_context') or {}
     sensitivity_level = str(security_context.get('sensitivity_level') or 'medium')
+    governance = _evaluate_interaction_governance(
+        interaction_type=normalized['interaction_type'],
+        security_context=security_context,
+    )
+    request_status = 'pending_approval' if governance.get('requires_approval') else 'requested'
 
     payload = {
         'interaction_id': interaction_id,
@@ -132,7 +197,8 @@ def request_interaction():
         'contract': normalized.get('contract') or {},
         'security_context': security_context,
         'metadata': normalized.get('metadata') or {},
-        'status': 'requested',
+        'status': request_status,
+        'governance': governance,
         'requested_at': event_time.isoformat(),
     }
 
@@ -166,21 +232,32 @@ def request_interaction():
             'source_agent_id': int(agent.id),
             'target_agent_id': int(target_agent.id),
             'sensitivity_level': sensitivity_level,
+            'risk_tier': governance.get('risk_tier'),
+            'requires_approval': bool(governance.get('requires_approval')),
+            'request_status': request_status,
         },
         risk_score=_risk_score_for_sensitivity(sensitivity_level),
     )
     db.session.commit()
 
+    response_payload = {
+        'interaction_id': interaction_id,
+        'task_id': task_id,
+        'attempt_id': attempt_id,
+        'status': request_status,
+        'source_agent_id': int(agent.id),
+        'target_agent_id': int(target_agent.id),
+        'requested_at': event_time.isoformat(),
+        'governance': governance,
+    }
+    if governance.get('requires_approval'):
+        return ApiResponse.success(
+            data=response_payload,
+            message='Interaction request accepted and pending human approval',
+            code=202,
+        ).to_response()
     return ApiResponse.created(
-        data={
-            'interaction_id': interaction_id,
-            'task_id': task_id,
-            'attempt_id': attempt_id,
-            'status': 'requested',
-            'source_agent_id': int(agent.id),
-            'target_agent_id': int(target_agent.id),
-            'requested_at': event_time.isoformat(),
-        },
+        data=response_payload,
         message='Interaction request accepted',
     ).to_response()
 
@@ -222,6 +299,23 @@ def resolve_interaction(interaction_id: str):
 
     if source_agent_id <= 0:
         return ApiResponse.error('Invalid interaction source in request payload', 409).to_response()
+
+    governance = request_payload.get('governance') or {}
+    if bool(governance.get('requires_approval')):
+        approval_row = _latest_interaction_approval(
+            workspace_id=int(agent.workspace_id),
+            task_id=task_id,
+            interaction_id=normalized['interaction_id'],
+        )
+        if not approval_row:
+            return ApiResponse.error('APPROVAL_REQUIRED', 409).to_response()
+
+        approval_payload = approval_row.payload or {}
+        decision = str(approval_payload.get('decision') or '').strip().lower()
+        if decision == 'rejected':
+            return ApiResponse.error('INTERACTION_REJECTED', 409).to_response()
+        if decision != 'approved':
+            return ApiResponse.error('APPROVAL_REQUIRED', 409).to_response()
 
     event_time = now_utc()
     attempt_id = normalized.get('attempt_id') or request_payload.get('attempt_id') or generate_id('ia')
@@ -272,6 +366,7 @@ def resolve_interaction(interaction_id: str):
             'audit_source': 'interaction_contract',
             'source_agent_id': source_agent_id,
             'target_agent_id': target_agent_id,
+            'requires_approval': bool(governance.get('requires_approval')),
         },
         risk_score=25 if status in {'failed', 'blocked', 'timeout'} else 10,
     )
@@ -308,7 +403,13 @@ def list_task_interactions(task_id: int):
         .filter(
             AgentTaskEvent.workspace_id == int(agent.workspace_id),
             AgentTaskEvent.task_id == int(task_id),
-            AgentTaskEvent.event_type.in_([INTERACTION_REQUEST_EVENT_TYPE, INTERACTION_RESOLVE_EVENT_TYPE]),
+            AgentTaskEvent.event_type.in_(
+                [
+                    INTERACTION_REQUEST_EVENT_TYPE,
+                    INTERACTION_RESOLVE_EVENT_TYPE,
+                    INTERACTION_APPROVAL_EVENT_TYPE,
+                ]
+            ),
         )
         .order_by(AgentTaskEvent.event_timestamp.desc(), AgentTaskEvent.id.desc())
         .limit(limit)
