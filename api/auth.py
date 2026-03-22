@@ -161,7 +161,7 @@ def github_login():
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/callback'
-            frontend_base = request.headers.get('Origin') or 'http://localhost:50111'
+            frontend_base = request.headers.get('Origin') or 'http://localhost:50112'
 
         redirect_uri = request.args.get('redirect_uri', default_redirect_uri)
 
@@ -193,7 +193,7 @@ def google_login():
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/google/callback'
-            frontend_base = request.headers.get('Origin') or 'http://localhost:50111'
+            frontend_base = request.headers.get('Origin') or 'http://localhost:50112'
 
         redirect_uri = request.args.get('redirect_uri', default_redirect_uri)
 
@@ -218,7 +218,7 @@ def guest_login():
     try:
         # 根据环境确定前端地址
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        frontend_base = 'https://todo4ai.org' if is_docker else (request.headers.get('Origin') or 'http://127.0.0.1:50111')
+        frontend_base = 'https://todo4ai.org' if is_docker else (request.headers.get('Origin') or 'http://127.0.0.1:50112')
 
         # return_to 兼容相对路径与错误域名
         return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
@@ -296,7 +296,7 @@ def github_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50111/todo-for-ai/pages/dashboard'
+        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50112/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
@@ -338,7 +338,7 @@ def google_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50111/todo-for-ai/pages/dashboard'
+        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50112/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
@@ -366,7 +366,7 @@ def logout():
         current_user.save()
 
         # 简单的登出响应（不再使用Auth0）
-        return_to = request.json.get('return_to', 'http://127.0.0.1:50111/todo-for-ai/pages')
+        return_to = request.json.get('return_to', 'http://127.0.0.1:50112/todo-for-ai/pages')
 
         return ApiResponse.success({
             'message': 'Logout successful',

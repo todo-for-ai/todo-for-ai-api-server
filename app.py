@@ -186,6 +186,9 @@ def register_blueprints(app):
     from api.task_logs import task_logs_bp
     from api.agent_workspace_insights import agent_workspace_insights_bp
     from api.notifications import notifications_bp
+    from api.agent_role_templates import agent_role_templates_bp
+    from api.agent_teams import agent_teams_bp
+    from api.agent_team_orchestration import agent_team_orchestration_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -216,6 +219,9 @@ def register_blueprints(app):
     app.register_blueprint(task_logs_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_workspace_insights_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(notifications_bp, url_prefix='/todo-for-ai/api/v1/notifications')
+    app.register_blueprint(agent_role_templates_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_teams_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_team_orchestration_bp, url_prefix='/todo-for-ai/api/v1')
 
 
 

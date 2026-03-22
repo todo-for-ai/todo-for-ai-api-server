@@ -51,6 +51,13 @@ from .notification_channel import NotificationChannel, NotificationScopeType, No
 from .notification_delivery import NotificationDelivery, NotificationDeliveryStatus
 from .notification_event import NotificationEvent
 from .user_notification import UserNotification
+from .agent_role_template import AgentRoleTemplate, AgentRoleTemplateStatus
+from .agent_team import AgentTeam, AgentTeamStatus, AgentTeamMember, AgentTeamMemberRole
+from .agent_team_project import AgentTeamProject
+from .team_task_orchestration import (
+    TeamTaskOrchestration, OrchestrationStrategy, OrchestrationStatus,
+    TeamSubtask, SubtaskStatus
+)
 
 __all__ = [
     'db',
@@ -119,4 +126,16 @@ __all__ = [
     'NotificationDeliveryStatus',
     'NotificationEvent',
     'UserNotification',
+    'AgentRoleTemplate',
+    'AgentRoleTemplateStatus',
+    'AgentTeam',
+    'AgentTeamStatus',
+    'AgentTeamMember',
+    'AgentTeamMemberRole',
+    'AgentTeamProject',
+    'TeamTaskOrchestration',
+    'OrchestrationStrategy',
+    'OrchestrationStatus',
+    'TeamSubtask',
+    'SubtaskStatus',
 ]

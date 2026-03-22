@@ -1,11 +1,11 @@
 """
 Agent Secret 模型
+
+支持多密钥版本、密钥轮换、KMS/Vault 集成
 """
 
 import base64
 import hashlib
-import os
-from cryptography.fernet import Fernet
 from sqlalchemy import Column, Integer, String, Boolean, Text, ForeignKey, BigInteger, DateTime
 from sqlalchemy.orm import relationship
 from .base import BaseModel
@@ -25,6 +25,7 @@ class AgentSecret(BaseModel):
     description = Column(Text, comment='机密说明')
     secret_hash = Column(String(64), nullable=False, comment='配置哈希')
     secret_encrypted = Column(Text, nullable=False, comment='密文')
+    key_version = Column(String(32), nullable=False, default='primary', comment='加密密钥版本')
     prefix = Column(String(12), nullable=False, comment='展示前缀')
     is_active = Column(Boolean, nullable=False, default=True, comment='是否有效')
     last_used_at = Column(DateTime, comment='最后使用时间')
@@ -38,26 +39,26 @@ class AgentSecret(BaseModel):
     project = relationship('Project', foreign_keys=[project_id])
     shares = relationship('AgentSecretShare', back_populates='secret', cascade='all, delete-orphan', lazy='dynamic')
 
-    @staticmethod
-    def _get_encryption_key():
-        key = os.environ.get('TOKEN_ENCRYPTION_KEY')
-        if not key:
-            key = '2_e0DDiXi8afz4S1PIBTTHEUJkzxWbFWFtS-CMUGoY0='
-        if isinstance(key, str):
-            key = key.encode()
-        return key
+    def _get_encryption_manager(self):
+        """获取加密管理器（延迟导入避免循环依赖）"""
+        from core.secret_encryption import get_encryption_manager
+        return get_encryption_manager()
 
-    @classmethod
-    def _encrypt_secret(cls, secret_value):
-        f = Fernet(cls._get_encryption_key())
-        encrypted = f.encrypt(secret_value.encode())
-        return base64.b64encode(encrypted).decode()
+    def encrypt(self, secret_value: str) -> tuple[str, str]:
+        """
+        加密 Secret 值
 
-    @classmethod
-    def _decrypt_secret(cls, encrypted_secret):
-        f = Fernet(cls._get_encryption_key())
-        encrypted_bytes = base64.b64decode(encrypted_secret.encode())
-        return f.decrypt(encrypted_bytes).decode()
+        Returns:
+            (密文, 密钥版本)
+        """
+        manager = self._get_encryption_manager()
+        ciphertext, key_version = manager.encrypt(secret_value)
+        return ciphertext, key_version
+
+    def decrypt(self) -> str:
+        """解密 Secret 值"""
+        manager = self._get_encryption_manager()
+        return manager.decrypt(self.secret_encrypted, self.key_version)
 
     @classmethod
     def from_plaintext(
@@ -74,10 +75,16 @@ class AgentSecret(BaseModel):
         project_id=None,
         description=None,
     ):
+        """从明文创建 Secret 实例"""
         normalized = str(secret_value)
         prefix = normalized[:8]
         secret_hash = hashlib.sha256(normalized.encode()).hexdigest()
-        encrypted = cls._encrypt_secret(normalized)
+
+        # 使用新的加密管理器
+        from core.secret_encryption import get_encryption_manager
+        manager = get_encryption_manager()
+        encrypted, key_version = manager.encrypt(normalized)
+
         return cls(
             agent_id=agent_id,
             workspace_id=workspace_id,
@@ -88,6 +95,7 @@ class AgentSecret(BaseModel):
             description=description,
             secret_hash=secret_hash,
             secret_encrypted=encrypted,
+            key_version=key_version,
             prefix=prefix,
             is_active=True,
             created_by_user_id=user_id,
@@ -96,7 +104,23 @@ class AgentSecret(BaseModel):
         )
 
     def reveal(self):
-        return self._decrypt_secret(self.secret_encrypted)
+        """解密并返回 Secret 值"""
+        return self.decrypt()
+
+    def rotate_encryption(self, user_id: int):
+        """
+        轮换加密密钥
+
+        使用当前密钥重新加密，用于密钥升级
+        """
+        # 解密旧值
+        plaintext = self.reveal()
+
+        # 使用新密钥重新加密
+        from core.secret_encryption import get_encryption_manager
+        manager = get_encryption_manager()
+        self.secret_encrypted, self.key_version = manager.encrypt(plaintext)
+        self.updated_by_user_id = user_id
 
     def to_dict(self, include_secret=False):
         data = super().to_dict()

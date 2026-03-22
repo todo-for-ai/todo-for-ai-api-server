@@ -4,7 +4,7 @@
 
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import Column, Integer, DateTime, String
+from sqlalchemy import Column, Integer, BigInteger, DateTime, String
 
 # 创建数据库实例
 db = SQLAlchemy()
@@ -12,9 +12,9 @@ db = SQLAlchemy()
 
 class BaseModel(db.Model):
     """基础模型类，包含通用字段"""
-    
+
     __abstract__ = True
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True, comment='主键ID')
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, comment='创建时间')
     updated_at = Column(
