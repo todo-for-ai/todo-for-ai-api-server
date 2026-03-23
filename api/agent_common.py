@@ -66,6 +66,21 @@ def ensure_agent_manage_access(user, agent):
     return ApiResponse.forbidden('Access denied').to_response()
 
 
+def ensure_workspace_manage_access(user, workspace):
+    """Check if user has owner or admin role in the workspace (for batch operations)."""
+    if not user:
+        return ApiResponse.forbidden('Access denied').to_response()
+
+    if workspace.owner_id == user.id:
+        return None
+
+    role = user.get_organization_role(workspace)
+    if role in {'owner', 'admin'}:
+        return None
+
+    return ApiResponse.forbidden('Access denied').to_response()
+
+
 def _to_int_optional(raw_value: Any) -> Optional[int]:
     if raw_value in (None, ''):
         return None

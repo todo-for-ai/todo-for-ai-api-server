@@ -27,12 +27,14 @@ from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
 from .user_activity import UserActivity
 from .user_settings import UserSettings
+from .system_settings import SystemSettings
 from .custom_prompt import CustomPrompt, PromptType
 from .agent import Agent, AgentStatus
 from .agent_soul_version import AgentSoulVersion
 from .agent_secret import AgentSecret
 from .agent_secret_share import AgentSecretShare
 from .agent_secret_grant import AgentSecretGrant
+from .secret_audit import SecretAuditLog, SecretAuditAction, SecretApprovalRequest
 from .agent_key import AgentKey
 from .agent_session import AgentSession
 from .agent_task_attempt import AgentTaskAttempt, AgentTaskAttemptState
@@ -58,6 +60,7 @@ from .team_task_orchestration import (
     TeamTaskOrchestration, OrchestrationStrategy, OrchestrationStatus,
     TeamSubtask, SubtaskStatus
 )
+from .ai_request_log import AIRequestLog
 
 __all__ = [
     'db',
@@ -100,6 +103,9 @@ __all__ = [
     'AgentSecret',
     'AgentSecretShare',
     'AgentSecretGrant',
+    'SecretAuditLog',
+    'SecretAuditAction',
+    'SecretApprovalRequest',
     'AgentKey',
     'AgentSession',
     'AgentTaskAttempt',
@@ -138,4 +144,5 @@ __all__ = [
     'OrchestrationStatus',
     'TeamSubtask',
     'SubtaskStatus',
+    'AIRequestLog',
 ]
