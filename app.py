@@ -181,6 +181,7 @@ def register_blueprints(app):
     from api.agent_runtime_commit import agent_runtime_commit_bp
     from api.agent_runtime_grants import agent_runtime_grants_bp
     from api.agent_runtime_interactions import agent_runtime_interactions_bp
+    from api.agent_runtime_mgmt import agent_runtime_mgmt_bp
     from api.agent_interaction_governance import agent_interaction_governance_bp
     from api.agent_automation import agent_automation_bp
     from api.organization_agent_members import organization_agent_members_bp
@@ -194,6 +195,7 @@ def register_blueprints(app):
     from api.ai_task_assistant import ai_task_assistant_bp
     from api.ai_task_split import ai_task_split_bp
     from api.ai_summarize import ai_summarize_bp
+    from api.admin_ai_config import admin_ai_config_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -219,6 +221,7 @@ def register_blueprints(app):
     app.register_blueprint(agent_runtime_commit_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_grants_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_interactions_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_mgmt_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_interaction_governance_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_automation_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(organization_agent_members_bp, url_prefix='/todo-for-ai/api/v1')
@@ -232,6 +235,7 @@ def register_blueprints(app):
     app.register_blueprint(ai_task_assistant_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(ai_task_split_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(ai_summarize_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(admin_ai_config_bp, url_prefix='/todo-for-ai/api/v1/admin/ai-config')
 
 
 
