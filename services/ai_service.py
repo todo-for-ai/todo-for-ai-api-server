@@ -1,6 +1,7 @@
 """
 AI 服务基础设施
 生产级别的 LLM 调用封装，包含重试、限流、缓存、审计等功能
+支持从数据库读取配置，支持运行时更新
 """
 
 import time
@@ -16,13 +17,64 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# 配置常量
-DEFAULT_TIMEOUT = 30
-MAX_RETRIES = 3
-RETRY_BACKOFF_FACTOR = 0.5
-RATE_LIMIT_REQUESTS = 60  # 每分钟最大请求数
-RATE_LIMIT_WINDOW = 60    # 窗口大小（秒）
-CACHE_TTL = 300          # 缓存时间（秒）
+
+# 默认配置常量（当数据库配置不存在时使用）
+DEFAULT_CONFIG = {
+    'connect_timeout': 30,
+    'read_timeout': 120,
+    'max_retries': 5,
+    'retry_backoff_factor': 1.0,
+    'max_retry_wait_time': 60,
+    'rate_limit_requests': 60,
+    'rate_limit_window': 60,
+    'cache_ttl': 300
+}
+
+# 全局配置缓存（每60秒刷新一次）
+_config_cache = {}
+_config_cache_lock = threading.Lock()
+_config_last_update = 0
+_CONFIG_CACHE_TTL = 60
+
+
+def get_ai_config():
+    """
+    获取 AI 容错配置（带缓存）
+
+    优先从数据库读取，如果失败则使用默认配置
+    """
+    global _config_cache, _config_last_update
+
+    now = time.time()
+
+    # 检查缓存是否过期
+    with _config_cache_lock:
+        if _config_cache and (now - _config_last_update) < _CONFIG_CACHE_TTL:
+            return _config_cache.copy()
+
+    # 从数据库读取配置
+    try:
+        from models.system_settings import SystemSettings
+        config = SystemSettings.get_ai_resilience_config()
+
+        with _config_cache_lock:
+            _config_cache = config
+            _config_last_update = now
+
+        return config.copy()
+    except Exception as e:
+        # 数据库读取失败，使用默认配置
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to load AI config from database: {e}, using defaults")
+        return DEFAULT_CONFIG.copy()
+
+
+def invalidate_ai_config_cache():
+    """使配置缓存失效（配置更新时调用）"""
+    global _config_cache, _config_last_update
+    with _config_cache_lock:
+        _config_cache = {}
+        _config_last_update = 0
 
 
 class AIErrorCode(Enum):
@@ -68,20 +120,39 @@ class AIRequestContext:
 
 
 class RateLimiter:
-    """滑动窗口限流器"""
+    """滑动窗口限流器（支持动态配置）"""
 
-    def __init__(self, max_requests: int = RATE_LIMIT_REQUESTS,
-                 window_size: int = RATE_LIMIT_WINDOW):
-        self.max_requests = max_requests
-        self.window_size = window_size
+    def __init__(self, max_requests: int = None, window_size: int = None):
+        # 初始使用传入值或默认值，稍后从数据库读取
+        self._initial_max_requests = max_requests
+        self._initial_window_size = window_size
+        self.max_requests = max_requests or 60
+        self.window_size = window_size or 60
         self.requests: Dict[str, List[float]] = {}
         self._lock = threading.Lock()
+        self._config_initialized = False
+
+    def _ensure_config(self):
+        """确保配置已加载（延迟初始化）"""
+        if not self._config_initialized:
+            try:
+                config = get_ai_config()
+                if self._initial_max_requests is None:
+                    self.max_requests = config.get('rate_limit_requests', 60)
+                if self._initial_window_size is None:
+                    self.window_size = config.get('rate_limit_window', 60)
+            except Exception:
+                # 配置加载失败，使用默认值
+                pass
+            self._config_initialized = True
 
     def is_allowed(self, key: str) -> tuple[bool, int]:
         """
         检查是否允许请求
         返回: (是否允许, 剩余配额)
         """
+        self._ensure_config()
+
         now = time.time()
         window_start = now - self.window_size
 
@@ -107,6 +178,8 @@ class RateLimiter:
 
     def get_stats(self, key: str) -> Dict[str, Any]:
         """获取限流统计"""
+        self._ensure_config()
+
         now = time.time()
         window_start = now - self.window_size
 
@@ -125,12 +198,26 @@ class RateLimiter:
 
 
 class AIResponseCache:
-    """AI 响应缓存（内存 + Redis 双级缓存）"""
+    """AI 响应缓存（内存 + Redis 双级缓存，支持动态配置）"""
 
-    def __init__(self, ttl: int = CACHE_TTL):
-        self.ttl = ttl
+    def __init__(self, ttl: int = None):
+        self._initial_ttl = ttl
+        self.ttl = ttl or 300
         self._memory_cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._config_initialized = False
+
+    def _ensure_config(self):
+        """确保配置已加载（延迟初始化）"""
+        if not self._config_initialized:
+            try:
+                config = get_ai_config()
+                if self._initial_ttl is None:
+                    self.ttl = config.get('cache_ttl', 300)
+            except Exception:
+                # 配置加载失败，使用默认值
+                pass
+            self._config_initialized = True
 
     def _generate_key(self, feature: str, params: Dict[str, Any]) -> str:
         """生成缓存 key"""
@@ -139,6 +226,8 @@ class AIResponseCache:
 
     def get(self, feature: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """获取缓存"""
+        self._ensure_config()
+
         key = self._generate_key(feature, params)
 
         with self._lock:
@@ -170,6 +259,8 @@ class AIResponseCache:
 
     def set(self, feature: str, params: Dict[str, Any], data: Dict[str, Any]):
         """设置缓存"""
+        self._ensure_config()
+
         key = self._generate_key(feature, params)
 
         with self._lock:
@@ -188,6 +279,8 @@ class AIResponseCache:
 
     def invalidate(self, feature: str = None):
         """清除缓存"""
+        self._ensure_config()
+
         with self._lock:
             if feature:
                 keys_to_remove = [
@@ -201,6 +294,8 @@ class AIResponseCache:
 
     def get_stats(self) -> Dict[str, Any]:
         """获取缓存统计"""
+        self._ensure_config()
+
         with self._lock:
             total = len(self._memory_cache)
             expired = sum(
@@ -283,29 +378,55 @@ class AIAuditLogger:
 
 
 class LLMService:
-    """生产级 LLM 服务"""
+    """生产级 LLM 服务（支持动态配置）"""
 
     def __init__(self):
         self.rate_limiter = RateLimiter()
         self.cache = AIResponseCache()
         self.audit_logger = AIAuditLogger()
-        self._session = self._create_session()
+        self._session = None  # 延迟创建
+        self._session_lock = threading.Lock()
+        self._config_version = 0  # 配置版本，用于检测配置变化
 
-    def _create_session(self) -> requests.Session:
+    def _get_session(self) -> requests.Session:
+        """获取 HTTP session（支持配置热更新）"""
+        config = get_ai_config()
+        current_version = hash(frozenset(config.items()))
+
+        with self._session_lock:
+            if self._session is None or self._config_version != current_version:
+                self._session = self._create_session(config)
+                self._config_version = current_version
+            return self._session
+
+    def _create_session(self, config: Dict[str, Any] = None) -> requests.Session:
         """创建带重试机制的 HTTP session"""
+        if config is None:
+            config = get_ai_config()
+
         session = requests.Session()
 
+        max_retries = config.get('max_retries', 5)
+        backoff_factor = config.get('retry_backoff_factor', 1.0)
+        max_wait = config.get('max_retry_wait_time', 60)
+
+        # 计算实际退避因子，确保不超过最大等待时间
+        # 退避公式: {backoff_factor} * (2 ** ({retry number} - 1))
+        # 我们需要确保第 max_retries 次重试的等待时间不超过 max_wait
+        adjusted_backoff = min(backoff_factor, max_wait / (2 ** max(0, max_retries - 1)))
+
         retry_strategy = Retry(
-            total=MAX_RETRIES,
-            backoff_factor=RETRY_BACKOFF_FACTOR,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=max_retries,
+            backoff_factor=adjusted_backoff,
+            status_forcelist=[408, 429, 500, 502, 503, 504],
             allowed_methods=["POST", "GET"]
         )
 
         adapter = HTTPAdapter(
             max_retries=retry_strategy,
             pool_connections=10,
-            pool_maxsize=20
+            pool_maxsize=20,
+            pool_block=False
         )
 
         session.mount("http://", adapter)
@@ -444,11 +565,17 @@ class LLMService:
             api_url = f'{api_base}/chat/completions'
             print(f"[AI Service] Calling {api_url} with model {model}")
 
-            response = self._session.post(
+            # 获取AI容错配置
+            resilience_config = get_ai_config()
+            connect_timeout = resilience_config.get('connect_timeout', 30)
+            read_timeout = resilience_config.get('read_timeout', 120)
+
+            session = self._get_session()
+            response = session.post(
                 api_url,
                 headers=headers,
                 json=payload,
-                timeout=DEFAULT_TIMEOUT
+                timeout=(connect_timeout, read_timeout)  # (连接超时, 读取超时)
             )
 
             print(f"[AI Service] Response status: {response.status_code}")
@@ -541,15 +668,48 @@ class LLMService:
                 'context': context.to_dict()
             }
 
-        except requests.exceptions.Timeout:
+        except requests.exceptions.ConnectTimeout as e:
+            # 获取当前配置用于错误消息
+            err_config = get_ai_config()
+            connect_timeout = err_config.get('connect_timeout', 30)
             context.error_code = AIErrorCode.TIMEOUT
-            context.error_message = f"Request timeout after {DEFAULT_TIMEOUT}s"
+            context.error_message = f"Connection timeout: Unable to connect to LLM API within {connect_timeout}s. Please check your network connection."
             context.latency_ms = (time.time() - start_time) * 1000
             self.audit_logger.log(context)
             return {
                 'success': False,
                 'error': context.error_message,
                 'error_code': AIErrorCode.TIMEOUT.value,
+                'retry_after': 5,
+                'context': context.to_dict()
+            }
+
+        except requests.exceptions.ReadTimeout as e:
+            # 获取当前配置用于错误消息
+            err_config = get_ai_config()
+            read_timeout = err_config.get('read_timeout', 120)
+            context.error_code = AIErrorCode.TIMEOUT
+            context.error_message = f"Read timeout: LLM API response took longer than {read_timeout}s. The model may be busy, please retry."
+            context.latency_ms = (time.time() - start_time) * 1000
+            self.audit_logger.log(context)
+            return {
+                'success': False,
+                'error': context.error_message,
+                'error_code': AIErrorCode.TIMEOUT.value,
+                'retry_after': 10,
+                'context': context.to_dict()
+            }
+
+        except requests.exceptions.Timeout:
+            context.error_code = AIErrorCode.TIMEOUT
+            context.error_message = "Request timeout. Please retry."
+            context.latency_ms = (time.time() - start_time) * 1000
+            self.audit_logger.log(context)
+            return {
+                'success': False,
+                'error': context.error_message,
+                'error_code': AIErrorCode.TIMEOUT.value,
+                'retry_after': 5,
                 'context': context.to_dict()
             }
 

@@ -30,11 +30,12 @@ AGENT_EDITABLE_FIELDS = [
     'response_style', 'tool_policy', 'memory_policy', 'handoff_policy',
     'execution_mode', 'runner_enabled', 'sandbox_profile', 'sandbox_policy',
     'max_concurrency', 'max_retry', 'timeout_seconds', 'heartbeat_interval_seconds',
+    'notification_channels',
 ]
 FLOAT_FIELDS = {'temperature', 'top_p'}
 INT_FIELDS = {'max_output_tokens', 'context_window_tokens', 'max_concurrency', 'max_retry', 'timeout_seconds', 'heartbeat_interval_seconds'}
 BOOL_FIELDS = {'runner_enabled'}
-JSON_OBJECT_FIELDS = {'response_style', 'tool_policy', 'memory_policy', 'handoff_policy', 'sandbox_policy'}
+JSON_OBJECT_FIELDS = {'response_style', 'tool_policy', 'memory_policy', 'handoff_policy', 'sandbox_policy', 'notification_channels'}
 JSON_LIST_FIELDS = {'capability_tags', 'allowed_project_ids'}
 
 

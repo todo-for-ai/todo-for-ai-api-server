@@ -58,6 +58,9 @@ class Agent(BaseModel):
     config_version = Column(Integer, default=1, nullable=False, comment='配置版本号')
     runner_config_version = Column(Integer, default=1, nullable=False, comment='Runner配置版本号')
 
+    # Notification channels configuration (Feishu, WeCom, DingTalk, etc.)
+    notification_channels = Column(JSON, comment='通知渠道配置')
+
     workspace = relationship('Organization', foreign_keys=[workspace_id])
     creator = relationship('User', foreign_keys=[creator_user_id])
     keys = relationship('AgentKey', back_populates='agent', cascade='all, delete-orphan', lazy='dynamic')
@@ -79,4 +82,5 @@ class Agent(BaseModel):
         data['sandbox_policy'] = self.sandbox_policy or {'network_mode': 'whitelist', 'allowed_domains': []}
         data['temperature'] = float(self.temperature) if self.temperature is not None else None
         data['top_p'] = float(self.top_p) if self.top_p is not None else None
+        data['notification_channels'] = self.notification_channels or {}
         return data

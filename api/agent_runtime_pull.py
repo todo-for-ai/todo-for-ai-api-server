@@ -145,6 +145,7 @@ def _build_agent_profile(agent):
         'active_secret_names': active_secret_names,
         'active_grant_ids': active_grant_ids,
         'secret_capability_refs': secret_capability_refs,
+        'notification_channels': agent.notification_channels or {},
     }
 
 
