@@ -19,15 +19,71 @@ import json
 import uuid
 import hashlib
 from typing import Dict, Any, Optional, List
-from flask import Blueprint, request, Response, stream_with_context, g
+from functools import wraps
+from flask import Blueprint, request, Response, stream_with_context, g, jsonify
 from datetime import datetime
 
 from api.base import ApiResponse, validate_json_request
 from core.auth import unified_auth_required, get_current_user, get_current_token
 from core.redis_client import get_redis_client, get_json, set_json
-from models import db
+from models import db, AgentSession
 
 openai_bp = Blueprint('openai_compatible', __name__)
+
+
+def openai_auth_required(f):
+    """
+    OpenAI API 认证装饰器 - 支持多种认证方式：
+    1. API Token
+    2. JWT
+    3. Agent Session Token
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return ApiResponse.unauthorized('Authentication required').to_response()
+
+        token = auth_header.split(' ')[1]
+
+        # 1. 尝试 API Token 认证
+        from models import ApiToken
+        api_token = ApiToken.verify_token(token)
+        if api_token:
+            g.current_user = api_token.user
+            g.current_token = api_token
+            g.auth_method = 'api_token'
+            return f(*args, **kwargs)
+
+        # 2. 尝试 Agent Session 认证
+        session = AgentSession.verify_session_token(token)
+        if session:
+            from models import Agent
+            agent = Agent.query.get(session.agent_id)
+            if agent and agent.status and agent.status.value == 'active':
+                g.current_agent = agent
+                g.current_agent_session = session
+                g.auth_method = 'agent_session'
+                return f(*args, **kwargs)
+
+        # 3. 尝试 JWT 认证
+        try:
+            from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
+            verify_jwt_in_request()
+            user_id = get_jwt_identity()
+            if user_id:
+                from models import User
+                user = User.query.get(user_id)
+                if user and user.is_active():
+                    g.current_user = user
+                    g.auth_method = 'jwt'
+                    return f(*args, **kwargs)
+        except Exception:
+            pass
+
+        return ApiResponse.unauthorized('Authentication required').to_response()
+
+    return decorated_function
 
 
 # ============== 常量配置 ==============
@@ -317,6 +373,36 @@ class OpenAIRequestHandler:
         if max_tokens is not None and (max_tokens < 1 or max_tokens > 32000):
             return False, "max_tokens must be between 1 and 32000"
 
+        # 验证 OpenAI 标准额外参数
+        top_p = data.get('top_p')
+        if top_p is not None and (top_p < 0 or top_p > 1):
+            return False, "top_p must be between 0 and 1"
+
+        presence_penalty = data.get('presence_penalty')
+        if presence_penalty is not None and (presence_penalty < -2 or presence_penalty > 2):
+            return False, "presence_penalty must be between -2 and 2"
+
+        frequency_penalty = data.get('frequency_penalty')
+        if frequency_penalty is not None and (frequency_penalty < -2 or frequency_penalty > 2):
+            return False, "frequency_penalty must be between -2 and 2"
+
+        n = data.get('n')
+        if n is not None and n != 1:
+            return False, "Currently only n=1 is supported"
+
+        # 验证 stop 序列
+        stop = data.get('stop')
+        if stop is not None:
+            if isinstance(stop, str):
+                if len(stop) > 500:
+                    return False, "stop sequence too long (max 500 characters)"
+            elif isinstance(stop, list):
+                if len(stop) > 4:
+                    return False, "maximum 4 stop sequences allowed"
+                for s in stop:
+                    if len(s) > 500:
+                        return False, "stop sequence too long (max 500 characters)"
+
         return True, ""
 
     def build_cache_params(self, data: Dict) -> Dict:
@@ -367,7 +453,8 @@ class OpenAIRequestHandler:
                     "finish_reason": "stop"
                 }
             ],
-            "usage": usage
+            "usage": usage,
+            "system_fingerprint": None
         }
 
     def create_stream_chunk(self, content: str, model: str, finish_reason: str = None) -> str:
@@ -441,8 +528,8 @@ class OpenAIRequestHandler:
 
 # ============== 路由定义 ==============
 
-@openai_bp.route('/v1/models', methods=['GET'])
-@unified_auth_required
+@openai_bp.route('/models', methods=['GET'])
+@openai_auth_required
 def list_models():
     """
     获取可用模型列表
@@ -470,8 +557,8 @@ def list_models():
         return ApiResponse.error(str(e), 500).to_response()
 
 
-@openai_bp.route('/v1/models/<model_id>', methods=['GET'])
-@unified_auth_required
+@openai_bp.route('/models/<model_id>', methods=['GET'])
+@openai_auth_required
 def get_model(model_id: str):
     """
     获取模型详情
@@ -495,8 +582,8 @@ def get_model(model_id: str):
         return ApiResponse.error(str(e), 500).to_response()
 
 
-@openai_bp.route('/v1/chat/completions', methods=['POST'])
-@unified_auth_required
+@openai_bp.route('/chat/completions', methods=['POST'])
+@openai_auth_required
 def chat_completions():
     """
     Chat Completions API
@@ -530,6 +617,18 @@ def chat_completions():
         temperature = data.get('temperature', 0.7)
         max_tokens = data.get('max_tokens', 2000)
 
+        # OpenAI 标准额外参数
+        top_p = data.get('top_p', 1.0)
+        presence_penalty = data.get('presence_penalty', 0)
+        frequency_penalty = data.get('frequency_penalty', 0)
+        stop = data.get('stop', None)
+        n = data.get('n', 1)  # 生成数量，目前只支持 1
+        seed = data.get('seed', None)  # 随机种子
+        response_format = data.get('response_format', None)  # 响应格式
+        tools = data.get('tools', None)  # 工具定义
+        tool_choice = data.get('tool_choice', None)  # 工具选择
+        user = data.get('user', None)  # 用户标识
+
         # 5. 检查缓存 (非流式请求)
         cache_params = None
         cache_hit = False
@@ -557,15 +656,22 @@ def chat_completions():
             system_prompt = llm_messages[0]['content']
             llm_messages = llm_messages[1:]
 
-        # 调用LLM
+        # 调用LLM，只传递服务层支持的参数
+        llm_kwargs = {}
+        if temperature is not None:
+            llm_kwargs['temperature'] = temperature
+        if max_tokens is not None:
+            llm_kwargs['max_tokens'] = max_tokens
+        if response_format is not None:
+            llm_kwargs['response_format'] = response_format
+
         result = call_llm_production(
             feature='openai_chat',
             messages=llm_messages,
             user_id=user_id,
             user_email=user.email if user else "",
-            temperature=temperature,
-            max_tokens=max_tokens,
-            use_cache=False  # 我们自己管理缓存
+            use_cache=False,  # 我们自己管理缓存
+            **llm_kwargs
         )
 
         # 7. 处理响应
@@ -617,8 +723,8 @@ def chat_completions():
         return ApiResponse.error(str(e), 500).to_response()
 
 
-@openai_bp.route('/v1/embeddings', methods=['POST'])
-@unified_auth_required
+@openai_bp.route('/embeddings', methods=['POST'])
+@openai_auth_required
 def create_embeddings():
     """
     Embeddings API
@@ -682,8 +788,8 @@ def create_embeddings():
         return ApiResponse.error(str(e), 500).to_response()
 
 
-@openai_bp.route('/v1/usage', methods=['GET'])
-@unified_auth_required
+@openai_bp.route('/usage', methods=['GET'])
+@openai_auth_required
 def get_usage():
     """
     获取使用情况 (扩展API)
@@ -734,8 +840,8 @@ def get_usage():
         return ApiResponse.error(str(e), 500).to_response()
 
 
-@openai_bp.route('/v1/cache/invalidate', methods=['POST'])
-@unified_auth_required
+@openai_bp.route('/cache/invalidate', methods=['POST'])
+@openai_auth_required
 def invalidate_cache():
     """
     缓存失效接口 (管理功能)

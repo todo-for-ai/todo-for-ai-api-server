@@ -62,6 +62,12 @@ from .team_task_orchestration import (
 )
 from .ai_request_log import AIRequestLog
 
+from .agent_runtime_monitor import (
+    AgentHeartbeat,
+    AgentMetrics,
+    AgentRuntimeConfig,
+)
+
 __all__ = [
     'db',
     'User',
@@ -87,7 +93,6 @@ __all__ = [
     'TaskLabel',
     'BUILTIN_TASK_LABELS',
     'ContextRule',
-    'RuleType',
     'TaskHistory',
     'ActionType',
     'Attachment',
@@ -145,4 +150,8 @@ __all__ = [
     'TeamSubtask',
     'SubtaskStatus',
     'AIRequestLog',
+    # Agent Runtime Monitoring
+    'AgentHeartbeat',
+    'AgentMetrics',
+    'AgentRuntimeConfig',
 ]

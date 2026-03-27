@@ -23,8 +23,14 @@ class AgentSession(BaseModel):
     expires_at = Column(DateTime, nullable=False, comment='过期时间')
     revoked_at = Column(DateTime, comment='撤销时间')
     is_active = Column(Boolean, nullable=False, default=True, comment='是否激活')
+    last_active_at = Column(DateTime, comment='最后活跃时间')
 
     agent = relationship('Agent', foreign_keys=[agent_id])
+
+    def touch(self):
+        """更新最后活跃时间"""
+        self.last_active_at = datetime.utcnow()
+        self.save()
 
     @classmethod
     def create_session(cls, agent_id, workspace_id, ttl_seconds=900):

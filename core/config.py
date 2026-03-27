@@ -128,8 +128,12 @@ class TestingConfig(Config):
     """测试环境配置"""
     TESTING = True
     SQLALCHEMY_DATABASE_URI = os.environ.get('TEST_DATABASE_URL') or \
-        'mysql+pymysql://root:password@localhost:3306/todo_for_ai_test'
+        'sqlite:///:memory:'
     WTF_CSRF_ENABLED = False
+    # Override engine options for SQLite compatibility
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_pre_ping': True,
+    }
 
 
 class ProductionConfig(Config):

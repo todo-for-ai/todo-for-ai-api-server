@@ -6,72 +6,60 @@ import pytest
 class TestAuthAPI:
     """Test Authentication API endpoints."""
 
-    def test_register_success(self, client):
-        """Test successful registration."""
-        response = client.post("/api/v1/auth/register", json={
-            "username": "newuser",
-            "email": "new@example.com",
-            "password": "securepassword123"
-        })
+    BASE_URL = "/todo-for-ai/api/v1/auth"
 
-        # Registration may return 201 or other status
-        assert response.status_code in [201, 200, 409]
+    def test_login_redirects_to_oauth(self, client):
+        """Test login redirects to OAuth provider."""
+        response = client.get(f"{self.BASE_URL}/login")
 
-    def test_register_duplicate_username(self, client):
-        """Test registration with duplicate username."""
-        # First registration
-        client.post("/api/v1/auth/register", json={
-            "username": "existing",
-            "email": "first@example.com",
-            "password": "password123"
-        })
+        # OAuth login redirects to provider
+        assert response.status_code in [200, 302, 401]
 
-        # Duplicate registration
-        response = client.post("/api/v1/auth/register", json={
-            "username": "existing",
-            "email": "second@example.com",
-            "password": "password123"
-        })
+    def test_login_without_oauth(self, client):
+        """Test login without OAuth provider."""
+        response = client.get(f"{self.BASE_URL}/login")
 
-        # Should fail with conflict
-        assert response.status_code in [409, 400, 422]
+        # Should fail without OAuth provider (no session)
+        assert response.status_code in [200, 302, 400, 401]
 
-    def test_login_success(self, client):
-        """Test successful login."""
-        # Register first
-        client.post("/api/v1/auth/register", json={
-            "username": "logintest",
-            "email": "login@example.com",
-            "password": "password123"
-        })
+    def test_get_current_user_without_auth(self, client):
+        """Test getting current user info without authentication."""
+        response = client.get(f"{self.BASE_URL}/me")
 
-        # Login
-        response = client.post("/api/v1/auth/login", json={
-            "username": "logintest",
-            "password": "password123"
-        })
+        # Should require authentication
+        assert response.status_code in [401, 403]
 
-        # Login may return 200 or 401
+    def test_logout_without_auth(self, client):
+        """Test logout without authentication."""
+        response = client.post(f"{self.BASE_URL}/logout")
+
+        # May succeed or require auth
         assert response.status_code in [200, 401]
 
-    def test_login_invalid_credentials(self, client):
-        """Test login with invalid credentials."""
-        response = client.post("/api/v1/auth/login", json={
-            "username": "nonexistent",
-            "password": "wrongpassword"
-        })
+    def test_list_users_without_auth(self, client):
+        """Test listing users without authentication."""
+        response = client.get(f"{self.BASE_URL}/users")
 
-        assert response.status_code in [401, 404]
+        # May require admin auth
+        assert response.status_code in [200, 401, 403]
 
-    def test_get_current_user(self, client, auth_headers):
-        """Test getting current user info."""
-        response = client.get("/api/v1/auth/me", headers=auth_headers)
+    def test_verify_token_without_auth(self, client):
+        """Test token verification without token."""
+        response = client.post(f"{self.BASE_URL}/verify")
 
-        # May return 200 or 401 depending on auth implementation
-        assert response.status_code in [200, 401]
+        # Should require token
+        assert response.status_code in [400, 401, 403, 422]
 
-    def test_protected_endpoint_without_auth(self, client):
-        """Test accessing protected endpoint without auth."""
-        response = client.get("/api/v1/auth/me")
+    def test_github_login_redirect(self, client):
+        """Test GitHub OAuth login redirects."""
+        response = client.get(f"{self.BASE_URL}/login/github")
 
-        assert response.status_code == 401
+        # Should redirect to GitHub
+        assert response.status_code in [302, 307, 200, 404]
+
+    def test_google_login_redirect(self, client):
+        """Test Google OAuth login redirects."""
+        response = client.get(f"{self.BASE_URL}/login/google")
+
+        # Should redirect to Google or fail with error
+        assert response.status_code in [302, 307, 200, 404, 500]

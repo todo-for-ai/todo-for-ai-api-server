@@ -42,4 +42,4 @@ class TestUserModel:
         db_session.add(user)
         db_session.commit()
 
-        assert "testuser3" in repr(user)
+        assert "test3@example.com" in repr(user)

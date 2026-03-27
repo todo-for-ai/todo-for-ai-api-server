@@ -182,6 +182,7 @@ def register_blueprints(app):
     from api.agent_runtime_grants import agent_runtime_grants_bp
     from api.agent_runtime_interactions import agent_runtime_interactions_bp
     from api.agent_runtime_mgmt import agent_runtime_mgmt_bp
+    from api.agent_runtime_monitor import agent_runtime_monitor_bp
     from api.agent_interaction_governance import agent_interaction_governance_bp
     from api.agent_automation import agent_automation_bp
     from api.organization_agent_members import organization_agent_members_bp
@@ -223,6 +224,7 @@ def register_blueprints(app):
     app.register_blueprint(agent_runtime_grants_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_interactions_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_mgmt_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_monitor_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_interaction_governance_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_automation_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(organization_agent_members_bp, url_prefix='/todo-for-ai/api/v1')
@@ -237,7 +239,7 @@ def register_blueprints(app):
     app.register_blueprint(ai_task_split_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(ai_summarize_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(admin_ai_config_bp, url_prefix='/todo-for-ai/api/v1/admin/ai-config')
-    app.register_blueprint(openai_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(openai_bp, url_prefix='/v1')
 
 
 
@@ -313,13 +315,14 @@ def start_dashboard_cache_prewarm(flask_app):
     thread.start()
 
 
-# 创建应用实例
-app = create_app()
+# 创建应用实例 (只在非测试模式下自动创建)
+if os.environ.get('FLASK_ENV') != 'testing':
+    app = create_app()
 
-# 在应用启动时创建数据库表
-with app.app_context():
-    db.create_all()
-    start_dashboard_cache_prewarm(app)
+    # 在应用启动时创建数据库表
+    with app.app_context():
+        db.create_all()
+        start_dashboard_cache_prewarm(app)
     print('✅ 数据库表已创建/更新')
 
 
