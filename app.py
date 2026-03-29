@@ -162,7 +162,11 @@ def register_blueprints(app):
     from api.tasks import tasks_bp
     from api.context_rules import context_rules_bp
     from api.tokens import tokens_bp
-    from api.mcp import mcp_bp
+    mcp_bp = None
+    try:
+        from api.mcp import mcp_bp
+    except Exception as e:
+        app.logger.warning(f"MCP blueprint disabled: {e}")
     from api.docs import docs_bp
     from api.pins import pins_bp
     from api.dashboard import dashboard_bp
@@ -204,7 +208,8 @@ def register_blueprints(app):
     app.register_blueprint(tasks_bp, url_prefix='/todo-for-ai/api/v1/tasks')
     app.register_blueprint(context_rules_bp, url_prefix='/todo-for-ai/api/v1/context-rules')
     app.register_blueprint(tokens_bp, url_prefix='/todo-for-ai/api/v1/tokens')
-    app.register_blueprint(mcp_bp, url_prefix='/todo-for-ai/api/v1/mcp')
+    if mcp_bp is not None:
+        app.register_blueprint(mcp_bp, url_prefix='/todo-for-ai/api/v1/mcp')
     app.register_blueprint(docs_bp, url_prefix='/todo-for-ai/api/v1/docs')
     app.register_blueprint(pins_bp, url_prefix='/todo-for-ai/api/v1/pins')
     app.register_blueprint(dashboard_bp, url_prefix='/todo-for-ai/api/v1/dashboard')

@@ -3,6 +3,8 @@ Flask==3.0.0
 Flask-SQLAlchemy==3.1.1
 Flask-Migrate==4.0.5
 Flask-CORS==4.0.0
+bleach==6.2.0
+kubernetes==29.0.0
 
 
 # 数据库相关
@@ -16,8 +18,7 @@ redis==5.0.1
 requests==2.31.0
 
 # MCP 协议支持 (官方SDK)
-mcp
-
+mcp; python_version >= "3.10"
 # OAuth 和 JWT 支持
 Flask-JWT-Extended==4.6.0
 cryptography>=42.0.0
