@@ -12,8 +12,6 @@ from .organizations import organizations_bp
 from .task_labels import task_labels_bp
 from .ai_task_assistant import ai_task_assistant_bp
 from .ai_task_split import ai_task_split_bp
-from .ai_summarize import ai_summarize_bp
-
 __all__ = [
     'ApiResponse',
     'projects_bp',
@@ -23,5 +21,4 @@ __all__ = [
     'task_labels_bp',
     'ai_task_assistant_bp',
     'ai_task_split_bp',
-    'ai_summarize_bp',
 ]
