@@ -199,7 +199,6 @@ def register_blueprints(app):
     from api.agent_analytics import agent_analytics_bp
     from api.ai_task_assistant import ai_task_assistant_bp
     from api.ai_task_split import ai_task_split_bp
-    from api.ai_summarize import ai_summarize_bp
     from api.admin_ai_config import admin_ai_config_bp
     from api.openai_compatible import openai_bp
 
@@ -242,7 +241,6 @@ def register_blueprints(app):
     app.register_blueprint(agent_analytics_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(ai_task_assistant_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(ai_task_split_bp, url_prefix='/todo-for-ai/api/v1')
-    app.register_blueprint(ai_summarize_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(admin_ai_config_bp, url_prefix='/todo-for-ai/api/v1/admin/ai-config')
     app.register_blueprint(openai_bp, url_prefix='/v1')
 
