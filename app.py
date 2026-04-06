@@ -14,6 +14,7 @@ import threading
 from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_migrate import Migrate
+from flask_socketio import SocketIO
 
 # 导入模型和配置
 from models import db
@@ -22,6 +23,8 @@ from core.middleware import setup_all_middleware
 from core.github_config import github_service
 from core.google_config import google_service
 from core.redis_client import get_redis_client
+
+socketio = SocketIO(cors_allowed_origins="*", async_mode='threading')
 
 
 def create_app(config_name=None):
@@ -33,7 +36,10 @@ def create_app(config_name=None):
     # 兼容 /path 与 /path/，避免前端请求尾斜杠时出现误判 404
     app.url_map.strict_slashes = False
     app.config.from_object(config[config_name])
-    
+
+    # 初始化 SocketIO
+    socketio.init_app(app)
+
     # 初始化配置
     config[config_name].init_app(app)
     
@@ -339,4 +345,4 @@ if __name__ == '__main__':
     print(f"🗄️ 数据库: {app.config['SQLALCHEMY_DATABASE_URI']}")
     print(f"🔧 环境: {app.config.get('ENV', 'development')}")
     
-    app.run(host=host, port=port, debug=app.config['DEBUG'])
+    socketio.run(app, host=host, port=port, debug=app.config['DEBUG'], use_reloader=False, allow_unsafe_werkzeug=True)
