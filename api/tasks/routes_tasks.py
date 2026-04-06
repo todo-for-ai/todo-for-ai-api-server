@@ -354,6 +354,11 @@ def create_task():
         )
 
         db.session.commit()
+
+        if task.is_ai_task:
+            from services.agent_runtime_controller import AgentRuntimeController
+            AgentRuntimeController.auto_assign_task(task)
+
         enqueue_pending_deliveries_for_events(queued_notification_event_ids)
         _invalidate_project_users(project.id)
 

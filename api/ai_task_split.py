@@ -295,6 +295,13 @@ def split_task(task_id):
 
             db.session.commit()
 
+            # Auto-assign AI subtasks
+            from services.agent_runtime_controller import AgentRuntimeController
+            for subtask_info in created_subtasks:
+                subtask = Task.query.get(subtask_info['id'])
+                if subtask and subtask.is_ai_task:
+                    AgentRuntimeController.auto_assign_task(subtask)
+
         except SQLAlchemyError as e:
             db.session.rollback()
             return ApiResponse.error(

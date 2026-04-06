@@ -263,6 +263,11 @@ def create_task(arguments):
 
         db.session.add(task)
         db.session.commit()
+
+        if task.is_ai_task:
+            from services.agent_runtime_controller import AgentRuntimeController
+            AgentRuntimeController.auto_assign_task(task)
+
         invalidate_user_caches(g.current_user.id)
 
         # 注意：标签和相关文件功能暂时不支持，因为相关模型尚未实现

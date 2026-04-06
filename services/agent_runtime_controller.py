@@ -451,6 +451,57 @@ class AgentRuntimeController:
         }
 
 
+    @staticmethod
+    def auto_assign_task(task):
+        """Auto-assign AI task to an active agent on creation.
+
+        This creates an AgentTaskAttempt and AgentTaskLease immediately
+        so the runtime can pull the task without waiting for WebSocket push.
+        """
+        from models import Agent, AgentTaskAttempt, AgentTaskLease, TaskStatus, db
+        from api.agent_common import generate_id, now_utc
+        from datetime import timedelta
+
+        agent = Agent.query.filter_by(
+            workspace_id=task.owner_id,
+            runner_enabled=True,
+            status='ACTIVE'
+        ).first()
+        if not agent:
+            return
+
+        now = now_utc()
+        attempt_id = generate_id('att')
+        lease_id = generate_id('lea')
+        lease_exp = now + timedelta(seconds=60)
+
+        attempt = AgentTaskAttempt(
+            attempt_id=attempt_id,
+            task_id=task.id,
+            agent_id=agent.id,
+            workspace_id=agent.workspace_id,
+            state='ACTIVE',
+            lease_id=lease_id,
+            started_at=now,
+            created_by='system',
+        )
+        lease = AgentTaskLease(
+            lease_id=lease_id,
+            task_id=task.id,
+            attempt_id=attempt_id,
+            agent_id=agent.id,
+            workspace_id=agent.workspace_id,
+            expires_at=lease_exp,
+            active=True,
+            created_by='system',
+        )
+        db.session.add(attempt)
+        db.session.add(lease)
+        if task.status == TaskStatus.TODO:
+            task.status = TaskStatus.IN_PROGRESS
+        db.session.commit()
+
+
 # 单例实例
 _controller: Optional[AgentRuntimeController] = None
 
