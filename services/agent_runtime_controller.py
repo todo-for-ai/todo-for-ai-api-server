@@ -501,6 +501,27 @@ class AgentRuntimeController:
             task.status = TaskStatus.IN_PROGRESS
         db.session.commit()
 
+        # Push task to connected agent via WebSocket
+        try:
+            from api.agent_runtime_websocket import push_task_to_agent
+            task_data = {
+                'task_id': task.id,
+                'attempt_id': attempt_id,
+                'lease_id': lease_id,
+                'payload': {
+                    'title': task.title,
+                    'content': task.content,
+                    'prompt': task.title or task.content or '',
+                },
+                'project_id': task.project_id,
+                'priority': str(task.priority) if task.priority else None,
+                'created_at': task.created_at.isoformat() if task.created_at else None,
+                'workspace_id': agent.workspace_id,
+            }
+            push_task_to_agent(agent.id, task_data)
+        except Exception as e:
+            logger.warning("websocket.push_failed", error=str(e))
+
 
 # 单例实例
 _controller: Optional[AgentRuntimeController] = None
