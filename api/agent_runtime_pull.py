@@ -2,6 +2,7 @@
 Agent Runtime Pull / Lease API
 """
 
+import json
 from datetime import timedelta
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
@@ -152,21 +153,22 @@ def _build_agent_profile(agent):
 def _resolve_accessible_project_ids(agent):
     if agent.allowed_project_ids:
         return [int(pid) for pid in agent.allowed_project_ids if str(pid).isdigit()]
-
-    rows = db.session.query(Project.id).filter(Project.organization_id == agent.workspace_id).all()
-    return [int(r.id) for r in rows]
+    # None means no project restriction (omit the .in_(...) filter)
+    return None
 
 
 def _fetch_next_task(agent):
     project_ids = _resolve_accessible_project_ids(agent)
-    if not project_ids:
+    if project_ids == []:
         return None
 
     now = now_utc()
-    query = Task.query.filter(
-        Task.project_id.in_(project_ids),
+    filters = [
         Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]),
-    ).order_by(Task.created_at.asc())
+    ]
+    if project_ids is not None:
+        filters.append(Task.project_id.in_(project_ids))
+    query = Task.query.filter(*filters).order_by(Task.created_at.asc())
 
     for task in query.limit(30).all():
         active_lease = AgentTaskLease.query.filter(
@@ -196,15 +198,34 @@ def pull_tasks():
             return ApiResponse.error('max_tasks must be integer', 400).to_response()
 
     items = []
+    now = now_utc()
     for _ in range(max_tasks):
         task = _fetch_next_task(agent)
         if not task:
             break
 
-        now = now_utc()
         attempt_id = generate_id('att')
         lease_id = generate_id('lea')
         lease_exp = now + timedelta(seconds=60)
+
+        # Expire any stale active lease on this task to satisfy unique constraint.
+        # The DB has a unique index on (task_id, active) so we must avoid duplicate
+        # inactive rows – delete the stale lease if another inactive row already exists.
+        stale_lease = AgentTaskLease.query.filter(
+            AgentTaskLease.task_id == task.id,
+            AgentTaskLease.active.is_(True),
+            AgentTaskLease.expires_at <= now,
+        ).first()
+        if stale_lease:
+            inactive_exists = AgentTaskLease.query.filter(
+                AgentTaskLease.task_id == task.id,
+                AgentTaskLease.active.is_(False),
+            ).first()
+            if inactive_exists:
+                db.session.delete(stale_lease)
+            else:
+                stale_lease.active = False
+            db.session.flush()
 
         attempt = AgentTaskAttempt(
             attempt_id=attempt_id,
@@ -250,6 +271,14 @@ def pull_tasks():
         )
         db.session.commit()
 
+        # Parse task.content as JSON for AI payload, fallback to wrapping raw content
+        try:
+            content_payload = json.loads(task.content) if task.content else {}
+            if not isinstance(content_payload, dict):
+                content_payload = {"content": task.content}
+        except Exception:
+            content_payload = {"content": task.content}
+
         items.append(
             {
                 'task_id': task.id,
@@ -258,9 +287,9 @@ def pull_tasks():
                 'lease_expires_at': lease_exp.isoformat(),
                 'payload': {
                     'title': task.title,
-                    'content': task.content,
                     'priority': task.priority.value if task.priority else None,
                     'tags': task.tags or [],
+                    **content_payload,
                 },
             }
         )
@@ -268,7 +297,7 @@ def pull_tasks():
     return ApiResponse.success(
         {
             'agent_profile': _build_agent_profile(agent),
-            'items': items,
+            'tasks': items,
         },
         'Tasks pulled successfully',
     ).to_response()
