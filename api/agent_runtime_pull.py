@@ -164,11 +164,14 @@ def _fetch_next_task(agent):
 
     now = now_utc()
     filters = [
+        Task.owner_id == agent.workspace_id,
+        Task.is_ai_task.is_(True),
         Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW]),
     ]
     if project_ids is not None:
         filters.append(Task.project_id.in_(project_ids))
-    query = Task.query.filter(*filters).order_by(Task.created_at.asc())
+    # Newest tasks first so performance-test backfill does not starve real tasks
+    query = Task.query.filter(*filters).order_by(Task.id.desc())
 
     for task in query.limit(30).all():
         active_lease = AgentTaskLease.query.filter(
