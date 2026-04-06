@@ -39,6 +39,8 @@ def create_app(config_name=None):
 
     # 初始化 SocketIO
     socketio.init_app(app)
+    from api.agent_runtime_websocket import AgentRuntimeNamespace
+    socketio.on_namespace(AgentRuntimeNamespace())
 
     # 初始化配置
     config[config_name].init_app(app)
