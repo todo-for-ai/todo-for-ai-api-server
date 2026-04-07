@@ -197,6 +197,7 @@ def register_blueprints(app):
     from api.agent_runtime_monitor import agent_runtime_monitor_bp
     from api.agent_interaction_governance import agent_interaction_governance_bp
     from api.agent_automation import agent_automation_bp
+    from api.channels import channels_bp
     from api.organization_agent_members import organization_agent_members_bp
     from api.task_logs import task_logs_bp
     from api.agent_workspace_insights import agent_workspace_insights_bp
@@ -239,6 +240,7 @@ def register_blueprints(app):
     app.register_blueprint(agent_runtime_monitor_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_interaction_governance_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_automation_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(channels_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(organization_agent_members_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(task_logs_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_workspace_insights_bp, url_prefix='/todo-for-ai/api/v1')

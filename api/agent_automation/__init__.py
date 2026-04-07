@@ -12,7 +12,6 @@ agent_automation_bp = Blueprint('agent_automation', __name__)
 from . import routes_runner  # noqa: E402,F401
 from . import routes_triggers  # noqa: E402,F401
 from . import routes_runs  # noqa: E402,F401
-from . import routes_channels  # noqa: E402,F401
 
 def make_trigger_idempotency_key(trigger, reason, payload):
     digest = hashlib.sha256(f"{trigger.id}:{reason}:{payload}".encode('utf-8')).hexdigest()
