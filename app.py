@@ -178,6 +178,7 @@ def register_blueprints(app):
     from api.docs import docs_bp
     from api.pins import pins_bp
     from api.dashboard import dashboard_bp
+    from api.users import users_bp
     from api.user_settings import user_settings_bp
     from api.system_settings import system_settings_bp
     from api.api_tokens import api_tokens_bp
@@ -221,6 +222,7 @@ def register_blueprints(app):
     app.register_blueprint(docs_bp, url_prefix='/todo-for-ai/api/v1/docs')
     app.register_blueprint(pins_bp, url_prefix='/todo-for-ai/api/v1/pins')
     app.register_blueprint(dashboard_bp, url_prefix='/todo-for-ai/api/v1/dashboard')
+    app.register_blueprint(users_bp, url_prefix='/todo-for-ai/api/v1/users')
     app.register_blueprint(user_settings_bp, url_prefix='/todo-for-ai/api/v1/user-settings')
     app.register_blueprint(system_settings_bp, url_prefix='/todo-for-ai/api/v1/system-settings')
     app.register_blueprint(api_tokens_bp, url_prefix='/todo-for-ai/api/v1/api-tokens')
