@@ -4,7 +4,7 @@
 
 import enum
 from sqlalchemy import Column, BigInteger, String, Text, Enum, Integer, ForeignKey
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from .base import BaseModel
 
 
@@ -27,10 +27,12 @@ class TaskLog(BaseModel):
     actor_agent_id = Column(Integer, ForeignKey('agents.id'), nullable=True, index=True, comment='记录者Agent ID')
     content = Column(Text, nullable=False, comment='日志内容')
     content_type = Column(String(32), nullable=False, default='text/markdown', comment='内容类型')
+    parent_id = Column(BigInteger, ForeignKey('task_logs.id'), nullable=True, comment='父评论ID，用于线程回复')
 
-    task = relationship('Task', foreign_keys=[task_id])
+    task = relationship('Task', foreign_keys=[task_id], back_populates='logs')
     actor_user = relationship('User', foreign_keys=[actor_user_id])
     actor_agent = relationship('Agent', foreign_keys=[actor_agent_id])
+    replies = relationship('TaskLog', backref=backref('parent', remote_side=lambda: TaskLog.id), lazy='dynamic')
 
     def to_dict(self):
         data = super().to_dict()
