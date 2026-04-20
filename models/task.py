@@ -66,6 +66,8 @@ class Task(BaseModel):
     related_files = Column(JSON, comment='任务相关的文件列表 (JSON数组)')
     assignees = Column(JSON, comment='任务指派对象列表 (JSON数组)')
     mentions = Column(JSON, comment='任务提及对象列表 (JSON数组)')
+    blocking_task_ids = Column(JSON, default=list, comment='被此任务阻塞的任务ID列表')
+    blocked_by_task_ids = Column(JSON, default=list, comment='阻塞此任务的任务ID列表')
     revision = Column(Integer, nullable=False, default=1, comment='任务乐观锁版本号')
     is_ai_task = Column(Boolean, default=True, comment='是否是分配给AI的任务')
     creator_type = Column(String(20), default='human', comment='创建者类型: human, ai')
@@ -107,6 +109,8 @@ class Task(BaseModel):
         result['tags'] = self.tags or []
         result['assignees'] = self.assignees or []
         result['mentions'] = self.mentions or []
+        result['blocking_task_ids'] = self.blocking_task_ids or []
+        result['blocked_by_task_ids'] = self.blocked_by_task_ids or []
 
         # 格式化时间字段
         if self.due_date:
