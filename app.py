@@ -218,6 +218,7 @@ def register_blueprints(app):
     from api.agent_audit import audit_bp
     from api.agent_governance_rules import gov_rules_bp
     from api.agent_performance import perf_bp
+    from api.github_proxy import github_proxy_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -267,6 +268,7 @@ def register_blueprints(app):
     app.register_blueprint(audit_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(gov_rules_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(perf_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(github_proxy_bp, url_prefix='/todo-for-ai/api/v1')
 
 
 
