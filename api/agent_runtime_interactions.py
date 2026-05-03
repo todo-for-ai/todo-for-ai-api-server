@@ -240,6 +240,34 @@ def request_interaction():
     )
     db.session.commit()
 
+    # Push approval request to user WebSocket
+    if request_status == 'pending_approval':
+        from api.user_websocket import push_to_task_room, push_to_user
+        from models import Task
+        task = db.session.get(Task, task_id)
+        push_to_task_room(task_id, 'approval_request', {
+            'task_id': task_id,
+            'interaction_id': interaction_id,
+            'interaction_type': normalized['interaction_type'],
+            'source_agent_id': int(agent.id),
+            'source_agent_name': agent.name,
+            'risk_tier': governance.get('risk_tier'),
+            'sensitivity_level': sensitivity_level,
+        })
+        # Also push to task owner directly
+        if task and task.created_by:
+            try:
+                owner_id = int(task.created_by.split(':')[-1]) if ':' in str(task.created_by) else None
+                if owner_id:
+                    push_to_user(owner_id, 'approval_request', {
+                        'task_id': task_id,
+                        'interaction_id': interaction_id,
+                        'interaction_type': normalized['interaction_type'],
+                        'source_agent_name': agent.name,
+                    })
+            except (ValueError, TypeError):
+                pass
+
     response_payload = {
         'interaction_id': interaction_id,
         'task_id': task_id,

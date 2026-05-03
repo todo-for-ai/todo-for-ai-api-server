@@ -47,6 +47,32 @@ def delegate_task(task_id):
     db.session.add(log)
     db.session.commit()
 
+    # Trigger auto-assignment pipeline for the delegated agent
+    try:
+        from services.agent_runtime_controller import AgentRuntimeController
+        AgentRuntimeController.auto_assign_task(task)
+    except Exception:
+        pass  # Don't block delegation if auto-assign fails
+
+    # Push task to agent via WebSocket
+    try:
+        from api.agent_runtime_websocket import push_task_to_agent
+        push_task_to_agent(agent.id, task.to_dict())
+    except Exception:
+        pass  # Don't block if WebSocket push fails
+
+    # Notify task room users about delegation
+    try:
+        from api.user_websocket import push_to_task_room
+        push_to_task_room(task_id, 'task_updated', {
+            'task_id': task_id,
+            'action': 'delegated',
+            'agent_id': agent.id,
+            'agent_name': agent.display_name or agent.name,
+        })
+    except Exception:
+        pass
+
     return ApiResponse.success(data=task.to_dict()).to_response()
 
 
