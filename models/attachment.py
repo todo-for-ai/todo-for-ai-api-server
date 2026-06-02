@@ -38,7 +38,6 @@ class Attachment(db.Model):
             'task_id': self.task_id,
             'filename': self.filename,
             'original_filename': self.original_filename,
-            'file_path': self.file_path,
             'file_size': self.file_size,
             'mime_type': self.mime_type,
             'is_image': self.is_image,

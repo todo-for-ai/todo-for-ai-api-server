@@ -338,3 +338,65 @@ def renew_lease(task_id):
         {'lease_id': lease.lease_id, 'lease_expires_at': lease.expires_at.isoformat()},
         'Lease renewed successfully',
     ).to_response()
+
+
+@agent_runtime_pull_bp.route('/agent/tasks/<int:task_id>/lease/release', methods=['POST'])
+@agent_session_required
+def release_lease(task_id):
+    """主动释放任务租约。"""
+    agent = g.current_agent
+    data = validate_json_request(required_fields=['attempt_id', 'lease_id'])
+    if isinstance(data, tuple):
+        return data
+
+    lease = AgentTaskLease.query.filter_by(
+        task_id=task_id,
+        attempt_id=data['attempt_id'],
+        lease_id=data['lease_id'],
+        agent_id=agent.id,
+    ).first()
+    if not lease:
+        return ApiResponse.error('LEASE_NOT_OWNER', 409).to_response()
+
+    if not lease.active:
+        return ApiResponse.success(
+            {
+                'lease_id': lease.lease_id,
+                'released_at': lease.updated_at.isoformat() if lease.updated_at else None,
+                'was_active': False,
+            },
+            'Lease already released',
+        ).to_response()
+
+    now = now_utc()
+    if lease.expires_at <= now:
+        lease.active = False
+        db.session.commit()
+        return ApiResponse.error('LEASE_EXPIRED', 409).to_response()
+
+    lease.active = False
+    lease.version += 1
+    db.session.commit()
+
+    write_agent_audit(
+        event_type='task.lease_released',
+        actor_type='agent',
+        actor_id=agent.id,
+        target_type='task',
+        target_id=task_id,
+        workspace_id=agent.workspace_id,
+        payload={
+            'attempt_id': data['attempt_id'],
+            'lease_id': lease.lease_id,
+        },
+    )
+    db.session.commit()
+
+    return ApiResponse.success(
+        {
+            'lease_id': lease.lease_id,
+            'released_at': now.isoformat(),
+            'was_active': True,
+        },
+        'Lease released successfully',
+    ).to_response()

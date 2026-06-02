@@ -14,6 +14,31 @@ from .base import ApiResponse, validate_json_request
 
 agent_runtime_monitor_bp = Blueprint('agent_runtime_monitor', __name__)
 
+_RUNTIME_CONFIG_MUTABLE_FIELDS = [
+    'max_concurrent_tasks',
+    'heartbeat_interval_seconds',
+    'metrics_report_interval_seconds',
+    'config_sync_interval_seconds',
+    'task_poll_interval_seconds',
+    'task_timeout_seconds',
+    'task_max_retry',
+    'lease_duration_seconds',
+    'lease_renewal_interval_seconds',
+    'log_level',
+    'log_max_lines',
+    'extra_config',
+]
+
+
+def _default_runtime_config_data(agent):
+    return {
+        'max_concurrent_tasks': agent.max_concurrency or 5,
+        'heartbeat_interval_seconds': agent.heartbeat_interval_seconds or 30,
+        'task_timeout_seconds': agent.timeout_seconds or 1800,
+        'task_max_retry': agent.max_retry or 2,
+    }
+
+
 
 # ==================== 心跳 ====================
 
@@ -236,17 +261,97 @@ def agent_get_config():
         config = AgentRuntimeConfig.create_config(
             agent_id=agent.id,
             workspace_id=agent.workspace_id,
-            data={
-                'max_concurrent_tasks': agent.max_concurrency or 5,
-                'heartbeat_interval_seconds': agent.heartbeat_interval_seconds or 30,
-                'task_timeout_seconds': agent.timeout_seconds or 1800,
-                'task_max_retry': agent.max_retry or 2,
-            }
+            data=_default_runtime_config_data(agent)
         )
 
     return ApiResponse.success(
         data=config.to_dict(),
         message='Config retrieved'
+    ).to_response()
+
+
+@agent_runtime_monitor_bp.route('/agent/config', methods=['PATCH'])
+@agent_session_required
+def agent_update_config():
+    """更新 Agent 运行时配置。"""
+    data = validate_json_request(optional_fields=_RUNTIME_CONFIG_MUTABLE_FIELDS)
+    if isinstance(data, tuple):
+        return data
+
+    if not data:
+        return ApiResponse.error('No config fields provided', 400).to_response()
+
+    normalized = {}
+    int_fields = {
+        'max_concurrent_tasks',
+        'heartbeat_interval_seconds',
+        'metrics_report_interval_seconds',
+        'config_sync_interval_seconds',
+        'task_poll_interval_seconds',
+        'task_timeout_seconds',
+        'task_max_retry',
+        'lease_duration_seconds',
+        'lease_renewal_interval_seconds',
+        'log_max_lines',
+    }
+
+    for key, value in data.items():
+        if key in int_fields:
+            try:
+                normalized_value = int(value)
+            except (TypeError, ValueError):
+                return ApiResponse.error(f'{key} must be an integer', 400).to_response()
+            if normalized_value <= 0:
+                return ApiResponse.error(f'{key} must be greater than 0', 400).to_response()
+            normalized[key] = normalized_value
+            continue
+
+        if key == 'log_level':
+            level = str(value or '').strip().upper()
+            if level not in {'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'}:
+                return ApiResponse.error('log_level must be DEBUG|INFO|WARNING|ERROR|CRITICAL', 400).to_response()
+            normalized[key] = level
+            continue
+
+        if key == 'extra_config':
+            if value is None:
+                normalized[key] = {}
+            elif isinstance(value, dict):
+                normalized[key] = value
+            else:
+                return ApiResponse.error('extra_config must be an object', 400).to_response()
+
+    if not normalized:
+        return ApiResponse.error('No valid config fields provided', 400).to_response()
+
+    agent = g.current_agent
+    current_config = AgentRuntimeConfig.get_active_config(agent.id)
+    base_data = current_config.to_dict() if current_config else _default_runtime_config_data(agent)
+
+    next_data = {**base_data, **normalized}
+    updated_config = AgentRuntimeConfig.create_config(
+        agent_id=agent.id,
+        workspace_id=agent.workspace_id,
+        data=next_data,
+    )
+
+    write_agent_audit(
+        event_type='agent.config_updated',
+        actor_type='agent',
+        actor_id=agent.id,
+        target_type='agent_runtime_config',
+        target_id=updated_config.id,
+        workspace_id=agent.workspace_id,
+        payload={
+            'updated_fields': sorted(normalized.keys()),
+            'version': updated_config.version,
+        },
+    )
+    db.session.commit()
+
+    return ApiResponse.success(
+        data=updated_config.to_dict(),
+        message='Config updated'
     ).to_response()
 
 
@@ -287,12 +392,7 @@ def agent_sync_config():
         platform_config = AgentRuntimeConfig.create_config(
             agent_id=agent.id,
             workspace_id=agent.workspace_id,
-            data={
-                'max_concurrent_tasks': agent.max_concurrency or 5,
-                'heartbeat_interval_seconds': agent.heartbeat_interval_seconds or 30,
-                'task_timeout_seconds': agent.timeout_seconds or 1800,
-                'task_max_retry': agent.max_retry or 2,
-            }
+            data=_default_runtime_config_data(agent)
         )
 
     local_version = local_config.get('version', 0)

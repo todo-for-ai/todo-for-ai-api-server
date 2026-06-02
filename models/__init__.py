@@ -36,6 +36,7 @@ from .agent_secret_share import AgentSecretShare
 from .agent_secret_grant import AgentSecretGrant
 from .secret_audit import SecretAuditLog, SecretAuditAction, SecretApprovalRequest
 from .agent_key import AgentKey
+from .agent_notification_receipt import AgentNotificationReceipt
 from .agent_session import AgentSession
 from .agent_task_attempt import AgentTaskAttempt, AgentTaskAttemptState
 from .agent_task_lease import AgentTaskLease
@@ -112,6 +113,7 @@ __all__ = [
     'SecretAuditAction',
     'SecretApprovalRequest',
     'AgentKey',
+    'AgentNotificationReceipt',
     'AgentSession',
     'AgentTaskAttempt',
     'AgentTaskAttemptState',

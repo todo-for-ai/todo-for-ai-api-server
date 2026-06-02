@@ -40,7 +40,7 @@ def sign_link_payload(payload):
 
 
 def get_workspace_or_404(workspace_id):
-    workspace = Organization.query.get(workspace_id)
+    workspace = db.session.get(Organization, workspace_id)
     if not workspace:
         return None, ApiResponse.not_found('Workspace not found').to_response()
     return workspace, None
@@ -300,7 +300,7 @@ def agent_session_required(f):
         if not session:
             return ApiResponse.unauthorized('Invalid or expired agent session token').to_response()
 
-        agent = Agent.query.get(session.agent_id)
+        agent = db.session.get(Agent, session.agent_id)
         if not agent:
             return ApiResponse.unauthorized('Agent is inactive').to_response()
 

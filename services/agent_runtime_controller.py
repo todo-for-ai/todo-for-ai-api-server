@@ -48,7 +48,7 @@ class AgentRuntimeController:
     }
 
     def __init__(self):
-        self.namespace = Config.K8S_AGENT_NAMESPACE or 'todo4ai-agents'
+        self.namespace = getattr(Config, 'K8S_AGENT_NAMESPACE', None) or 'todo4ai-agents'
         self.k8s_client = None
         self.core_v1 = None
         self._init_k8s_client()
@@ -346,7 +346,7 @@ class AgentRuntimeController:
             ),
             kubernetes.client.V1EnvVar(
                 name='API_BASE_URL',
-                value=Config.API_BASE_URL or 'https://api.todo-for-ai.com/todo-for-ai/api/v1'
+                value=getattr(Config, 'API_BASE_URL', None) or 'https://api.todo-for-ai.com/todo-for-ai/api/v1'
             ),
             kubernetes.client.V1EnvVar(
                 name='LLM_PROVIDER',

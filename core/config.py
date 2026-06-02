@@ -121,7 +121,7 @@ class Config:
 class DevelopmentConfig(Config):
     """开发环境配置"""
     DEBUG = True
-    SQLALCHEMY_ECHO = True  # 打印 SQL 语句
+    SQLALCHEMY_ECHO = False  # 关闭 SQL 打印，避免日志膨胀
 
 
 class TestingConfig(Config):

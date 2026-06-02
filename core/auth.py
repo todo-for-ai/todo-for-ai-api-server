@@ -5,7 +5,7 @@
 from functools import wraps
 from flask import request, jsonify, g
 from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request, jwt_required as flask_jwt_required
-from models import ApiToken, User
+from models import db, ApiToken, User
 from api.base import ApiResponse
 
 
@@ -119,7 +119,7 @@ def unified_auth_required(f):
             # JWT验证失败，继续尝试其他认证方式
             user_id = None
         if user_id:
-            current_user = User.query.get(user_id)
+            current_user = db.session.get(User, user_id)
             if current_user and current_user.is_active():
                 auth_method = 'jwt'
                 g.current_user = current_user
@@ -170,7 +170,7 @@ def optional_unified_auth(f):
             # JWT验证失败，继续
             user_id = None
         if user_id:
-            current_user = User.query.get(user_id)
+            current_user = db.session.get(User, user_id)
             if current_user and current_user.is_active():
                 auth_method = 'jwt'
                 g.current_user = current_user

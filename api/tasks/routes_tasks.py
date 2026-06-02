@@ -40,6 +40,34 @@ def _user_display_name(user):
         return None
     return user.full_name or user.nickname or user.username or user.email or str(user.id)
 
+
+def _build_accessible_tasks_query(user_id: int):
+    """Build task access scope with an owner-only fast path."""
+    foreign_member_project_ids_query = db.session.query(ProjectMember.project_id).join(
+        Project,
+        Project.id == ProjectMember.project_id,
+    ).filter(
+        ProjectMember.user_id == user_id,
+        ProjectMember.status == ProjectMemberStatus.ACTIVE,
+        Project.owner_id != user_id,
+    )
+
+    # Most users only need own projects; avoid expensive project subqueries in that case.
+    has_foreign_member_projects = foreign_member_project_ids_query.limit(1).first() is not None
+    if not has_foreign_member_projects:
+        return Task.query.filter(Task.owner_id == user_id)
+
+    foreign_member_project_ids = foreign_member_project_ids_query.subquery()
+    return Task.query.filter(
+        or_(
+            Task.owner_id == user_id,
+            Task.project_id.in_(
+                db.session.query(foreign_member_project_ids.c.project_id)
+            ),
+        )
+    )
+
+
 @tasks_bp.route('', methods=['GET'])
 @tasks_bp.route('/', methods=['GET'])
 @unified_auth_required
@@ -59,20 +87,8 @@ def list_tasks():
         if cached_result is not None:
             return ApiResponse.success(cached_result, "Tasks retrieved successfully").to_response()
 
-        member_project_ids = db.session.query(ProjectMember.project_id).filter(
-            ProjectMember.user_id == current_user.id,
-            ProjectMember.status == ProjectMemberStatus.ACTIVE
-        ).subquery()
-
-        accessible_project_ids = db.session.query(Project.id).filter(
-            or_(
-                Project.owner_id == current_user.id,
-                Project.id.in_(member_project_ids)
-            )
-        ).subquery()
-
         # 构建查询（owner + member 可访问项目）
-        query = Task.query.filter(Task.project_id.in_(accessible_project_ids))
+        query = _build_accessible_tasks_query(current_user.id)
         
         # 项目筛选
         if args['project_id']:

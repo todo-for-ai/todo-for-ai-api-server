@@ -88,6 +88,14 @@ def upload_task_attachment(task_id):
         if not uploaded_file:
             return ApiResponse.error("Missing file field", 400).to_response()
 
+        # 通过 Content-Length 预检文件大小，避免写入磁盘后再检查
+        content_length = request.content_length
+        if content_length and content_length > MAX_ATTACHMENT_SIZE_BYTES:
+            return ApiResponse.error(
+                f"File too large. Max size is {MAX_ATTACHMENT_SIZE_BYTES} bytes",
+                400
+            ).to_response()
+
         original_filename = uploaded_file.filename or ''
         if not original_filename.strip():
             return ApiResponse.error("Empty filename", 400).to_response()

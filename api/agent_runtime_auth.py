@@ -22,7 +22,7 @@ def agent_auth_introspect():
     if not key:
         return ApiResponse.unauthorized('Invalid agent key').to_response()
 
-    agent = Agent.query.get(key.agent_id)
+    agent = db.session.get(Agent, key.agent_id)
     if not agent or agent.status.value != 'active':
         return ApiResponse.unauthorized('Agent is inactive').to_response()
 

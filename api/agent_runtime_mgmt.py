@@ -54,10 +54,24 @@ def spawn_agent_runtime(workspace_id, agent_id):
         ).to_response()
 
     # 获取或创建 Agent Key
-    agent_key = AgentKey.query.filter_by(agent_id=agent_id, is_active=True).first()
-    if not agent_key:
-        agent_key = AgentKey.create_key(agent_id=agent_id, created_by=user.id)
-        db.session.add(agent_key)
+    agent_key_row = AgentKey.query.filter_by(agent_id=agent_id, is_active=True).first()
+    runtime_agent_key = None
+
+    if agent_key_row:
+        runtime_agent_key = agent_key_row.reveal()
+        if not runtime_agent_key:
+            return ApiResponse.error(
+                "Failed to decrypt existing agent key",
+                500
+            ).to_response()
+    else:
+        agent_key_row, runtime_agent_key = AgentKey.generate_key(
+            name=f"Runtime Key for agent {agent_id}",
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            created_by_user_id=user.id,
+        )
+        db.session.add(agent_key_row)
         db.session.commit()
 
     # 获取沙箱配置
@@ -68,7 +82,7 @@ def spawn_agent_runtime(workspace_id, agent_id):
         # 启动 Pod
         result = controller.spawn_agent_pod(
             agent=agent,
-            agent_key=agent_key.raw_key,  # 注意：实际应该使用更安全的方式传递
+            agent_key=runtime_agent_key,  # 注意：实际应该使用更安全的方式传递
             sandbox_profile=sandbox_profile
         )
 
