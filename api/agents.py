@@ -9686,6 +9686,31 @@ def orchestrate():
     Returns a per-stage summary plus an overall duration.
     """
     user = get_current_user()
+    report, duration, message = _run_orchestration(user, actor_type="human")
+    return ApiResponse.success(
+        {**report, "duration_seconds": round(duration, 3)},
+        message,
+    ).to_response()
+
+
+@agents_bp.route("/maintenance/orchestrator/status", methods=["GET"])
+@unified_auth_required
+def orchestrator_status():
+    """Return the built-in scheduler state and the last orchestration cycle
+    summary (if the scheduler is enabled)."""
+    try:
+        from core.orchestrator_scheduler import scheduler_status
+        status = scheduler_status()
+    except Exception as e:
+        return ApiResponse.error(f"Scheduler status unavailable: {str(e)}").to_response()
+    return ApiResponse.success(status, "Orchestrator status").to_response()
+
+
+def _run_orchestration(user, actor_type="human"):
+    """Core orchestration logic, reusable by both the HTTP endpoint and the
+    built-in background scheduler. Returns (report_dict, duration_seconds, message).
+    Does NOT call get_current_user(); the caller supplies the user scope.
+    """
     start = datetime.utcnow()
     report = {
         "stale_agents": 0,
@@ -9772,7 +9797,6 @@ def orchestrate():
                         pass
                     timed_out.append({"run_id": wf_run.id, "step_key": sr.step_key})
         db.session.commit()
-        # Re-advance affected workflows
         for run_id in set(t["run_id"] for t in timed_out):
             wf_run = WorkflowRun.query.get(run_id)
             if wf_run:
@@ -9858,9 +9882,6 @@ def orchestrate():
             if strategy is None or strategy not in _AUTO_SAFE_STRATEGIES:
                 skipped += 1
                 continue
-            # Delegate to the model's resolve (no automated side-effects here;
-            # auto_resolve_conflicts endpoint handles side-effects. The
-            # orchestrator records the resolution so humans see the outcome.)
             c.resolve(strategy, f"Auto-resolved by orchestrator via {strategy.value}",
                       resolved_by_user_id=user.id)
             auto_resolved += 1
@@ -9887,17 +9908,16 @@ def orchestrate():
     duration = (datetime.utcnow() - start).total_seconds()
     AuditLog.record(
         action="maintenance.orchestrate", resource_type="system", resource_id=0,
-        actor_type="human", actor_user_id=user.id,
+        actor_type=actor_type, actor_user_id=user.id,
         detail={**{k: v for k, v in report.items() if k != "errors"},
                 "error_count": len(report["errors"]), "duration_seconds": duration},
-        ip_address=_client_ip(),
+        ip_address=_client_ip() if actor_type == "human" else None,
     )
     db.session.commit()
 
-    return ApiResponse.success(
-        {**report, "duration_seconds": round(duration, 3)},
-        f"Orchestration complete: {report['stale_agents']} stale agent(s), "
-        f"{report['timed_out_steps']} timed-out step(s), {report['triggers_fired']} trigger(s) fired, "
-        f"{report['conflicts_auto_resolved']} conflict(s) auto-resolved"
-        + (f", {len(report['errors'])} error(s)" if report["errors"] else ""),
-    ).to_response()
+    message = (f"Orchestration complete: {report['stale_agents']} stale agent(s), "
+               f"{report['timed_out_steps']} timed-out step(s), {report['triggers_fired']} trigger(s) fired, "
+               f"{report['conflicts_auto_resolved']} conflict(s) auto-resolved"
+               + (f", {len(report['errors'])} error(s)" if report["errors"] else ""))
+    return report, duration, message
+

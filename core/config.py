@@ -96,6 +96,12 @@ class Config:
     # 日志配置
     LOG_LEVEL = os.environ.get('LOG_LEVEL') or 'INFO'
     LOG_FILE = os.environ.get('LOG_FILE') or 'app.log'
+
+    # 全局协作编排自调度（内置后台线程，免外部 cron 依赖）
+    # 多 worker 部署时仅在一 worker 设置 ORCHESTRATOR_ENABLED=true，避免重复执行
+    ORCHESTRATOR_ENABLED = os.environ.get('ORCHESTRATOR_ENABLED', 'false').lower() == 'true'
+    ORCHESTRATOR_INTERVAL_SECONDS = int(os.environ.get('ORCHESTRATOR_INTERVAL_SECONDS', '300'))  # default 5 min
+    ORCHESTRATOR_USER_ID = int(os.environ.get('ORCHESTRATOR_USER_ID', '0') or '0')  # owner scope; 0 = skip
     
     @staticmethod
     def init_app(app):

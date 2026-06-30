@@ -192,6 +192,14 @@ with app.app_context():
     db.create_all()
     print('✅ 数据库表已创建/更新')
 
+# Start the built-in orchestrator scheduler if enabled (ORCHESTRATOR_ENABLED=true)
+try:
+    from core.orchestrator_scheduler import start_scheduler
+    if start_scheduler(app):
+        print('🧭 全局协作编排调度器已启动')
+except Exception as _e:
+    print(f'⚠️ 编排调度器启动失败: {_e}')
+
 
 if __name__ == '__main__':
     # 开发服务器
