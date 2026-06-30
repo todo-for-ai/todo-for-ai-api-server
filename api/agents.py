@@ -3176,6 +3176,100 @@ def get_workflow_run(run_id):
     return ApiResponse.success(wf_run.to_dict(include_step_runs=True)).to_response()
 
 
+@agents_bp.route("/workflow-runs/<int:run_id>/console", methods=["GET"])
+@unified_auth_required
+def get_workflow_run_console(run_id):
+    """Step-level real-time console: aggregates step runs with their sandbox
+    executions, effective params, recent run logs, and any conflicts tied to
+    the run — a single payload for monitoring/intervening on a running workflow.
+
+    Query params:
+      log_limit (default 5): max recent RunLog entries per step
+    """
+    user = get_current_user()
+    wf_run = WorkflowRun.query.filter_by(id=run_id, owner_id=user.id).first()
+    if not wf_run:
+        return ApiResponse.not_found("Workflow run not found").to_response()
+    try:
+        log_limit = max(1, min(50, int(request.args.get("log_limit", 5))))
+    except (TypeError, ValueError):
+        log_limit = 5
+
+    now = datetime.utcnow()
+    steps_payload = []
+    for sr in wf_run.step_runs:
+        # Effective params (overrides merged with definition)
+        effective = {}
+        for k in _RUNTIME_OVERRIDABLE_KEYS:
+            effective[k] = sr.get_effective_param(k)
+
+        # Sandbox execution bound to this step (most recent)
+        sandbox_exec = SandboxExecution.query.filter_by(step_run_id=sr.id).order_by(
+            SandboxExecution.created_at.desc()
+        ).first()
+        sandbox_exec_dict = None
+        sandbox_policy = None
+        if sandbox_exec:
+            sandbox_exec_dict = sandbox_exec.to_dict(include_violations=True)
+            sb = AgentSandbox.query.get(sandbox_exec.sandbox_id)
+            sandbox_policy = sb.to_dict() if sb else None
+
+        # Recent run logs for the AgentRun bound to this step
+        logs = []
+        if sr.assignment_id:
+            bound_run = AgentRun.query.filter_by(assignment_id=sr.assignment_id).order_by(
+                AgentRun.started_at.desc()
+            ).first()
+            if bound_run:
+                logs = [l.to_dict() for l in RunLog.query.filter_by(run_id=bound_run.id).order_by(
+                    RunLog.created_at.desc()
+                ).limit(log_limit).all()]
+                logs.reverse()  # chronological order for display
+
+        # Timing
+        duration_seconds = None
+        if sr.started_at:
+            end = sr.finished_at or now
+            duration_seconds = (end - sr.started_at).total_seconds()
+
+        steps_payload.append({
+            "step_run": sr.to_dict(),
+            "effective_params": effective,
+            "sandbox_execution": sandbox_exec_dict,
+            "sandbox_policy": sandbox_policy,
+            "recent_logs": logs,
+            "duration_seconds": duration_seconds,
+        })
+
+    # Conflicts tied to this run
+    run_conflicts = AgentConflict.query.filter_by(
+        owner_id=user.id, workflow_run_id=run_id
+    ).order_by(AgentConflict.created_at.desc()).all()
+
+    # Overall progress summary
+    status_counts = {}
+    for sr in wf_run.step_runs:
+        s = sr.status.value if sr.status else "unknown"
+        status_counts[s] = status_counts.get(s, 0) + 1
+    total_steps = len(wf_run.step_runs)
+    done = status_counts.get("succeeded", 0) + status_counts.get("skipped", 0) + status_counts.get("cancelled", 0)
+    progress_pct = round((done / total_steps) * 100, 1) if total_steps else 0.0
+
+    return ApiResponse.success({
+        "workflow_run": wf_run.to_dict(include_step_runs=False),
+        "steps": steps_payload,
+        "conflicts": [c.to_dict() for c in run_conflicts],
+        "summary": {
+            "total_steps": total_steps,
+            "status_counts": status_counts,
+            "progress_percent": progress_pct,
+            "running_count": status_counts.get("running", 0),
+            "failed_count": status_counts.get("failed", 0),
+            "pending_count": status_counts.get("pending", 0) + status_counts.get("waiting", 0),
+        },
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/cancel", methods=["POST"])
 @unified_auth_required
 def cancel_workflow_run(run_id):
