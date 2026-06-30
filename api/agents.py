@@ -3130,6 +3130,7 @@ def launch_workflow(workflow_id):
     _advance_workflow(wf_run)
 
     db.session.commit()
+    flush_sse_notifications()
 
     AuditLog.record(
         action="workflow.launched", resource_type="workflow_run", resource_id=wf_run.id,
@@ -3335,6 +3336,7 @@ def resume_workflow_run(run_id):
     # Re-evaluate which steps can start now
     _advance_workflow(wf_run)
     db.session.commit()
+    flush_sse_notifications()
     return ApiResponse.success(wf_run.to_dict(include_step_runs=True), "Workflow resumed").to_response()
 
 
@@ -3375,6 +3377,7 @@ def retry_workflow_run(run_id):
                      details={"retried_steps": retried_steps})
     _advance_workflow(wf_run)
     db.session.commit()
+    flush_sse_notifications()
     return ApiResponse.success(wf_run.to_dict(include_step_runs=True), "Workflow retry started").to_response()
 
 
@@ -3513,9 +3516,20 @@ def complete_workflow_step(run_id, step_key):
 
     db.session.commit()
 
+    # Notify clients that a step reached a terminal/intermediate state so the
+    # real-time console can refresh without polling.
+    _queue_sse(user.id, "workflow_step_finished", {
+        "run_id": run_id,
+        "step_key": step_key,
+        "status": sr.status.value if sr.status else None,
+        "agent_id": sr.agent_id,
+        "attempt": sr.attempt,
+    })
+
     # Advance the workflow
     _advance_workflow(wf_run)
     db.session.commit()
+    flush_sse_notifications()
 
     return ApiResponse.success(
         wf_run.to_dict(include_step_runs=True),
@@ -4029,6 +4043,13 @@ def _start_step(wf_run, step_run, step_def, now):
             "agent_name": agent.name,
         },
     )
+    # SSE so the real-time console reflects step start/assignment immediately
+    _queue_sse(wf_run.owner_id, "workflow_step_started", {
+        "run_id": wf_run.id,
+        "step_key": step_def.step_key,
+        "agent_id": agent.id,
+        "agent_name": agent.name,
+    })
 
 
 def _maybe_start_sandboxed_execution(agent, run, step_run):
@@ -4407,6 +4428,7 @@ def timeout_workflow_steps():
         if wf_run:
             _advance_workflow(wf_run)
     db.session.commit()
+    flush_sse_notifications()
 
     return ApiResponse.success({
         "timed_out": len(timed_out),
@@ -5342,6 +5364,7 @@ def fire_due_triggers():
         )
 
     db.session.commit()
+    flush_sse_notifications()
 
     return ApiResponse.success(
         {"fired_count": len(fired), "fired": fired},
