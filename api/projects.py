@@ -8,6 +8,7 @@ from flask import Blueprint, request
 from sqlalchemy import func, case
 from datetime import datetime, timedelta
 from models import db, Project, ProjectStatus, Task, TaskStatus
+from models.agent import ProjectMember, ProjectRole
 from .base import paginate_query, validate_json_request, get_request_args, APIException, ApiResponse
 from core.auth import unified_auth_required, get_current_user
 
@@ -138,9 +139,9 @@ def list_projects():
                 from models.task import Task
                 total_tasks = Task.query.filter_by(project_id=project.id).count()
                 pending_tasks = Task.query.filter_by(project_id=project.id).filter(
-                    Task.status.in_(['todo', 'in_progress', 'review'])
+                    Task.status.in_([TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW])
                 ).count()
-                completed_tasks = Task.query.filter_by(project_id=project.id).filter_by(status='done').count()
+                completed_tasks = Task.query.filter_by(project_id=project.id).filter_by(status=TaskStatus.DONE).count()
 
                 project_dict.update({
                     'total_tasks': total_tasks,
@@ -198,7 +199,15 @@ def create_project():
             project_context=data.get('project_context', ''),
             last_activity_at=current_time  # 设置最后活跃时间为创建时间
         )
-        
+
+        # Auto-add the owner as a ProjectMember with OWNER role
+        ProjectMember.create(
+            project_id=project.id,
+            user_id=current_user.id,
+            role=ProjectRole.OWNER,
+            accepted_at=current_time,
+        )
+
         db.session.commit()
         
         return ApiResponse.created(

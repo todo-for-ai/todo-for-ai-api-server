@@ -98,8 +98,12 @@ def unified_auth_required(f):
         auth_header = request.headers.get('Authorization')
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1]
+        else:
+            # Fallback: query-param token (needed for EventSource / SSE
+            # which cannot set HTTP headers).
+            token = request.args.get('token')
 
-            # 验证API Token
+        if token:
             api_token = ApiToken.verify_token(token)
             if api_token:
                 current_user = api_token.user
@@ -147,8 +151,12 @@ def optional_unified_auth(f):
         auth_header = request.headers.get('Authorization')
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1]
+        else:
+            # Fallback: query-param token (needed for EventSource / SSE
+            # which cannot set HTTP headers).
+            token = request.args.get('token')
 
-            # 验证API Token
+        if token:
             api_token = ApiToken.verify_token(token)
             if api_token:
                 current_user = api_token.user

@@ -5,7 +5,7 @@ MCP (Model Context Protocol) HTTP API接口
 import json
 import asyncio
 from flask import Blueprint, request, jsonify, g
-from models import db, Project, Task, TaskStatus, ContextRule, ApiToken
+from models import db, Project, Task, TaskStatus, TaskPriority, ContextRule, ApiToken
 from api.base import handle_api_error
 from core.github_config import require_auth
 from datetime import datetime, timedelta
@@ -509,7 +509,12 @@ def get_project_tasks_by_name(arguments):
     # 获取任务
     query = Task.query.filter_by(project_id=project.id)
     if status_filter:
-        query = query.filter(Task.status.in_(status_filter))
+        try:
+            status_enums = [TaskStatus(status) for status in status_filter]
+        except ValueError:
+            valid_statuses = [status.value for status in TaskStatus]
+            return {'error': f'Invalid status_filter. Must contain only: {", ".join(valid_statuses)}'}
+        query = query.filter(Task.status.in_(status_enums))
     
     tasks = query.order_by(Task.created_at.asc()).all()
     
@@ -620,12 +625,13 @@ def submit_task_feedback(arguments):
     
     # 跟踪状态变更
     old_status = task.status
-    status_changed = str(old_status) != str(status)
+    new_status = TaskStatus(status)
+    status_changed = old_status != new_status
 
     # 更新任务
     task.feedback_content = feedback_content
     task.feedback_at = datetime.utcnow()
-    task.status = status
+    task.status = new_status
 
     # 更新项目最后活动时间
     project.last_activity_at = datetime.utcnow()
@@ -712,7 +718,7 @@ def create_task(arguments):
     due_date_obj = None
     if due_date:
         try:
-            due_date_obj = datetime.strptime(due_date, '%Y-%m-%d').date()
+            due_date_obj = datetime.strptime(due_date, '%Y-%m-%d')
         except ValueError:
             return {'error': 'Invalid due_date format. Use YYYY-MM-DD'}
 
@@ -721,11 +727,10 @@ def create_task(arguments):
         task = Task(
             title=title,
             content=content,
-            status=status,
-            priority=priority,
+            status=TaskStatus(status),
+            priority=TaskPriority(priority),
             project_id=project_id,
             creator_id=g.current_user.id,
-            assignee=assignee,
             due_date=due_date_obj,
             is_ai_task=is_ai_task,
             creator_identifier=creator_identifier,
@@ -756,7 +761,7 @@ def create_task(arguments):
             'project_id': task.project_id,
             'project_name': project.name,
             'creator_id': task.creator_id,
-            'assignee': task.assignee,
+            'assignee': assignee,
             'due_date': task.due_date.isoformat() if task.due_date else None,
             'is_ai_task': task.is_ai_task,
             'creator_identifier': task.creator_identifier,

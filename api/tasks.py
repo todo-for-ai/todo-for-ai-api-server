@@ -35,6 +35,11 @@ def list_tasks():
         # 项目筛选
         if args['project_id']:
             query = query.filter(Task.project_id == args['project_id'])
+
+        # 子任务筛选
+        parent_task_id = request.args.get('parent_task_id', type=int)
+        if parent_task_id:
+            query = query.filter_by(parent_task_id=parent_task_id)
         
         # 状态筛选
         if args['status']:
@@ -121,7 +126,8 @@ def create_task():
             required_fields=['project_id'],
             optional_fields=[
                 'title', 'content', 'status', 'priority',
-                'due_date', 'tags', 'is_ai_task'
+                'due_date', 'tags', 'is_ai_task', 'parent_task_id',
+                'required_capabilities'
             ]
         )
 
@@ -177,6 +183,15 @@ def create_task():
                 # 如果都没有，生成默认标题
                 title = f"新任务 - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
+        # 验证 parent_task_id（如果提供）
+        parent_task_id = data.get('parent_task_id')
+        if parent_task_id:
+            parent_task = Task.query.get(parent_task_id)
+            if not parent_task:
+                return ApiResponse.error("Parent task not found", 404).to_response()
+            if parent_task.project_id != data['project_id']:
+                return ApiResponse.error("Parent task must belong to the same project", 400).to_response()
+
         # 创建任务
         task = Task.create(
             project_id=data['project_id'],
@@ -187,12 +202,18 @@ def create_task():
             due_date=due_date,
             tags=data.get('tags', []),
             is_ai_task=data.get('is_ai_task', False),
+            parent_task_id=parent_task_id,
             creator_id=current_user.id,  # 设置创建者ID
             created_by=current_user.email  # 设置创建者邮箱
         )
 
         # 更新项目最后活动时间
         project.last_activity_at = datetime.utcnow()
+
+        # 如果是子任务，将父任务标记为 BLOCKED（子任务未全部完成）
+        if parent_task_id and parent_task:
+            if parent_task.status != TaskStatus.BLOCKED:
+                parent_task.status = TaskStatus.BLOCKED
 
         db.session.commit()
 
@@ -265,7 +286,8 @@ def update_task(task_id):
         data = validate_json_request(
             optional_fields=[
                 'title', 'content', 'status', 'priority',
-                'due_date', 'completion_rate', 'tags'
+                'due_date', 'completion_rate', 'tags',
+                'required_capabilities'
             ]
         )
         
@@ -299,6 +321,8 @@ def update_task(task_id):
                     if new_status == TaskStatus.DONE and old_status != TaskStatus.DONE:
                         task.completed_at = datetime.utcnow()
                         task.completion_rate = 100
+                        # Auto-unblock parent if all subtasks are done
+                        task.try_unblock_parent()
             except ValueError:
                 return ApiResponse.error(f"Invalid status: {data['status']}", 400).to_response()
         
@@ -369,12 +393,18 @@ def update_task(task_id):
 
 
 @tasks_bp.route('/<int:task_id>', methods=['DELETE'])
+@unified_auth_required
 def delete_task(task_id):
     """删除任务"""
     try:
+        current_user = get_current_user()
+
         task = Task.query.get(task_id)
         if not task:
             return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
+
+        if task.project.owner_id != current_user.id:
+            return ApiResponse.error("Access denied: You can only delete tasks from your own projects", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
         
         # 记录删除历史
         TaskHistory.log_action(
@@ -387,11 +417,30 @@ def delete_task(task_id):
         # 删除任务
         task.delete()
         
-        return ApiResponse.success(None, "Task deleted successfully", 204).to_response()
+        return ApiResponse.success(None, "Task deleted successfully").to_response()
         
     except Exception as e:
         db.session.rollback()
         return ApiResponse.error(f"Failed to delete task: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/<int:task_id>/subtasks', methods=['GET'])
+@unified_auth_required
+def get_subtasks(task_id):
+    """获取任务的子任务列表"""
+    try:
+        current_user = get_current_user()
+        task = Task.query.get(task_id)
+        if not task:
+            return ApiResponse.error("Task not found", 404).to_response()
+
+        subtasks = Task.query.filter_by(parent_task_id=task_id).order_by(Task.created_at.asc()).all()
+        return ApiResponse.success(
+            [t.to_dict(include_project=True) for t in subtasks],
+            "Subtasks retrieved successfully",
+        ).to_response()
+    except Exception as e:
+        return ApiResponse.error(f"Failed to retrieve subtasks: {str(e)}", 500).to_response()
 
 
 @tasks_bp.route('/<int:task_id>/history', methods=['GET'])

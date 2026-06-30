@@ -6,7 +6,7 @@ import enum
 from datetime import datetime
 from sqlalchemy import Column, String, Text, Enum, Integer, BigInteger, ForeignKey, DateTime, DECIMAL, JSON, Boolean
 from sqlalchemy.orm import relationship
-from .base import BaseModel
+from .base import BaseModel, db
 
 
 class TaskStatus(enum.Enum):
@@ -16,6 +16,7 @@ class TaskStatus(enum.Enum):
     REVIEW = 'review'
     DONE = 'done'
     CANCELLED = 'cancelled'
+    BLOCKED = 'blocked'
 
 
 class TaskPriority(enum.Enum):
@@ -63,17 +64,22 @@ class Task(BaseModel):
     
     # 扩展信息
     tags = Column(JSON, comment='任务标签 (JSON数组)')
+    required_capabilities = Column(JSON, comment='Agent 能力要求 (JSON数组, 如 ["code_review","testing"])')
     related_files = Column(JSON, comment='任务相关的文件列表 (JSON数组)')
     is_ai_task = Column(Boolean, default=True, comment='是否是分配给AI的任务')
     creator_type = Column(String(20), default='human', comment='创建者类型: human, ai')
     creator_identifier = Column(String(100), comment='创建者标识符 (AI的标识或用户ID)')
     feedback_content = Column(Text, comment='任务反馈内容')
     feedback_at = Column(DateTime, comment='反馈时间')
-    
+
+    # 子任务 / 依赖
+    parent_task_id = Column(BigInteger, ForeignKey('tasks.id'), nullable=True, index=True, comment='父任务ID（子任务指向父任务）')
+
     # 关系
     project = relationship('Project', back_populates='tasks')
     assignee = relationship('User', back_populates='tasks', foreign_keys=[assignee_id])
     creator = relationship('User', back_populates='created_tasks', foreign_keys=[creator_id])
+    subtasks = relationship('Task', backref=db.backref('parent_task', remote_side='Task.id'), lazy='dynamic')
     history = relationship(
         'TaskHistory',
         back_populates='task',
@@ -96,6 +102,7 @@ class Task(BaseModel):
         result['status'] = self.status.value if self.status else None
         result['priority'] = self.priority.value if self.priority else None
         result['tags'] = self.tags or []
+        result['required_capabilities'] = self.required_capabilities or []
         
         # 格式化时间字段
         if self.due_date:
@@ -119,7 +126,11 @@ class Task(BaseModel):
                 'is_overdue': self.is_overdue,
                 'days_until_due': self.days_until_due,
             }
-        
+
+        # 子任务统计（轻量，始终包含）
+        result['subtask_count'] = self.subtasks.count()
+        result['subtask_done_count'] = self.subtasks.filter_by(status=TaskStatus.DONE).count()
+
         return result
     
     @property
@@ -178,6 +189,42 @@ class Task(BaseModel):
         self.completion_rate = 100
         self.completed_at = datetime.utcnow()
         self.save()
+
+    def try_unblock_parent(self):
+        """When a subtask changes state, update the parent's blocked status.
+
+        If a parent has subtasks and any are not yet in a terminal state
+        (done / cancelled / review), the parent is marked BLOCKED.  Once all
+        subtasks are terminal, the parent reverts to TODO so a coordinator can
+        pick it up for final review.
+        Returns the parent task if its status changed, else None.
+        """
+        if not self.parent_task_id:
+            return None
+
+        parent = Task.query.get(self.parent_task_id)
+        if not parent:
+            return None
+
+        subtasks = Task.query.filter_by(parent_task_id=parent.id).all()
+        if not subtasks:
+            return None
+
+        terminal = {TaskStatus.DONE, TaskStatus.CANCELLED, TaskStatus.REVIEW}
+        all_terminal = all(s.status in terminal for s in subtasks)
+
+        if all_terminal:
+            if parent.status == TaskStatus.BLOCKED:
+                parent.status = TaskStatus.TODO
+                db.session.add(parent)
+                return parent
+        else:
+            if parent.status in (TaskStatus.TODO, TaskStatus.IN_PROGRESS):
+                parent.status = TaskStatus.BLOCKED
+                db.session.add(parent)
+                return parent
+
+        return None
     
     def start(self):
         """开始任务"""

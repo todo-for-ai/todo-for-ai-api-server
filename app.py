@@ -145,6 +145,8 @@ def register_blueprints(app):
     from api.user_settings import user_settings_bp
     from api.api_tokens import api_tokens_bp
     from api.custom_prompts import custom_prompts_bp
+    from api.agents import agents_bp
+    from api.sse import sse_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -158,6 +160,8 @@ def register_blueprints(app):
     app.register_blueprint(user_settings_bp, url_prefix='/todo-for-ai/api/v1/user-settings')
     app.register_blueprint(api_tokens_bp, url_prefix='/todo-for-ai/api/v1/api-tokens')
     app.register_blueprint(custom_prompts_bp, url_prefix='/todo-for-ai/api/v1/custom-prompts')
+    app.register_blueprint(agents_bp, url_prefix='/todo-for-ai/api/v1/agents')
+    app.register_blueprint(sse_bp, url_prefix='/todo-for-ai/api/v1/sse')
 
 
 

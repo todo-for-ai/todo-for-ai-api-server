@@ -3,10 +3,26 @@
 """
 
 from flask import Blueprint, jsonify
-from sqlalchemy import func, and_
+from sqlalchemy import func, and_, or_
 from datetime import datetime, date, timedelta
 
-from models import db, User, Project, Task, TaskStatus, UserActivity
+from models import (
+    db,
+    User,
+    Project,
+    Task,
+    TaskStatus,
+    UserActivity,
+    Agent,
+    AgentStatus,
+    TaskAssignment,
+    TaskAssignmentState,
+)
+from models.agent import (
+    HUMAN_BLOCKING_ASSIGNMENT_STATES,
+    LEASED_EXECUTION_STATES,
+    mark_stale_agents_offline,
+)
 from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 
@@ -19,6 +35,9 @@ def get_dashboard_stats():
     """获取仪表盘统计数据（用户隔离）"""
     try:
         current_user = get_current_user()
+        stale_agents = mark_stale_agents_offline(owner_id=current_user.id)
+        if stale_agents:
+            db.session.commit()
         
         # 获取用户的项目统计
         user_projects = Project.query.filter_by(owner_id=current_user.id).all()
@@ -64,6 +83,47 @@ def get_dashboard_stats():
         else:
             total_tasks = todo_tasks = in_progress_tasks = review_tasks = done_tasks = ai_tasks = 0
         
+        now = datetime.utcnow()
+
+        total_agents = Agent.query.filter_by(owner_id=current_user.id).count()
+        active_agents = Agent.query.filter_by(owner_id=current_user.id, status=AgentStatus.ACTIVE).count()
+        paused_agents = Agent.query.filter_by(owner_id=current_user.id, status=AgentStatus.PAUSED).count()
+        offline_agents = Agent.query.filter_by(owner_id=current_user.id, status=AgentStatus.OFFLINE).count()
+
+        if project_ids:
+            assignment_scope = TaskAssignment.query.join(Task, TaskAssignment.task_id == Task.id).join(
+                Agent, TaskAssignment.agent_id == Agent.id
+            ).filter(
+                Task.project_id.in_(project_ids),
+                Agent.owner_id == current_user.id,
+            )
+
+            active_assignments = assignment_scope.filter(
+                or_(
+                    and_(
+                        TaskAssignment.state.in_(LEASED_EXECUTION_STATES),
+                        or_(TaskAssignment.lease_expires_at.is_(None), TaskAssignment.lease_expires_at >= now),
+                    ),
+                    TaskAssignment.state.in_(HUMAN_BLOCKING_ASSIGNMENT_STATES),
+                ),
+            ).count()
+            waiting_human_assignments = assignment_scope.filter(
+                TaskAssignment.state == TaskAssignmentState.WAITING_HUMAN
+            ).count()
+            review_assignments = assignment_scope.filter(
+                or_(
+                    TaskAssignment.state == TaskAssignmentState.REVIEW,
+                    and_(TaskAssignment.state == TaskAssignmentState.DONE, Task.status == TaskStatus.REVIEW),
+                )
+            ).count()
+            expired_leases = assignment_scope.filter(
+                TaskAssignment.state.in_(LEASED_EXECUTION_STATES),
+                TaskAssignment.lease_expires_at.isnot(None),
+                TaskAssignment.lease_expires_at < now,
+            ).count()
+        else:
+            active_assignments = waiting_human_assignments = review_assignments = expired_leases = 0
+
         # 最近项目（最近更新的5个项目）
         recent_projects = Project.query.filter_by(owner_id=current_user.id)\
             .order_by(Project.updated_at.desc())\
@@ -95,9 +155,24 @@ def get_dashboard_stats():
             'recent_projects': [p.to_dict() for p in recent_projects],
             'recent_tasks': [t.to_dict(include_project=True) for t in recent_tasks],
             'activity_stats': activity_stats,
+            'agent_collaboration': {
+                'agents': {
+                    'total': total_agents,
+                    'active': active_agents,
+                    'paused': paused_agents,
+                    'offline': offline_agents,
+                },
+                'assignments': {
+                    'active': active_assignments,
+                    'waiting_human': waiting_human_assignments,
+                    'review': review_assignments,
+                    'expired_leases': expired_leases,
+                },
+            },
         }, "Dashboard stats retrieved successfully").to_response()
 
     except Exception as e:
+        db.session.rollback()
         return ApiResponse.error(f"Failed to get dashboard stats: {str(e)}", 500).to_response()
 
 
