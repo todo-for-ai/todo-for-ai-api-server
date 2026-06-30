@@ -9658,3 +9658,246 @@ def auto_resolve_conflicts():
         "resolved_details": auto_resolved,
         "skipped_details": skipped,
     }, f"Auto-resolve: {len(auto_resolved)} resolved, {len(skipped)} skipped").to_response()
+
+
+# =========================================================================
+# Global collaboration orchestrator
+# =========================================================================
+
+
+@agents_bp.route("/maintenance/orchestrate", methods=["POST"])
+@unified_auth_required
+def orchestrate():
+    """Global collaboration orchestrator: runs the full collaboration
+    maintenance cycle in a single call. Designed to be invoked by an external
+    scheduler (cron) every few minutes to drive the multi-Agent platform
+    without manual per-endpoint triggering.
+
+    Stages (executed in order, each isolated so a failure in one stage does
+    not abort the others):
+      1. Health: mark stale agents offline, expire stale leases, escalate
+         overdue tasks.
+      2. Workflow timeout: mark timed-out steps FAILED and re-advance
+         affected workflows.
+      3. Trigger firing: launch workflow runs for any due triggers.
+      4. Conflict resolution: detect new conflicts and auto-resolve
+         low-severity ones with safe strategies.
+
+    Returns a per-stage summary plus an overall duration.
+    """
+    user = get_current_user()
+    start = datetime.utcnow()
+    report = {
+        "stale_agents": 0,
+        "stale_agent_ids": [],
+        "expired_leases": 0,
+        "escalated_tasks": 0,
+        "escalated_task_ids": [],
+        "timed_out_steps": 0,
+        "triggers_fired": 0,
+        "trigger_run_ids": [],
+        "conflicts_detected": 0,
+        "conflicts_auto_resolved": 0,
+        "conflicts_skipped": 0,
+        "errors": [],
+    }
+
+    # --- Stage 1: health (stale agents, expired leases, overdue escalation) ---
+    try:
+        now = datetime.utcnow()
+        stale_agents = mark_stale_agents_offline(owner_id=user.id)
+        report["stale_agents"] = len(stale_agents)
+        report["stale_agent_ids"] = [a.id for a in stale_agents]
+
+        expired_assignments = TaskAssignment.query.filter(
+            TaskAssignment.state.in_(LEASED_EXECUTION_STATES),
+            TaskAssignment.lease_expires_at.isnot(None),
+            TaskAssignment.lease_expires_at < now,
+        ).join(Task).join(Project).filter(Project.owner_id == user.id).all()
+        for assignment in expired_assignments:
+            assignment.state = TaskAssignmentState.EXPIRED
+            assignment.completed_at = now
+            for run in AgentRun.query.filter_by(
+                assignment_id=assignment.id, status=AgentRunStatus.RUNNING
+            ).all():
+                run.status = AgentRunStatus.EXPIRED
+                run.ended_at = now
+        report["expired_leases"] = len(expired_assignments)
+
+        escalated_ids = _escalate_overdue_tasks(owner_id=user.id)
+        report["escalated_tasks"] = len(escalated_ids)
+        report["escalated_task_ids"] = escalated_ids
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        report["errors"].append(f"health: {str(e)}")
+
+    # --- Stage 2: workflow step timeouts + re-advance ---
+    try:
+        now = datetime.utcnow()
+        running_steps = WorkflowStepRun.query.filter(
+            WorkflowStepRun.status == StepStatus.RUNNING,
+        ).join(WorkflowRun).filter(
+            WorkflowRun.owner_id == user.id,
+            WorkflowRun.status == WorkflowStatus.RUNNING,
+        ).all()
+        timed_out = []
+        for sr in running_steps:
+            wf_run = sr.run
+            if not wf_run or not wf_run.workflow:
+                continue
+            step_def = WorkflowStep.query.filter_by(
+                workflow_id=wf_run.workflow_id, step_key=sr.step_key
+            ).first()
+            step_def = _apply_runtime_overrides(step_def, sr) if step_def else step_def
+            if not step_def or not step_def.timeout_seconds or step_def.timeout_seconds <= 0:
+                continue
+            if sr.started_at:
+                elapsed = (now - sr.started_at).total_seconds()
+                if elapsed > step_def.timeout_seconds:
+                    sr.status = StepStatus.FAILED
+                    sr.error = f"Step timed out after {int(elapsed)}s (limit: {step_def.timeout_seconds}s)"
+                    sr.finished_at = now
+                    try:
+                        if sr.assignment_id:
+                            bound_run = AgentRun.query.filter_by(
+                                assignment_id=sr.assignment_id, status=AgentRunStatus.RUNNING
+                            ).first()
+                            if bound_run:
+                                _maybe_finish_sandboxed_execution(
+                                    bound_run, SandboxExecutionStatus.TIMEOUT,
+                                    error=sr.error,
+                                )
+                    except Exception:
+                        pass
+                    timed_out.append({"run_id": wf_run.id, "step_key": sr.step_key})
+        db.session.commit()
+        # Re-advance affected workflows
+        for run_id in set(t["run_id"] for t in timed_out):
+            wf_run = WorkflowRun.query.get(run_id)
+            if wf_run:
+                _advance_workflow(wf_run)
+        db.session.commit()
+        report["timed_out_steps"] = len(timed_out)
+    except Exception as e:
+        db.session.rollback()
+        report["errors"].append(f"workflow_timeout: {str(e)}")
+
+    # --- Stage 3: fire due triggers (system-wide, same as fire_due_triggers) ---
+    try:
+        now = datetime.utcnow()
+        due_triggers = WorkflowTrigger.query.filter(
+            WorkflowTrigger.is_active == True,
+            WorkflowTrigger.next_fire_at != None,
+            WorkflowTrigger.next_fire_at <= now,
+        ).all()
+        fired_run_ids = []
+        for trigger in due_triggers:
+            workflow = Workflow.query.get(trigger.workflow_id)
+            if not workflow or not workflow.is_active:
+                trigger.is_active = False
+                continue
+            wf_run = WorkflowRun.create(
+                workflow_id=workflow.id,
+                owner_id=trigger.owner_id,
+                project_id=trigger.project_id,
+                root_task_id=trigger.root_task_id,
+                status=WorkflowStatus.PENDING,
+                context=trigger.context_override or {},
+            )
+            db.session.flush()
+            definition = workflow.definition or {}
+            for step_def in definition.get("steps", []):
+                WorkflowStepRun.create(
+                    run_id=wf_run.id,
+                    step_key=step_def.get("step_key", ""),
+                    status=StepStatus.PENDING,
+                )
+            wf_run.status = WorkflowStatus.RUNNING
+            _advance_workflow(wf_run)
+            trigger.fire_count = (trigger.fire_count or 0) + 1
+            trigger.last_fired_at = now
+            if trigger.cron_expr:
+                trigger.next_fire_at = _compute_next_fire(trigger.cron_expr, now)
+            elif trigger.one_shot_at:
+                trigger.is_active = False
+                trigger.next_fire_at = None
+            fired_run_ids.append(wf_run.id)
+            AuditLog.record(
+                action="workflow_trigger.fired", resource_type="workflow_trigger", resource_id=trigger.id,
+                actor_type="system",
+                detail={"workflow_run_id": wf_run.id, "fire_count": trigger.fire_count, "via": "orchestrator"},
+            )
+        db.session.commit()
+        report["triggers_fired"] = len(fired_run_ids)
+        report["trigger_run_ids"] = fired_run_ids
+    except Exception as e:
+        db.session.rollback()
+        report["errors"].append(f"triggers: {str(e)}")
+
+    # --- Stage 4: conflict detection + auto-resolution ---
+    try:
+        now = datetime.utcnow()
+        detected = []
+        detected.extend(_detect_duplicate_claims(user, now))
+        detected.extend(_detect_assignment_stale(user, now))
+        detected.extend(_detect_protocol_deadlock(user, now))
+        for c in detected:
+            db.session.add(c)
+        db.session.flush()
+
+        candidates = AgentConflict.query.filter(
+            AgentConflict.owner_id == user.id,
+            AgentConflict.status == ConflictStatus.DETECTED,
+            AgentConflict.severity != ConflictSeverity.CRITICAL,
+        ).all()
+        auto_resolved = 0
+        skipped = 0
+        for c in candidates:
+            strategy = c.suggested_strategy
+            if strategy is None or strategy not in _AUTO_SAFE_STRATEGIES:
+                skipped += 1
+                continue
+            # Delegate to the model's resolve (no automated side-effects here;
+            # auto_resolve_conflicts endpoint handles side-effects. The
+            # orchestrator records the resolution so humans see the outcome.)
+            c.resolve(strategy, f"Auto-resolved by orchestrator via {strategy.value}",
+                      resolved_by_user_id=user.id)
+            auto_resolved += 1
+        report["conflicts_detected"] = len(detected)
+        report["conflicts_auto_resolved"] = auto_resolved
+        report["conflicts_skipped"] = skipped
+        if detected or auto_resolved:
+            AuditLog.record(
+                action="conflicts.auto_resolve", resource_type="system", resource_id=0,
+                actor_type="system",
+                detail={"detected": len(detected), "auto_resolved": auto_resolved,
+                        "skipped": skipped, "via": "orchestrator"},
+                ip_address=_client_ip(),
+            )
+            _queue_sse(user.id, "conflicts_auto_resolved", {
+                "count": auto_resolved, "via": "orchestrator",
+            })
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        report["errors"].append(f"conflicts: {str(e)}")
+
+    flush_sse_notifications()
+    duration = (datetime.utcnow() - start).total_seconds()
+    AuditLog.record(
+        action="maintenance.orchestrate", resource_type="system", resource_id=0,
+        actor_type="human", actor_user_id=user.id,
+        detail={**{k: v for k, v in report.items() if k != "errors"},
+                "error_count": len(report["errors"]), "duration_seconds": duration},
+        ip_address=_client_ip(),
+    )
+    db.session.commit()
+
+    return ApiResponse.success(
+        {**report, "duration_seconds": round(duration, 3)},
+        f"Orchestration complete: {report['stale_agents']} stale agent(s), "
+        f"{report['timed_out_steps']} timed-out step(s), {report['triggers_fired']} trigger(s) fired, "
+        f"{report['conflicts_auto_resolved']} conflict(s) auto-resolved"
+        + (f", {len(report['errors'])} error(s)" if report["errors"] else ""),
+    ).to_response()
