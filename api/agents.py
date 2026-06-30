@@ -4216,6 +4216,151 @@ def list_audit_logs():
     return ApiResponse.paginated(items, result["pagination"]).to_response()
 
 
+@agents_bp.route("/security/events", methods=["GET"])
+@unified_auth_required
+def list_security_events():
+    """Unified security event log: aggregates sandbox violations, agent
+    conflicts, and security-relevant audit entries (sandbox./conflict./
+    reputation./workflow_step_overridden) into a single time-ordered feed.
+
+    Each event is normalized to:
+      {event_type, occurred_at, severity, agent_id, title, detail,
+       source, source_id, workflow_run_id}
+
+    Filters: agent_id, workflow_run_id, event_type, severity, since (ISO),
+    plus standard pagination.
+    """
+    user = get_current_user()
+    agent_filter = request.args.get("agent_id", type=int)
+    run_filter = request.args.get("workflow_run_id", type=int)
+    event_type_filter = request.args.get("event_type")
+    severity_filter = request.args.get("severity")
+    since_str = request.args.get("since")
+    since = None
+    if since_str:
+        try:
+            since = datetime.fromisoformat(since_str)
+        except (ValueError, TypeError):
+            return ApiResponse.error("Invalid 'since' datetime (use ISO 8601)", 400).to_response()
+
+    events = []
+
+    # 1. Sandbox violations (scoped to this owner via sandbox ownership)
+    vq = SandboxViolation.query.join(
+        AgentSandbox, SandboxViolation.sandbox_id == AgentSandbox.id
+    ).filter(AgentSandbox.owner_id == user.id)
+    if agent_filter:
+        vq = vq.filter(SandboxViolation.agent_id == agent_filter)
+    if severity_filter:
+        # Only CRITICAL severity maps to sandbox violations
+        if severity_filter == "CRITICAL":
+            pass
+        else:
+            vq = vq.filter(False)
+    if since:
+        vq = vq.filter(SandboxViolation.blocked_at >= since)
+    if event_type_filter and event_type_filter != "sandbox_violation":
+        vq = vq.filter(False)
+    for v in vq.order_by(SandboxViolation.blocked_at.desc()).limit(200).all():
+        events.append({
+            "event_type": "sandbox_violation",
+            "occurred_at": v.blocked_at.isoformat() if v.blocked_at else None,
+            "severity": "CRITICAL",
+            "agent_id": v.agent_id,
+            "title": f"Sandbox violation: {v.violation_type.value if v.violation_type else 'unknown'}",
+            "detail": v.detail or v.attempted_action or "",
+            "source": "sandbox_violation",
+            "source_id": v.id,
+            "workflow_run_id": None,
+            "extra": {"violation_type": v.violation_type.value if v.violation_type else None,
+                      "execution_id": v.execution_id, "sandbox_id": v.sandbox_id},
+        })
+
+    # 2. Agent conflicts
+    cq = AgentConflict.query.filter_by(owner_id=user.id)
+    if agent_filter:
+        # agent_ids is a JSON list; filter in Python after fetch for portability
+        pass
+    if run_filter:
+        cq = cq.filter(AgentConflict.workflow_run_id == run_filter)
+    if severity_filter:
+        cq = cq.filter(AgentConflict.severity == severity_filter)
+    if since:
+        cq = cq.filter(AgentConflict.created_at >= since)
+    for c in cq.order_by(AgentConflict.created_at.desc()).limit(200).all():
+        if agent_filter and (not c.agent_ids or agent_filter not in (c.agent_ids or [])):
+            continue
+        if event_type_filter and event_type_filter != "conflict":
+            continue
+        events.append({
+            "event_type": "conflict",
+            "occurred_at": c.created_at.isoformat() if c.created_at else None,
+            "severity": c.severity.value if c.severity else "INFO",
+            "agent_id": (c.agent_ids or [None])[0] if c.agent_ids else None,
+            "title": c.title or c.conflict_type.value if c.conflict_type else "Conflict",
+            "detail": c.description or "",
+            "source": "agent_conflict",
+            "source_id": c.id,
+            "workflow_run_id": c.workflow_run_id,
+            "extra": {"conflict_type": c.conflict_type.value if c.conflict_type else None,
+                      "status": c.status.value if c.status else None,
+                      "suggested_strategy": c.suggested_strategy.value if c.suggested_strategy else None},
+        })
+
+    # 3. Security-relevant audit log entries
+    SECURITY_AUDIT_PREFIXES = ("sandbox.", "conflict.", "reputation.", "workflow_step_overridden")
+    aq = AuditLog.query.filter(
+        or_(
+            AuditLog.actor_user_id == user.id,
+            AuditLog.project_id.in_([p.id for p in Project.query.filter_by(owner_id=user.id).all()]),
+        )
+    )
+    # Prefix filtering (SQLAlchemy .op or startswith depending on dialect; use Python-side for portability)
+    audit_rows = aq.order_by(AuditLog.created_at.desc()).limit(500).all()
+    for a in audit_rows:
+        if not a.action or not any(a.action.startswith(p) for p in SECURITY_AUDIT_PREFIXES):
+            continue
+        if event_type_filter and event_type_filter != "audit":
+            continue
+        if since and a.created_at and a.created_at < since:
+            continue
+        events.append({
+            "event_type": "audit",
+            "occurred_at": a.created_at.isoformat() if a.created_at else None,
+            "severity": "CRITICAL" if "revoke" in (a.action or "").lower() or "violation" in (a.action or "").lower()
+                        else ("WARNING" if "auto_resolve" in (a.action or "") or "override" in (a.action or "") else "INFO"),
+            "agent_id": a.actor_agent_id,
+            "title": a.action or "audit",
+            "detail": (a.detail or "")[:500] if isinstance(a.detail, str) else str(a.detail or "")[:500],
+            "source": "audit_log",
+            "source_id": a.id,
+            "workflow_run_id": None,
+            "extra": {"resource_type": a.resource_type, "resource_id": a.resource_id,
+                      "actor_type": a.actor_type, "actor_user_id": a.actor_user_id},
+        })
+
+    # Merge and sort by occurred_at desc
+    events.sort(key=lambda e: e.get("occurred_at") or "", reverse=True)
+
+    # Pagination (in-memory since merged from multiple sources)
+    page = request.args.get("page", 1, type=int) or 1
+    per_page = request.args.get("per_page", 20, type=int) or 20
+    per_page = max(1, min(100, per_page))
+    total = len(events)
+    start = (page - 1) * per_page
+    page_items = events[start:start + per_page]
+    pagination = {
+        "page": page, "per_page": per_page, "total": total,
+        "total_pages": (total + per_page - 1) // per_page if per_page else 1,
+        "has_prev": page > 1,
+        "has_next": (start + per_page) < total,
+    }
+    return ApiResponse.success(
+        data={"items": page_items, "pagination": pagination},
+        message="Security events",
+    ).to_response()
+
+
 # =========================================================================
 # Health check & auto-recovery
 # =========================================================================
