@@ -4308,7 +4308,7 @@ def list_security_events():
         })
 
     # 3. Security-relevant audit log entries
-    SECURITY_AUDIT_PREFIXES = ("sandbox.", "conflict.", "reputation.", "workflow_step_overridden")
+    SECURITY_AUDIT_PREFIXES = ("sandbox.", "conflict.", "reputation.", "workflow_step_overridden", "workflow_step_override_cleared")
     aq = AuditLog.query.filter(
         or_(
             AuditLog.actor_user_id == user.id,
@@ -8502,6 +8502,12 @@ def instantiate_sandbox_template(template_key):
         return ApiResponse.error(err).to_response()
     sandbox = AgentSandbox(owner_id=user.id, **validated)
     db.session.add(sandbox)
+    AuditLog.record(
+        action="sandbox.template_instantiate", resource_type="agent_sandbox", resource_id=None,
+        actor_type="human", actor_user_id=user.id,
+        detail={"template_key": template_key, "agent_id": fields.get("agent_id"),
+                "security_level": fields.get("security_level")},
+    )
     db.session.commit()
     _queue_sse(user.id, "sandbox_created", {"sandbox_id": sandbox.id, "from_template": template_key})
     flush_sse_notifications()
@@ -8578,6 +8584,11 @@ def update_sandbox(sandbox_id):
     for k, v in fields.items():
         if v is not None or k in ("is_active", "description"):
             setattr(sandbox, k, v)
+    AuditLog.record(
+        action="sandbox.update", resource_type="agent_sandbox", resource_id=sandbox_id,
+        actor_type="human", actor_user_id=user.id,
+        detail={"changed_fields": [k for k, v in fields.items() if v is not None or k in ("is_active", "description")]},
+    )
     db.session.commit()
     return ApiResponse.success(sandbox.to_dict(include_stats=True), "Sandbox updated").to_response()
 
@@ -8595,6 +8606,12 @@ def delete_sandbox(sandbox_id):
     ).count()
     if active:
         return ApiResponse.error(f"Cannot delete: {active} active execution(s) reference this sandbox").to_response()
+    AuditLog.record(
+        action="sandbox.delete", resource_type="agent_sandbox", resource_id=sandbox_id,
+        actor_type="human", actor_user_id=user.id,
+        detail={"name": sandbox.name, "security_level": sandbox.security_level.value if sandbox.security_level else None,
+                "agent_id": sandbox.agent_id},
+    )
     db.session.delete(sandbox)
     db.session.commit()
     return ApiResponse.success({"deleted": True}, "Sandbox deleted").to_response()
@@ -8637,6 +8654,11 @@ def bind_agent_sandbox(agent_id):
     ).update({"is_active": False})
     sandbox.agent_id = agent_id
     sandbox.is_active = True
+    AuditLog.record(
+        action="sandbox.bind", resource_type="agent_sandbox", resource_id=sandbox_id,
+        actor_type="human", actor_user_id=user.id,
+        detail={"agent_id": agent_id, "security_level": sandbox.security_level.value if sandbox.security_level else None},
+    )
     db.session.commit()
     _queue_sse(user.id, "sandbox_bound", {"agent_id": agent_id, "sandbox_id": sandbox_id})
     flush_sse_notifications()
@@ -8809,6 +8831,11 @@ def revoke_sandbox_execution(execution_id):
     if execution.status != SandboxExecutionStatus.RUNNING:
         return ApiResponse.error(f"Execution is not running (status={execution.status.value})").to_response()
     execution.finish(SandboxExecutionStatus.REVOKED, reason="Manually revoked by owner")
+    AuditLog.record(
+        action="sandbox.execution_revoke", resource_type="sandbox_execution", resource_id=execution.id,
+        actor_type="human", actor_user_id=user.id,
+        detail={"sandbox_id": execution.sandbox_id, "agent_id": execution.agent_id},
+    )
     db.session.commit()
     _queue_sse(user.id, "sandbox_execution_revoked", {"execution_id": execution_id})
     flush_sse_notifications()
@@ -8846,6 +8873,12 @@ def report_sandbox_violation(execution_id):
             SandboxExecutionStatus.VIOLATED,
             reason=f"Policy violation: {vtype_enum.value}",
         )
+    AuditLog.record(
+        action="sandbox.violation", resource_type="sandbox_violation", resource_id=v.id,
+        actor_type="human", actor_user_id=user.id,
+        detail={"execution_id": execution_id, "violation_type": vtype_enum.value,
+                "agent_id": execution.agent_id, "terminated": bool(body.get("terminate"))},
+    )
     db.session.commit()
     _queue_sse(user.id, "sandbox_violation", {
         "execution_id": execution_id, "violation_type": vtype_enum.value,
@@ -9002,6 +9035,12 @@ def report_step_sandbox_violation(run_id, step_key):
             r.ended_at = now
             r.error = sr.error
         terminated = True
+    AuditLog.record(
+        action="sandbox.step_violation", resource_type="sandbox_violation", resource_id=v.id,
+        actor_type="human", actor_user_id=user.id, project_id=wf_run.project_id,
+        detail={"run_id": run_id, "step_key": step_key, "violation_type": vtype_enum.value,
+                "agent_id": execution.agent_id, "terminated": terminated},
+    )
     db.session.commit()
     if terminated:
         # Re-advance the workflow so downstream steps / failure handling proceed
@@ -9096,6 +9135,11 @@ def set_step_runtime_override(run_id, step_key):
     else:
         sr.runtime_overrides = validated
 
+    AuditLog.record(
+        action="workflow_step_overridden", resource_type="workflow_step_run", resource_id=sr.id,
+        actor_type="human", actor_user_id=user.id, project_id=wf_run.project_id,
+        detail={"run_id": run_id, "step_key": step_key, "overrides": validated, "merge": merge},
+    )
     db.session.commit()
     _queue_sse(user.id, "workflow_step_overridden", {
         "run_id": run_id, "step_key": step_key, "overrides": validated,
@@ -9125,6 +9169,11 @@ def clear_step_runtime_override(run_id, step_key):
     if not sr:
         return ApiResponse.not_found("Step run not found").to_response()
     sr.runtime_overrides = {}
+    AuditLog.record(
+        action="workflow_step_override_cleared", resource_type="workflow_step_run", resource_id=sr.id,
+        actor_type="human", actor_user_id=user.id, project_id=wf_run.project_id,
+        detail={"run_id": run_id, "step_key": step_key},
+    )
     db.session.commit()
     effective = {}
     for k in _RUNTIME_OVERRIDABLE_KEYS:
@@ -9387,6 +9436,11 @@ def ignore_conflict(conflict_id):
     c.resolution = "Dismissed by owner"
     c.resolved_at = datetime.utcnow()
     c.resolved_by_user_id = user.id
+    AuditLog.record(
+        action="conflict.ignore", resource_type="agent_conflict", resource_id=c.id,
+        actor_type="human", actor_user_id=user.id,
+        detail={"conflict_type": c.conflict_type.value if c.conflict_type else None},
+    )
     db.session.commit()
     return ApiResponse.success({"conflict": c.to_dict()}, "Conflict ignored").to_response()
 
@@ -9464,6 +9518,12 @@ def resolve_conflict(conflict_id):
                 actions.append(f"expired stale assignment #{a.id}")
 
     c.resolve(strategy, body.get("description") or "; ".join(actions) or "Resolved manually", resolved_by_user_id=user.id)
+    AuditLog.record(
+        action="conflict.resolve", resource_type="agent_conflict", resource_id=c.id,
+        actor_type="human", actor_user_id=user.id,
+        detail={"strategy": strategy.value, "conflict_type": c.conflict_type.value if c.conflict_type else None,
+                "actions": actions},
+    )
     db.session.commit()
     _queue_sse(user.id, "conflict_resolved", {"conflict_id": conflict_id, "strategy": strategy.value})
     flush_sse_notifications()

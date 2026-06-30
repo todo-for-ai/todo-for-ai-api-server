@@ -1588,6 +1588,20 @@ class AgentReputation(BaseModel):
         rep.quality_score = max(0, min(100, rep.quality_score + quality_delta))
         rep.score = max(0, min(100, rep.score + score_delta))
         db.session.flush()
+        # Audit reputation-impacting outcomes (failures and quality deltas) so the
+        # unified security event feed can surface them. Success-only updates are
+        # too frequent and low-signal to audit individually.
+        if not success or quality_delta != 0:
+            try:
+                AuditLog.record(
+                    action="reputation.update", resource_type="agent", resource_id=agent_id,
+                    actor_type="system", actor_agent_id=agent_id,
+                    detail={"success": success, "score_delta": score_delta,
+                            "quality_delta": quality_delta, "new_score": rep.score,
+                            "total_tasks": rep.total_tasks},
+                )
+            except Exception:
+                pass  # Never fail the reputation update on an audit error
         return rep
 
 
