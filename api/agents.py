@@ -8117,6 +8117,135 @@ def _sandbox_body(body, partial=False):
     return fields, None
 
 
+# ---------------------------------------------------------------------------
+# Preset sandbox policy templates (Increment 90)
+# ---------------------------------------------------------------------------
+
+SANDBOX_TEMPLATES = [
+    {
+        "key": "read_only_research",
+        "name": "只读研究",
+        "description": "严格隔离：无网络、无写盘、仅允许只读工具。适合信息检索与分析类任务。",
+        "security_level": "strict",
+        "allowed_tools": ["search", "read_file", "list_files"],
+        "blocked_tools": [],
+        "allowed_network_hosts": [],
+        "fs_write_paths": [],
+        "fs_read_paths": [],
+        "max_memory_mb": 256,
+        "max_cpu_seconds": 120,
+        "max_output_tokens": 8000,
+        "timeout_seconds": 300,
+    },
+    {
+        "key": "code_generation",
+        "name": "代码生成",
+        "description": "中等隔离：受限网络（仅文档站）、范围写盘、允许代码生成工具。适合编码类任务。",
+        "security_level": "moderate",
+        "allowed_tools": ["read_file", "write_file", "run_tests", "search"],
+        "blocked_tools": ["delete_file", "execute_shell"],
+        "allowed_network_hosts": ["docs.python.org", "developer.mozilla.org", "registry.npmjs.org"],
+        "fs_write_paths": ["/tmp/work", "/workspace/src"],
+        "fs_read_paths": ["/workspace", "/data/in"],
+        "max_memory_mb": 512,
+        "max_cpu_seconds": 600,
+        "max_output_tokens": 16000,
+        "timeout_seconds": 900,
+    },
+    {
+        "key": "data_analysis",
+        "name": "数据分析",
+        "description": "中等隔离：允许读取数据源、写入输出目录、网络访问数据 API。适合数据处理任务。",
+        "security_level": "moderate",
+        "allowed_tools": ["read_file", "write_file", "query_database", "http_get"],
+        "blocked_tools": ["execute_shell", "delete_file"],
+        "allowed_network_hosts": ["api.data.example.com"],
+        "fs_write_paths": ["/data/out", "/tmp/analysis"],
+        "fs_read_paths": ["/data"],
+        "max_memory_mb": 1024,
+        "max_cpu_seconds": 1800,
+        "max_output_tokens": 32000,
+        "timeout_seconds": 1800,
+    },
+    {
+        "key": "full_autonomy",
+        "name": "完全自主",
+        "description": "宽松隔离：全网络、全盘、仅黑名单危险工具。适合受信任的自主执行场景。",
+        "security_level": "permissive",
+        "allowed_tools": [],
+        "blocked_tools": ["rm_rf", "format_disk", "shutdown"],
+        "allowed_network_hosts": [],
+        "fs_write_paths": [],
+        "fs_read_paths": [],
+        "max_memory_mb": 2048,
+        "max_cpu_seconds": 3600,
+        "max_output_tokens": 64000,
+        "timeout_seconds": 3600,
+    },
+    {
+        "key": "sandboxed_review",
+        "name": "沙盒评审",
+        "description": "严格隔离：无网络无写盘，仅允许读取和评审工具，短超时。适合代码/文档评审。",
+        "security_level": "strict",
+        "allowed_tools": ["read_file", "list_files", "comment"],
+        "blocked_tools": [],
+        "allowed_network_hosts": [],
+        "fs_write_paths": [],
+        "fs_read_paths": ["/workspace"],
+        "max_memory_mb": 128,
+        "max_cpu_seconds": 60,
+        "max_output_tokens": 4000,
+        "timeout_seconds": 180,
+    },
+]
+
+
+@agents_bp.route("/sandbox-templates", methods=["GET"])
+@unified_auth_required
+def list_sandbox_templates():
+    """List preset sandbox policy templates."""
+    return ApiResponse.success({"templates": SANDBOX_TEMPLATES}).to_response()
+
+
+@agents_bp.route("/sandbox-templates/<template_key>/instantiate", methods=["POST"])
+@unified_auth_required
+def instantiate_sandbox_template(template_key):
+    """Create a sandbox policy from a preset template.
+
+    Body (optional): { name?, agent_id?, overrides?: {...} }
+    """
+    user = get_current_user()
+    template = next((t for t in SANDBOX_TEMPLATES if t["key"] == template_key), None)
+    if not template:
+        return ApiResponse.not_found("Sandbox template not found").to_response()
+    body = validate_json_request() or {}
+    overrides = body.get("overrides") or {}
+    # Merge template with overrides
+    fields = {k: v for k, v in template.items() if k != "key"}
+    fields["name"] = body.get("name") or f"{template['name']} (副本)"
+    if body.get("agent_id") is not None:
+        fields["agent_id"] = body.get("agent_id")
+        agent = Agent.query.get(fields["agent_id"])
+        if not agent or agent.owner_id != user.id:
+            return ApiResponse.error("Agent not found or not owned by you").to_response()
+    else:
+        fields["agent_id"] = None
+    # Apply overrides for overridable fields
+    for k in ("allowed_tools", "blocked_tools", "allowed_network_hosts", "fs_write_paths", "fs_read_paths",
+              "max_memory_mb", "max_cpu_seconds", "max_output_tokens", "timeout_seconds", "security_level", "description"):
+        if k in overrides and overrides[k] is not None:
+            fields[k] = overrides[k]
+    validated, err = _sandbox_body(fields)
+    if err:
+        return ApiResponse.error(err).to_response()
+    sandbox = AgentSandbox(owner_id=user.id, **validated)
+    db.session.add(sandbox)
+    db.session.commit()
+    _queue_sse(user.id, "sandbox_created", {"sandbox_id": sandbox.id, "from_template": template_key})
+    flush_sse_notifications()
+    return ApiResponse.success(sandbox.to_dict(include_stats=True), f"Sandbox created from template '{template['name']}'").to_response()
+
+
 @agents_bp.route("/sandboxes", methods=["GET"])
 @unified_auth_required
 def list_sandboxes():
@@ -9108,3 +9237,102 @@ def conflicts_dashboard():
         "by_status": by_status,
         "by_severity": by_severity,
     }).to_response()
+
+
+# Strategies considered safe to apply automatically (low-risk, reversible).
+_AUTO_SAFE_STRATEGIES = {
+    ConflictResolutionStrategy.AUTO_RETRY,
+    ConflictResolutionStrategy.LEAST_LOADED,
+}
+
+
+@agents_bp.route("/maintenance/auto-resolve-conflicts", methods=["POST"])
+@unified_auth_required
+def auto_resolve_conflicts():
+    """Maintenance endpoint: scan for conflicts and auto-resolve low-severity
+    ones using their suggested strategy, when that strategy is in the safe set.
+
+    CRITICAL conflicts are never auto-resolved — they require human judgement.
+    Returns counts of scanned / auto-resolved / skipped.
+    """
+    user = get_current_user()
+    now = datetime.utcnow()
+    # Run detection first to surface any new conflicts
+    detected = []
+    detected.extend(_detect_duplicate_claims(user, now))
+    detected.extend(_detect_assignment_stale(user, now))
+    detected.extend(_detect_protocol_deadlock(user, now))
+    for c in detected:
+        db.session.add(c)
+    db.session.flush()
+
+    # Collect all DETECTED conflicts eligible for auto-resolution
+    candidates = AgentConflict.query.filter(
+        AgentConflict.owner_id == user.id,
+        AgentConflict.status == ConflictStatus.DETECTED,
+        AgentConflict.severity != ConflictSeverity.CRITICAL,
+    ).all()
+
+    auto_resolved = []
+    skipped = []
+    for c in candidates:
+        strategy = c.suggested_strategy
+        if strategy is None or strategy not in _AUTO_SAFE_STRATEGIES:
+            skipped.append({"conflict_id": c.id, "reason": "no safe suggested strategy", "suggested": strategy.value if strategy else None})
+            continue
+        actions = []
+        # Apply the same side-effects as the manual resolve endpoint
+        if c.conflict_type == ConflictType.DUPLICATE_CLAIM and c.task_id:
+            assignments = TaskAssignment.query.filter_by(task_id=c.task_id).filter(
+                TaskAssignment.state.in_(ACTIVE_ASSIGNMENT_STATES)
+            ).order_by(TaskAssignment.created_at.asc()).all()
+            if strategy == ConflictResolutionStrategy.LEAST_LOADED and assignments:
+                best = None
+                least = None
+                for a in assignments:
+                    cnt = TaskAssignment.query.filter(
+                        TaskAssignment.agent_id == a.agent_id,
+                        TaskAssignment.state.in_(ACTIVE_ASSIGNMENT_STATES),
+                    ).count()
+                    if least is None or cnt < least:
+                        least = cnt
+                        best = a
+                if best:
+                    for a in assignments:
+                        if a.id != best.id:
+                            a.state = TaskAssignmentState.CANCELLED
+                            a.completed_at = now
+                            actions.append(f"auto-cancelled assignment #{a.id}")
+        elif c.conflict_type == ConflictType.ASSIGNMENT_STALE and c.task_id:
+            if strategy == ConflictResolutionStrategy.AUTO_RETRY:
+                stale = TaskAssignment.query.filter_by(task_id=c.task_id).filter(
+                    TaskAssignment.state.in_(LEASED_EXECUTION_STATES),
+                    TaskAssignment.lease_expires_at.isnot(None),
+                    TaskAssignment.lease_expires_at < now,
+                ).all()
+                for a in stale:
+                    a.state = TaskAssignmentState.EXPIRED
+                    a.completed_at = now
+                    actions.append(f"auto-expired stale assignment #{a.id}")
+        c.resolve(strategy, "Auto-resolved by maintenance scan" + (f": {' '.join(actions)}" if actions else ""), resolved_by_user_id=None)
+        auto_resolved.append({"conflict_id": c.id, "strategy": strategy.value, "actions": actions})
+
+    db.session.commit()
+    if auto_resolved:
+        _queue_sse(user.id, "conflicts_auto_resolved", {"count": len(auto_resolved)})
+        flush_sse_notifications()
+        AuditLog.record(
+            action="conflicts.auto_resolve",
+            resource_type="system",
+            resource_id=0,
+            actor_type="system",
+            detail={"detected": len(detected), "auto_resolved": len(auto_resolved), "skipped": len(skipped)},
+            ip_address=_client_ip(),
+        )
+    return ApiResponse.success({
+        "detected": len(detected),
+        "auto_resolved": len(auto_resolved),
+        "skipped": len(skipped),
+        "resolved_details": auto_resolved,
+        "skipped_details": skipped,
+    }, f"Auto-resolve: {len(auto_resolved)} resolved, {len(skipped)} skipped").to_response()
