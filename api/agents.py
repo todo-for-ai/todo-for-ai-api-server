@@ -4404,11 +4404,13 @@ def _collect_security_events(user, args):
 @agents_bp.route("/security/events/export", methods=["GET"])
 @unified_auth_required
 def export_security_events():
-    """Export the unified security event log as CSV.
+    """Export the unified security event log as CSV or JSON.
 
     Accepts the same filters as GET /security/events (agent_id,
-    workflow_run_id, event_type, severity, since, until). Up to 1000 rows.
-    Returns a text/csv attachment.
+    workflow_run_id, event_type, severity, since, until, search) plus
+    `format` (csv | json, default csv). Up to 1000 rows.
+    CSV returns a text/csv attachment; JSON returns a JSON array attachment
+    (each item is the full normalized event object, including `extra`).
     """
     user = get_current_user()
     events, err = _collect_security_events(user, request.args)
@@ -4417,6 +4419,20 @@ def export_security_events():
 
     # Cap export volume
     export_rows = events[:1000]
+    fmt = (request.args.get("format") or "csv").lower()
+
+    if fmt == "json":
+        # Return the full normalized event objects for programmatic consumers.
+        payload = io.StringIO()
+        import json as _json
+        _json.dump(export_rows, payload, ensure_ascii=False, default=str)
+        resp = make_response(payload.getvalue())
+        resp.headers["Content-Type"] = "application/json; charset=utf-8"
+        resp.headers["Content-Disposition"] = (
+            'attachment; filename="security_events.json"'
+        )
+        return resp
+
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow([
