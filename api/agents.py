@@ -9942,6 +9942,84 @@ def orchestrator_history():
     }, "Orchestrator history").to_response()
 
 
+@agents_bp.route("/maintenance/orchestrator/daily-trend", methods=["GET"])
+@unified_auth_required
+def orchestrator_daily_trend():
+    """Daily aggregation of orchestration runs for trend visualization.
+
+    Buckets OrchestrationRun records by the date portion of created_at,
+    aligned with the security events daily-trend time dimension so the two
+    can be rendered on a unified timeline. Optional filters: triggered_by
+    (manual|scheduler), since, until (ISO date/datetime, inclusive).
+    Returns:
+      {
+        days: [{date, runs, manual_runs, scheduler_runs, triggers_fired,
+                conflicts_resolved, errors, avg_duration}],
+        totals: {runs, manual_runs, scheduler_runs, triggers_fired,
+                 conflicts_resolved, errors}
+      }
+    """
+    user = get_current_user()
+    q = OrchestrationRun.query.filter_by(owner_id=user.id)
+    tb = request.args.get("triggered_by")
+    if tb in ("manual", "scheduler"):
+        q = q.filter(OrchestrationRun.triggered_by == tb)
+    since = request.args.get("since")
+    if since:
+        q = q.filter(OrchestrationRun.created_at >= since)
+    until = request.args.get("until")
+    if until:
+        q = q.filter(OrchestrationRun.created_at <= until)
+    runs = q.order_by(OrchestrationRun.created_at.desc()).limit(1000).all()
+
+    buckets = {}  # date -> accumulators
+    for r in runs:
+        ts = (r.created_at.isoformat() if r.created_at else "")
+        day = ts[:10] if len(ts) >= 10 else None
+        if not day:
+            continue
+        b = buckets.setdefault(day, {
+            "runs": 0, "manual_runs": 0, "scheduler_runs": 0,
+            "triggers_fired": 0, "conflicts_resolved": 0, "errors": 0,
+            "duration_sum": 0.0,
+        })
+        b["runs"] += 1
+        if r.triggered_by == "manual":
+            b["manual_runs"] += 1
+        elif r.triggered_by == "scheduler":
+            b["scheduler_runs"] += 1
+        b["triggers_fired"] += r.triggers_fired or 0
+        b["conflicts_resolved"] += r.conflicts_auto_resolved or 0
+        b["errors"] += r.error_count or 0
+        b["duration_sum"] += r.duration_seconds or 0.0
+
+    sorted_days = sorted(buckets.items(), key=lambda kv: kv[0])
+    days = []
+    for d, b in sorted_days:
+        days.append({
+            "date": d,
+            "runs": b["runs"],
+            "manual_runs": b["manual_runs"],
+            "scheduler_runs": b["scheduler_runs"],
+            "triggers_fired": b["triggers_fired"],
+            "conflicts_resolved": b["conflicts_resolved"],
+            "errors": b["errors"],
+            "avg_duration": round(b["duration_sum"] / b["runs"], 3) if b["runs"] else 0,
+        })
+    totals = {
+        "runs": sum(d["runs"] for d in days),
+        "manual_runs": sum(d["manual_runs"] for d in days),
+        "scheduler_runs": sum(d["scheduler_runs"] for d in days),
+        "triggers_fired": sum(d["triggers_fired"] for d in days),
+        "conflicts_resolved": sum(d["conflicts_resolved"] for d in days),
+        "errors": sum(d["errors"] for d in days),
+    }
+    return ApiResponse.success(
+        data={"days": days, "totals": totals},
+        message="Orchestrator daily trend",
+    ).to_response()
+
+
 def _run_orchestration(user, actor_type="human"):
     """Core orchestration logic, reusable by both the HTTP endpoint and the
     built-in background scheduler. Returns (report_dict, duration_seconds, message).
