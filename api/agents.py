@@ -4509,6 +4509,60 @@ def security_events_daily_trend():
     ).to_response()
 
 
+@agents_bp.route("/security/events/by-agent", methods=["GET"])
+@unified_auth_required
+def security_events_by_agent():
+    """Per-agent aggregation of security events for ranking.
+
+    Reuses _collect_security_events with the same filters. Buckets events
+    by agent_id (events without an agent_id fall under agent_id=null).
+    Returns agents: [{agent_id, name, total, sandbox_violation, conflict,
+    audit, critical, warning, info}] sorted by total desc (top 50).
+    """
+    user = get_current_user()
+    events, err = _collect_security_events(user, request.args)
+    if err is not None:
+        return err
+
+    buckets = {}  # agent_id -> counts
+    for e in events[:1000]:
+        aid = e.get("agent_id")
+        key = aid if aid is not None else 0  # 0 = "no agent"
+        b = buckets.setdefault(key, {
+            "agent_id": aid,
+            "total": 0,
+            "sandbox_violation": 0, "conflict": 0, "audit": 0,
+            "CRITICAL": 0, "WARNING": 0, "INFO": 0,
+        })
+        b["total"] += 1
+        etype = e.get("event_type") or "audit"
+        if etype in ("sandbox_violation", "conflict", "audit"):
+            b[etype] += 1
+        else:
+            b["audit"] += 1
+        sev = e.get("severity") or "INFO"
+        if sev in ("CRITICAL", "WARNING", "INFO"):
+            b[sev] += 1
+        else:
+            b["INFO"] += 1
+
+    # Resolve agent names (best-effort, single query for known ids)
+    known_ids = [k for k in buckets.keys() if k != 0]
+    name_map = {}
+    if known_ids:
+        for a in Agent.query.filter(Agent.id.in_(known_ids)).all():
+            name_map[a.id] = a.name
+
+    ranked = sorted(buckets.values(), key=lambda b: b["total"], reverse=True)[:50]
+    for b in ranked:
+        b["name"] = name_map.get(b["agent_id"]) if b["agent_id"] else "(无 Agent)"
+
+    return ApiResponse.success(
+        data={"agents": ranked},
+        message="Security events by agent",
+    ).to_response()
+
+
 # =========================================================================
 # Health check & auto-recovery
 # =========================================================================
