@@ -9889,6 +9889,11 @@ def orchestrate():
     """
     user = get_current_user()
     report, duration, message = _run_orchestration(user, actor_type="human")
+    try:
+        from core.orchestrator_scheduler import record_last_run
+        record_last_run(report, duration, message)
+    except Exception:
+        pass  # best-effort: status endpoint is non-critical
     return ApiResponse.success(
         {**report, "duration_seconds": round(duration, 3)},
         message,

@@ -33,17 +33,7 @@ def _orchestration_loop(app, user_id, interval):
                     logger.warning("[ORCHESTRATOR] Configured user not found (id=%s); skipping cycle", user_id)
                     continue
                 report, duration, message = _run_orchestration(user, actor_type="system")
-                global _last_run
-                _last_run = {
-                    "summary": message,
-                    "duration_seconds": round(duration, 3),
-                    "stale_agents": report.get("stale_agents", 0),
-                    "timed_out_steps": report.get("timed_out_steps", 0),
-                    "triggers_fired": report.get("triggers_fired", 0),
-                    "trigger_run_ids": report.get("trigger_run_ids", []),
-                    "conflicts_auto_resolved": report.get("conflicts_auto_resolved", 0),
-                    "error_count": len(report.get("errors", [])),
-                }
+                record_last_run(report, duration, message)
                 logger.info("[ORCHESTRATOR] %s", message)
         except Exception as e:
             logger.exception("[ORCHESTRATOR] Cycle failed: %s", e)
@@ -86,6 +76,23 @@ def stop_scheduler():
     if thread and thread.is_alive():
         thread.join(timeout=5)
     _scheduler_thread = None
+
+
+def record_last_run(report, duration, message):
+    """Persist the last orchestration cycle summary so /orchestrator/status
+    can report it. Shared by the background scheduler loop and the manual
+    HTTP orchestrate endpoint."""
+    global _last_run
+    _last_run = {
+        "summary": message,
+        "duration_seconds": round(duration, 3),
+        "stale_agents": report.get("stale_agents", 0),
+        "timed_out_steps": report.get("timed_out_steps", 0),
+        "triggers_fired": report.get("triggers_fired", 0),
+        "trigger_run_ids": report.get("trigger_run_ids", []),
+        "conflicts_auto_resolved": report.get("conflicts_auto_resolved", 0),
+        "error_count": len(report.get("errors", [])),
+    }
 
 
 def scheduler_status():
