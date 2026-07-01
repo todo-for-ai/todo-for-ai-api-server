@@ -40,6 +40,7 @@ def _orchestration_loop(app, user_id, interval):
                     "stale_agents": report.get("stale_agents", 0),
                     "timed_out_steps": report.get("timed_out_steps", 0),
                     "triggers_fired": report.get("triggers_fired", 0),
+                    "trigger_run_ids": report.get("trigger_run_ids", []),
                     "conflicts_auto_resolved": report.get("conflicts_auto_resolved", 0),
                     "error_count": len(report.get("errors", [])),
                 }
