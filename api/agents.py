@@ -5874,6 +5874,73 @@ def get_agent_messages(agent_id):
         return ApiResponse.error(f"Failed to retrieve messages: {str(e)}", 500).to_response()
 
 
+@agents_bp.route("/<int:agent_id>/collaborators", methods=["GET"])
+@unified_auth_required
+def get_agent_collaborators(agent_id):
+    """Aggregate the Agent's collaboration partners from direct-message
+    audit logs. Returns the top partners this Agent has exchanged messages
+    with (as either sender or receiver), with counts.
+
+    Query params: limit (default 10, max 50).
+    Returns: { collaborators: [{agent_id, name, sent, received, total}] }
+    """
+    user = get_current_user()
+    agent = Agent.query.filter_by(id=agent_id, owner_id=user.id).first()
+    if not agent:
+        return ApiResponse.not_found("Agent not found").to_response()
+    try:
+        limit = max(1, min(50, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+
+    # AuditLog rows where this agent is the sender (actor_agent_id) or the
+    # receiver (resource_id) of an agent.direct_message action.
+    sent_rows = AuditLog.query.filter(
+        AuditLog.action == "agent.direct_message",
+        AuditLog.actor_agent_id == agent_id,
+        AuditLog.actor_user_id == user.id,
+    ).all()
+    recv_rows = AuditLog.query.filter(
+        AuditLog.action == "agent.direct_message",
+        AuditLog.resource_type == "agent",
+        AuditLog.resource_id == agent_id,
+        AuditLog.actor_user_id == user.id,
+    ).all()
+
+    counts = {}  # partner_id -> {sent, received}
+    for r in sent_rows:
+        pid = r.resource_id
+        if pid is None or pid == agent_id:
+            continue
+        counts.setdefault(pid, {"sent": 0, "received": 0})["sent"] += 1
+    for r in recv_rows:
+        pid = r.actor_agent_id
+        if pid is None or pid == agent_id:
+            continue
+        counts.setdefault(pid, {"sent": 0, "received": 0})["received"] += 1
+
+    partner_ids = list(counts.keys())
+    partners = {a.id: a.name for a in Agent.query.filter(Agent.id.in_(partner_ids)).all()} if partner_ids else {}
+
+    collaborators = [
+        {
+            "agent_id": pid,
+            "name": partners.get(pid, f"Agent#{pid}"),
+            "sent": c["sent"],
+            "received": c["received"],
+            "total": c["sent"] + c["received"],
+        }
+        for pid, c in counts.items()
+    ]
+    collaborators.sort(key=lambda x: x["total"], reverse=True)
+    collaborators = collaborators[:limit]
+
+    return ApiResponse.success(
+        data={"collaborators": collaborators, "total_partners": len(counts)},
+        message="Agent collaborators",
+    ).to_response()
+
+
 # ---------------------------------------------------------------------------
 # Workflow Template Marketplace
 # ---------------------------------------------------------------------------
