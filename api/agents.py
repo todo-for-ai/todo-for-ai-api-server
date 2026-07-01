@@ -4446,6 +4446,53 @@ def export_security_events():
     return resp
 
 
+@agents_bp.route("/security/events/daily-trend", methods=["GET"])
+@unified_auth_required
+def security_events_daily_trend():
+    """Daily aggregation of security events for trend visualization.
+
+    Reuses _collect_security_events with the same filters (agent_id,
+    workflow_run_id, event_type, severity, since, until, search), then
+    buckets events by the date portion of occurred_at. Returns:
+      {
+        days: [{date, sandbox_violation, conflict, audit, total}],
+        totals: {sandbox_violation, conflict, audit, total}
+      }
+    """
+    user = get_current_user()
+    events, err = _collect_security_events(user, request.args)
+    if err is not None:
+        return err
+
+    buckets = {}  # date -> {sandbox_violation, conflict, audit}
+    for e in events[:1000]:
+        ts = e.get("occurred_at") or ""
+        # occurred_at is ISO; date is the first 10 chars (YYYY-MM-DD)
+        day = ts[:10] if len(ts) >= 10 else None
+        if not day:
+            continue
+        etype = e.get("event_type") or "audit"
+        b = buckets.setdefault(day, {"sandbox_violation": 0, "conflict": 0, "audit": 0})
+        if etype in b:
+            b[etype] += 1
+        else:
+            b["audit"] += 1
+
+    # Sort by date ascending
+    sorted_days = sorted(buckets.items(), key=lambda kv: kv[0])
+    days = [{"date": d, **counts, "total": sum(counts.values())} for d, counts in sorted_days]
+    totals = {
+        "sandbox_violation": sum(d["sandbox_violation"] for d in days),
+        "conflict": sum(d["conflict"] for d in days),
+        "audit": sum(d["audit"] for d in days),
+        "total": sum(d["total"] for d in days),
+    }
+    return ApiResponse.success(
+        data={"days": days, "totals": totals},
+        message="Security events daily trend",
+    ).to_response()
+
+
 # =========================================================================
 # Health check & auto-recovery
 # =========================================================================
