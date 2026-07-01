@@ -5945,12 +5945,16 @@ def get_agent_collaborators(agent_id):
 @unified_auth_required
 def collaboration_graph():
     """Platform-wide Agent collaboration graph derived from direct-message
-    audit logs. Returns nodes (agents) and edges (undirected message pairs
-    with counts), suitable for a force/radial graph visualization.
+    audit logs. Returns nodes (agents) and edges (message pairs with counts
+    and directional breakdown), suitable for a force/radial graph
+    visualization.
 
     Query params: limit (default 50, max 200) caps edges returned (top by
-    count). Nodes include only Agents that appear in the top edges.
-    Returns: { nodes: [{id, name, kind, messages}], edges: [{source, target, count}] }
+    count); since/until (ISO date/datetime, inclusive) filter the audit
+    window. Nodes include only Agents that appear in the top edges.
+    Returns: { nodes: [{id, name, kind, messages}],
+               edges: [{source, target, count, source_to_target, target_to_source}],
+               total_edges }
     """
     user = get_current_user()
     try:
@@ -5958,29 +5962,49 @@ def collaboration_graph():
     except (TypeError, ValueError):
         limit = 50
 
-    rows = AuditLog.query.filter(
+    q = AuditLog.query.filter(
         AuditLog.action == "agent.direct_message",
         AuditLog.resource_type == "agent",
         AuditLog.actor_user_id == user.id,
         AuditLog.actor_agent_id.isnot(None),
-    ).all()
+    )
+    since = request.args.get("since")
+    if since:
+        q = q.filter(AuditLog.created_at >= since)
+    until = request.args.get("until")
+    if until:
+        q = q.filter(AuditLog.created_at <= until)
+    rows = q.all()
 
-    # Undirected edge counts: (min_id, max_id) -> count
+    # Undirected edge counts with directional breakdown.
+    # edge_map[key] = {"total": N, "fwd": count(min->max), "rev": count(max->min)}
     edge_map = {}
     for r in rows:
         a, b = r.actor_agent_id, r.resource_id
         if a is None or b is None or a == b:
             continue
         key = (a, b) if a < b else (b, a)
-        edge_map[key] = edge_map.get(key, 0) + 1
+        entry = edge_map.setdefault(key, {"total": 0, "fwd": 0, "rev": 0})
+        entry["total"] += 1
+        # 正向：actor 是较小 id；反向：actor 是较大 id
+        if r.actor_agent_id == key[0]:
+            entry["fwd"] += 1
+        else:
+            entry["rev"] += 1
 
-    edges_sorted = sorted(edge_map.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    edges_sorted = sorted(edge_map.items(), key=lambda kv: kv[1]["total"], reverse=True)[:limit]
     node_ids = set()
     edges = []
-    for (a, b), cnt in edges_sorted:
+    for (a, b), entry in edges_sorted:
         node_ids.add(a)
         node_ids.add(b)
-        edges.append({"source": a, "target": b, "count": cnt})
+        edges.append({
+            "source": a,
+            "target": b,
+            "count": entry["total"],
+            "source_to_target": entry["fwd"],
+            "target_to_source": entry["rev"],
+        })
 
     agents = Agent.query.filter(Agent.id.in_(list(node_ids))).all() if node_ids else []
     # Per-node total messages (degree sum)
