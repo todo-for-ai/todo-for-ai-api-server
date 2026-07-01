@@ -2047,3 +2047,61 @@ class AgentConflict(BaseModel):
         self.resolution = description
         self.resolved_at = datetime.utcnow()
         self.resolved_by_user_id = resolved_by_user_id
+
+
+class OrchestrationRun(BaseModel):
+    """Historical record of a single global orchestration cycle.
+
+    Written by the orchestrator (both the HTTP endpoint and the built-in
+    scheduler) so operators can review trends over time — stale agent counts,
+    timed-out steps, triggered runs, auto-resolved conflicts, duration, errors.
+    """
+    __tablename__ = "agent_orchestration_runs"
+
+    owner_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    triggered_by = db.Column(db.String(32), nullable=False)  # "manual" | "scheduler"
+    stale_agents = db.Column(db.Integer, default=0)
+    expired_leases = db.Column(db.Integer, default=0)
+    escalated_tasks = db.Column(db.Integer, default=0)
+    timed_out_steps = db.Column(db.Integer, default=0)
+    triggers_fired = db.Column(db.Integer, default=0)
+    trigger_run_ids = db.Column(db.JSON, default=list)
+    conflicts_detected = db.Column(db.Integer, default=0)
+    conflicts_auto_resolved = db.Column(db.Integer, default=0)
+    conflicts_skipped = db.Column(db.Integer, default=0)
+    error_count = db.Column(db.Integer, default=0)
+    error_details = db.Column(db.JSON, default=list)
+    duration_seconds = db.Column(db.Float, default=0.0)
+    summary = db.Column(db.Text)
+
+    owner = db.relationship("User", backref="orchestration_runs")
+
+    def to_dict(self):
+        result = super().to_dict()
+        result["trigger_run_ids"] = self.trigger_run_ids or []
+        result["error_details"] = self.error_details or []
+        return result
+
+    @classmethod
+    def record(cls, owner_id, triggered_by, report, duration, summary):
+        """Persist one orchestration cycle. Returns the created row."""
+        entry = cls(
+            owner_id=owner_id,
+            triggered_by=triggered_by,
+            stale_agents=report.get("stale_agents", 0),
+            expired_leases=report.get("expired_leases", 0),
+            escalated_tasks=report.get("escalated_tasks", 0),
+            timed_out_steps=report.get("timed_out_steps", 0),
+            triggers_fired=report.get("triggers_fired", 0),
+            trigger_run_ids=report.get("trigger_run_ids", []),
+            conflicts_detected=report.get("conflicts_detected", 0),
+            conflicts_auto_resolved=report.get("conflicts_auto_resolved", 0),
+            conflicts_skipped=report.get("conflicts_skipped", 0),
+            error_count=len(report.get("errors", [])),
+            error_details=report.get("errors", []),
+            duration_seconds=round(duration, 3),
+            summary=summary,
+        )
+        db.session.add(entry)
+        db.session.flush()
+        return entry

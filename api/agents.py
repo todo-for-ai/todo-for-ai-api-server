@@ -61,6 +61,7 @@ from models.agent import (
     ConflictSeverity,
     ConflictStatus,
     ConflictResolutionStrategy,
+    OrchestrationRun,
     HUMAN_BLOCKING_ASSIGNMENT_STATES,
     LEASED_EXECUTION_STATES,
     mark_stale_agents_offline,
@@ -9706,6 +9707,40 @@ def orchestrator_status():
     return ApiResponse.success(status, "Orchestrator status").to_response()
 
 
+@agents_bp.route("/maintenance/orchestrator/history", methods=["GET"])
+@unified_auth_required
+def orchestrator_history():
+    """Return recent orchestration run records for trend analysis.
+
+    Query params: limit (default 20, max 100), triggered_by (manual|scheduler).
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(100, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        limit = 20
+    q = OrchestrationRun.query.filter_by(owner_id=user.id)
+    tb = request.args.get("triggered_by")
+    if tb in ("manual", "scheduler"):
+        q = q.filter(OrchestrationRun.triggered_by == tb)
+    runs = q.order_by(OrchestrationRun.created_at.desc()).limit(limit).all()
+    # Trend aggregates
+    items = [r.to_dict() for r in runs]
+    return ApiResponse.success({
+        "items": items,
+        "count": len(items),
+        "trend": {
+            "total_runs": len(items),
+            "manual_runs": sum(1 for i in items if i.get("triggered_by") == "manual"),
+            "scheduler_runs": sum(1 for i in items if i.get("triggered_by") == "scheduler"),
+            "avg_duration": round(sum(i.get("duration_seconds", 0) for i in items) / len(items), 3) if items else 0,
+            "total_errors": sum(i.get("error_count", 0) for i in items),
+            "total_conflicts_resolved": sum(i.get("conflicts_auto_resolved", 0) for i in items),
+            "total_triggers_fired": sum(i.get("triggers_fired", 0) for i in items),
+        },
+    }, "Orchestrator history").to_response()
+
+
 def _run_orchestration(user, actor_type="human"):
     """Core orchestration logic, reusable by both the HTTP endpoint and the
     built-in background scheduler. Returns (report_dict, duration_seconds, message).
@@ -9906,6 +9941,10 @@ def _run_orchestration(user, actor_type="human"):
 
     flush_sse_notifications()
     duration = (datetime.utcnow() - start).total_seconds()
+    message = (f"Orchestration complete: {report['stale_agents']} stale agent(s), "
+               f"{report['timed_out_steps']} timed-out step(s), {report['triggers_fired']} trigger(s) fired, "
+               f"{report['conflicts_auto_resolved']} conflict(s) auto-resolved"
+               + (f", {len(report['errors'])} error(s)" if report["errors"] else ""))
     AuditLog.record(
         action="maintenance.orchestrate", resource_type="system", resource_id=0,
         actor_type=actor_type, actor_user_id=user.id,
@@ -9913,11 +9952,15 @@ def _run_orchestration(user, actor_type="human"):
                 "error_count": len(report["errors"]), "duration_seconds": duration},
         ip_address=_client_ip() if actor_type == "human" else None,
     )
+    # Persist a historical record for trend analysis
+    try:
+        OrchestrationRun.record(
+            owner_id=user.id,
+            triggered_by="scheduler" if actor_type == "system" else "manual",
+            report=report, duration=duration, summary=message,
+        )
+    except Exception:
+        pass  # never fail the cycle on history-write error
     db.session.commit()
-
-    message = (f"Orchestration complete: {report['stale_agents']} stale agent(s), "
-               f"{report['timed_out_steps']} timed-out step(s), {report['triggers_fired']} trigger(s) fired, "
-               f"{report['conflicts_auto_resolved']} conflict(s) auto-resolved"
-               + (f", {len(report['errors'])} error(s)" if report["errors"] else ""))
     return report, duration, message
 
