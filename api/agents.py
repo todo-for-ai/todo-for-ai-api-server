@@ -2,9 +2,11 @@
 Agent collaboration API.
 """
 
+import csv
+import io
 import re
 from datetime import datetime, timedelta
-from flask import Blueprint, request
+from flask import Blueprint, make_response, request
 from sqlalchemy import and_, or_
 
 from core.auth import get_current_user, unified_auth_required
@@ -4229,20 +4231,58 @@ def list_security_events():
        source, source_id, workflow_run_id}
 
     Filters: agent_id, workflow_run_id, event_type, severity, since (ISO),
-    plus standard pagination.
+    until (ISO), plus standard pagination.
     """
     user = get_current_user()
-    agent_filter = request.args.get("agent_id", type=int)
-    run_filter = request.args.get("workflow_run_id", type=int)
-    event_type_filter = request.args.get("event_type")
-    severity_filter = request.args.get("severity")
-    since_str = request.args.get("since")
+    events, err = _collect_security_events(user, request.args)
+    if err is not None:
+        return err
+
+    # Pagination (in-memory since merged from multiple sources)
+    page = request.args.get("page", 1, type=int) or 1
+    per_page = request.args.get("per_page", 20, type=int) or 20
+    per_page = max(1, min(100, per_page))
+    total = len(events)
+    start = (page - 1) * per_page
+    page_items = events[start:start + per_page]
+    pagination = {
+        "page": page, "per_page": per_page, "total": total,
+        "total_pages": (total + per_page - 1) // per_page if per_page else 1,
+        "has_prev": page > 1,
+        "has_next": (start + per_page) < total,
+    }
+    return ApiResponse.success(
+        data={"items": page_items, "pagination": pagination},
+        message="Security events",
+    ).to_response()
+
+
+def _collect_security_events(user, args):
+    """Collect normalized security events across sandbox violations, agent
+    conflicts, and security-relevant audit entries. Returns (events, error_response).
+
+    Shared by list_security_events and the CSV export endpoint so the two stay
+    consistent. Filters are read from `args` (a MultiDict-like): agent_id,
+    workflow_run_id, event_type, severity, since, until.
+    """
+    agent_filter = args.get("agent_id", type=int)
+    run_filter = args.get("workflow_run_id", type=int)
+    event_type_filter = args.get("event_type")
+    severity_filter = args.get("severity")
+    since_str = args.get("since")
+    until_str = args.get("until")
     since = None
+    until = None
     if since_str:
         try:
             since = datetime.fromisoformat(since_str)
         except (ValueError, TypeError):
-            return ApiResponse.error("Invalid 'since' datetime (use ISO 8601)", 400).to_response()
+            return None, ApiResponse.error("Invalid 'since' datetime (use ISO 8601)", 400).to_response()
+    if until_str:
+        try:
+            until = datetime.fromisoformat(until_str)
+        except (ValueError, TypeError):
+            return None, ApiResponse.error("Invalid 'until' datetime (use ISO 8601)", 400).to_response()
 
     events = []
 
@@ -4260,6 +4300,8 @@ def list_security_events():
             vq = vq.filter(False)
     if since:
         vq = vq.filter(SandboxViolation.blocked_at >= since)
+    if until:
+        vq = vq.filter(SandboxViolation.blocked_at <= until)
     if event_type_filter and event_type_filter != "sandbox_violation":
         vq = vq.filter(False)
     for v in vq.order_by(SandboxViolation.blocked_at.desc()).limit(200).all():
@@ -4288,6 +4330,8 @@ def list_security_events():
         cq = cq.filter(AgentConflict.severity == severity_filter)
     if since:
         cq = cq.filter(AgentConflict.created_at >= since)
+    if until:
+        cq = cq.filter(AgentConflict.created_at <= until)
     for c in cq.order_by(AgentConflict.created_at.desc()).limit(200).all():
         if agent_filter and (not c.agent_ids or agent_filter not in (c.agent_ids or [])):
             continue
@@ -4325,6 +4369,8 @@ def list_security_events():
             continue
         if since and a.created_at and a.created_at < since:
             continue
+        if until and a.created_at and a.created_at > until:
+            continue
         events.append({
             "event_type": "audit",
             "occurred_at": a.created_at.isoformat() if a.created_at else None,
@@ -4342,24 +4388,52 @@ def list_security_events():
 
     # Merge and sort by occurred_at desc
     events.sort(key=lambda e: e.get("occurred_at") or "", reverse=True)
+    return events, None
 
-    # Pagination (in-memory since merged from multiple sources)
-    page = request.args.get("page", 1, type=int) or 1
-    per_page = request.args.get("per_page", 20, type=int) or 20
-    per_page = max(1, min(100, per_page))
-    total = len(events)
-    start = (page - 1) * per_page
-    page_items = events[start:start + per_page]
-    pagination = {
-        "page": page, "per_page": per_page, "total": total,
-        "total_pages": (total + per_page - 1) // per_page if per_page else 1,
-        "has_prev": page > 1,
-        "has_next": (start + per_page) < total,
-    }
-    return ApiResponse.success(
-        data={"items": page_items, "pagination": pagination},
-        message="Security events",
-    ).to_response()
+
+@agents_bp.route("/security/events/export", methods=["GET"])
+@unified_auth_required
+def export_security_events():
+    """Export the unified security event log as CSV.
+
+    Accepts the same filters as GET /security/events (agent_id,
+    workflow_run_id, event_type, severity, since, until). Up to 1000 rows.
+    Returns a text/csv attachment.
+    """
+    user = get_current_user()
+    events, err = _collect_security_events(user, request.args)
+    if err is not None:
+        return err
+
+    # Cap export volume
+    export_rows = events[:1000]
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "occurred_at", "event_type", "severity", "agent_id",
+        "workflow_run_id", "source", "source_id", "title", "detail",
+    ])
+    for e in export_rows:
+        detail = e.get("detail") or ""
+        if not isinstance(detail, str):
+            detail = str(detail)
+        writer.writerow([
+            e.get("occurred_at") or "",
+            e.get("event_type") or "",
+            e.get("severity") or "",
+            e.get("agent_id") if e.get("agent_id") is not None else "",
+            e.get("workflow_run_id") if e.get("workflow_run_id") is not None else "",
+            e.get("source") or "",
+            e.get("source_id") if e.get("source_id") is not None else "",
+            (e.get("title") or "").replace("\n", " ").replace("\r", " "),
+            detail.replace("\n", " ").replace("\r", " "),
+        ])
+    resp = make_response(buf.getvalue())
+    resp.headers["Content-Type"] = "text/csv; charset=utf-8"
+    resp.headers["Content-Disposition"] = (
+        'attachment; filename="security_events.csv"'
+    )
+    return resp
 
 
 # =========================================================================
