@@ -6007,6 +6007,11 @@ def collaboration_graph():
         })
 
     agents = Agent.query.filter(Agent.id.in_(list(node_ids))).all() if node_ids else []
+    # 批量查 reputation，避免 N+1
+    rep_map = {}
+    if node_ids:
+        reps = AgentReputation.query.filter(AgentReputation.agent_id.in_(list(node_ids))).all()
+        rep_map = {r.agent_id: r.score for r in reps}
     # Per-node total messages (degree sum)
     degree = {}
     for e in edges:
@@ -6018,6 +6023,7 @@ def collaboration_graph():
             "name": a.name,
             "kind": a.kind.value if a.kind else None,
             "messages": degree.get(a.id, 0),
+            "reputation": rep_map.get(a.id),
         }
         for a in agents
     ]
