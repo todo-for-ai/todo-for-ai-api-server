@@ -4231,7 +4231,7 @@ def list_security_events():
        source, source_id, workflow_run_id}
 
     Filters: agent_id, workflow_run_id, event_type, severity, since (ISO),
-    until (ISO), plus standard pagination.
+    until (ISO), search (keyword on title/detail), plus standard pagination.
     """
     user = get_current_user()
     events, err = _collect_security_events(user, request.args)
@@ -4263,12 +4263,13 @@ def _collect_security_events(user, args):
 
     Shared by list_security_events and the CSV export endpoint so the two stay
     consistent. Filters are read from `args` (a MultiDict-like): agent_id,
-    workflow_run_id, event_type, severity, since, until.
+    workflow_run_id, event_type, severity, since, until, search.
     """
     agent_filter = args.get("agent_id", type=int)
     run_filter = args.get("workflow_run_id", type=int)
     event_type_filter = args.get("event_type")
     severity_filter = args.get("severity")
+    search = (args.get("search") or "").strip().lower()
     since_str = args.get("since")
     until_str = args.get("until")
     since = None
@@ -4388,6 +4389,15 @@ def _collect_security_events(user, args):
 
     # Merge and sort by occurred_at desc
     events.sort(key=lambda e: e.get("occurred_at") or "", reverse=True)
+
+    # Keyword search across title/detail (case-insensitive, Python-side since
+    # the feed is merged from heterogeneous sources)
+    if search:
+        events = [
+            e for e in events
+            if search in (e.get("title") or "").lower()
+            or search in (e.get("detail") or "").lower()
+        ]
     return events, None
 
 
