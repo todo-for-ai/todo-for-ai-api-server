@@ -3850,13 +3850,24 @@ def agent_health_trend():
     user = get_current_user()
     try:
         days = max(1, min(365, int(request.args.get("days", 30))))
+        agent_id = int(request.args.get("agent_id")) if request.args.get("agent_id") else None
     except (TypeError, ValueError):
         days = 30
+        agent_id = None
 
     since = datetime.utcnow() - timedelta(days=days)
     agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if agent_id is not None and agent_id not in agent_ids:
+        return ApiResponse.success({"days": days, "trend": [], "total_positive": 0, "total_negative": 0, "agent_id": agent_id, "agent_name": None}).to_response()
+    if agent_id is not None:
+        agent_ids = [agent_id]
     if not agent_ids:
         return ApiResponse.success({"days": days, "trend": [], "total_positive": 0, "total_negative": 0}).to_response()
+
+    selected_name = None
+    if agent_id is not None:
+        selected_name = Agent.query.filter_by(id=agent_id).with_entities(Agent.name).first()
+        selected_name = selected_name[0] if selected_name else None
 
     rows = (
         AuditLog.query
@@ -3902,15 +3913,29 @@ def agent_health_trend():
     for (day, _aid), score in last_score_by_day_agent.items():
         day_scores.setdefault(day, []).append(score)
 
-    # 按日附加冲突事件计数（owner_id 命中当前用户）
-    conflict_rows = (
-        AgentConflict.query
-        .filter(AgentConflict.owner_id == user.id, AgentConflict.created_at >= since)
-        .with_entities(func.date(AgentConflict.created_at).label("d"), func.count(AgentConflict.id))
-        .group_by("d")
-        .all()
-    )
-    conflict_by_day = {str(d): c for d, c in conflict_rows if d}
+    # 按日附加冲突事件计数（owner_id 命中当前用户；单 Agent 时进一步按参与方过滤）
+    if agent_id is not None:
+        conflict_rows_raw = (
+            AgentConflict.query
+            .filter(AgentConflict.owner_id == user.id, AgentConflict.created_at >= since)
+            .with_entities(func.date(AgentConflict.created_at).label("d"), AgentConflict.agent_ids)
+            .all()
+        )
+        conflict_by_day: dict = {}
+        for d, agent_ids_json in conflict_rows_raw:
+            if not d:
+                continue
+            if agent_ids_json and agent_id in (agent_ids_json or []):
+                conflict_by_day[str(d)] = conflict_by_day.get(str(d), 0) + 1
+    else:
+        conflict_rows = (
+            AgentConflict.query
+            .filter(AgentConflict.owner_id == user.id, AgentConflict.created_at >= since)
+            .with_entities(func.date(AgentConflict.created_at).label("d"), func.count(AgentConflict.id))
+            .group_by("d")
+            .all()
+        )
+        conflict_by_day = {str(d): c for d, c in conflict_rows if d}
 
     # 按日附加沙盒违规事件计数
     violation_rows = (
@@ -3942,6 +3967,8 @@ def agent_health_trend():
         "total_negative": sum(neg_by_day.values()),
         "total_conflicts": sum(conflict_by_day.values()),
         "total_violations": sum(violation_by_day.values()),
+        "agent_id": agent_id,
+        "agent_name": selected_name,
     }).to_response()
 
 
