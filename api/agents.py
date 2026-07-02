@@ -3238,6 +3238,72 @@ def workflow_step_stats():
     return ApiResponse.success({"items": items[:limit]}).to_response()
 
 
+@agents_bp.route("/workflows/failed-steps/by-duration", methods=["GET"])
+@unified_auth_required
+def workflow_failed_steps_by_duration():
+    """Rank failed workflow steps by average duration (finished - started).
+
+    Only FAILED WorkflowStepRun rows with both timestamps are considered.
+    For each ``step_key`` reports total failures, average/median/max duration
+    in seconds, sorted by average duration descending. Reveals which failing
+    steps burn the most wall-clock time before giving up.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(100, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 20
+
+    since = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        WorkflowStepRun.query
+        .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
+        .filter(
+            WorkflowRun.owner_id == user.id,
+            WorkflowStepRun.status == StepStatus.FAILED,
+            WorkflowStepRun.started_at.isnot(None),
+            WorkflowStepRun.finished_at.isnot(None),
+            WorkflowStepRun.finished_at >= since,
+        )
+        .with_entities(
+            WorkflowStepRun.step_key,
+            WorkflowStepRun.started_at,
+            WorkflowStepRun.finished_at,
+        )
+        .all()
+    )
+
+    agg: dict = {}
+    for step_key, started, finished in rows:
+        if not (started and finished and finished > started):
+            continue
+        dur = (finished - started).total_seconds()
+        entry = agg.setdefault(step_key, {"step_key": step_key, "durations": []})
+        entry["durations"].append(dur)
+
+    items = []
+    for step_key, e in agg.items():
+        ds = sorted(e["durations"])
+        n = len(ds)
+        avg = round(sum(ds) / n, 1)
+        median = round(ds[n // 2], 1) if n % 2 == 1 else round((ds[n // 2 - 1] + ds[n // 2]) / 2, 1)
+        items.append({
+            "step_key": step_key,
+            "failures": n,
+            "avg_duration_seconds": avg,
+            "median_duration_seconds": median,
+            "max_duration_seconds": round(ds[-1], 1),
+        })
+    items.sort(key=lambda x: x["avg_duration_seconds"], reverse=True)
+    return ApiResponse.success({
+        "days": days,
+        "total_failed_steps": sum(i["failures"] for i in items),
+        "items": items[:limit],
+    }).to_response()
+
+
 @agents_bp.route("/workflows/failure-correlation", methods=["GET"])
 @unified_auth_required
 def workflow_failure_correlation():
