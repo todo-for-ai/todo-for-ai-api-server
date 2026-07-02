@@ -9967,6 +9967,89 @@ def sandbox_template_usage():
     return ApiResponse.success({"items": items}).to_response()
 
 
+@agents_bp.route("/productivity", methods=["GET"])
+@unified_auth_required
+def agent_productivity():
+    """Per-Agent productivity stats for the current user.
+
+    Aggregates TaskAssignment rows by agent: total assignments, completed
+    (DONE), failed, cancelled, completion rate, and average completion
+    duration (completed_at - claimed_at, in hours) for done assignments.
+    Reveals each Agent's throughput and reliability.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 20
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "items": []}).to_response()
+
+    rows = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.agent_id.in_(agent_ids),
+            TaskAssignment.created_at >= since,
+        )
+        .with_entities(
+            TaskAssignment.agent_id,
+            TaskAssignment.state,
+            TaskAssignment.claimed_at,
+            TaskAssignment.completed_at,
+        )
+        .all()
+    )
+
+    agg: dict = {}
+    durations = {}  # agent_id -> list of hours
+    for aid, state, claimed_at, completed_at in rows:
+        bucket = agg.setdefault(aid, {
+            "agent_id": aid, "total": 0, "done": 0, "failed": 0,
+            "cancelled": 0, "expired": 0, "in_progress": 0,
+        })
+        bucket["total"] += 1
+        s = state.value if state else None
+        if s == "done":
+            bucket["done"] += 1
+            if claimed_at and completed_at and completed_at > claimed_at:
+                durations.setdefault(aid, []).append((completed_at - claimed_at).total_seconds() / 3600)
+        elif s == "failed":
+            bucket["failed"] += 1
+        elif s == "cancelled":
+            bucket["cancelled"] += 1
+        elif s == "expired":
+            bucket["expired"] += 1
+        else:
+            bucket["in_progress"] += 1
+
+    name_map = {a.id: a.name for a in Agent.query.filter(Agent.id.in_(list(agg.keys()))).with_entities(Agent.id, Agent.name).all()} if agg else {}
+    items = []
+    for aid, b in agg.items():
+        done = b["done"]
+        total = b["total"]
+        ds = durations.get(aid, [])
+        items.append({
+            "agent_id": aid,
+            "name": name_map.get(aid, f"#{aid}"),
+            "total": total,
+            "done": done,
+            "failed": b["failed"],
+            "cancelled": b["cancelled"],
+            "expired": b["expired"],
+            "in_progress": b["in_progress"],
+            "completion_rate": round(done / total * 100, 1) if total else 0,
+            "avg_completion_hours": round(sum(ds) / len(ds), 2) if ds else None,
+        })
+    items.sort(key=lambda x: x["done"], reverse=True)
+
+    return ApiResponse.success({"days": days, "items": items[:limit]}).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
