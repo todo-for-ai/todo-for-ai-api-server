@@ -9020,6 +9020,62 @@ def experiences_stats():
     }).to_response()
 
 
+@agents_bp.route("/experiences/scatter", methods=["GET"])
+@unified_auth_required
+def experiences_scatter():
+    """Confidence × reuse-count scatter points for the user's experiences.
+
+    Returns one point per valid experience: confidence, times_reused, domain,
+    task_type, experience_type. Lets the frontend plot a scatter chart showing
+    whether high-confidence experiences actually get reused more. Caps the
+    point count via ``limit`` (default 200, newest first) to bound payload.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(500, int(request.args.get("limit", 200))))
+    except (TypeError, ValueError):
+        limit = 200
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"points": [], "max_reuses": 0}).to_response()
+
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+        )
+        .order_by(AgentExperience.times_reused.desc())
+        .with_entities(
+            AgentExperience.id,
+            AgentExperience.domain,
+            AgentExperience.task_type,
+            AgentExperience.experience_type,
+            AgentExperience.times_reused,
+            AgentExperience.confidence,
+        )
+        .limit(limit)
+        .all()
+    )
+
+    points = []
+    max_reuses = 0
+    for exp_id, domain, task_type, exp_type, times_reused, confidence in rows:
+        tr = times_reused or 0
+        if tr > max_reuses:
+            max_reuses = tr
+        points.append({
+            "id": exp_id,
+            "domain": domain or "(未分类)",
+            "task_type": task_type or "(未分类)",
+            "experience_type": exp_type or "(未分类)",
+            "times_reused": tr,
+            "confidence": confidence,
+        })
+    return ApiResponse.success({"points": points, "max_reuses": max_reuses}).to_response()
+
+
 @agents_bp.route("/experiences/low-confidence", methods=["GET"])
 @unified_auth_required
 def experiences_low_confidence():
