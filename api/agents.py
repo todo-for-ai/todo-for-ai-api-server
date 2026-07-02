@@ -9992,12 +9992,42 @@ def conflicts_dashboard():
     active = qs.filter(AgentConflict.status.in_([
         ConflictStatus.DETECTED, ConflictStatus.ACKNOWLEDGED, ConflictStatus.RESOLVING
     ])).count()
+
+    # Resolution latency stats: how long conflicts sit before being cleared.
+    # Buckets: <1h, 1-24h, 1-7d, >7d. Reveals whether conflicts languish.
+    resolved_rows = qs.filter(
+        AgentConflict.resolved_at.isnot(None),
+    ).with_entities(AgentConflict.created_at, AgentConflict.resolved_at).all()
+    latencies = []
+    for created, resolved in resolved_rows:
+        if created and resolved and resolved > created:
+            latencies.append((resolved - created).total_seconds())
+    latency_stats = {"count": len(latencies), "avg_seconds": None,
+                     "median_seconds": None, "max_seconds": None,
+                     "by_bucket": {"under_1h": 0, "1h_to_24h": 0, "1d_to_7d": 0, "over_7d": 0}}
+    if latencies:
+        latencies.sort()
+        latency_stats["avg_seconds"] = round(sum(latencies) / len(latencies), 1)
+        mid = len(latencies) // 2
+        latency_stats["median_seconds"] = round(latencies[mid] if len(latencies) % 2 else (latencies[mid - 1] + latencies[mid]) / 2, 1)
+        latency_stats["max_seconds"] = round(latencies[-1], 1)
+        for s in latencies:
+            if s < 3600:
+                latency_stats["by_bucket"]["under_1h"] += 1
+            elif s < 86400:
+                latency_stats["by_bucket"]["1h_to_24h"] += 1
+            elif s < 604800:
+                latency_stats["by_bucket"]["1d_to_7d"] += 1
+            else:
+                latency_stats["by_bucket"]["over_7d"] += 1
+
     return ApiResponse.success({
         "total": total,
         "active": active,
         "by_type": by_type,
         "by_status": by_status,
         "by_severity": by_severity,
+        "resolution_latency": latency_stats,
     }).to_response()
 
 
