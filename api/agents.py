@@ -3715,6 +3715,91 @@ def agent_health():
     return ApiResponse.success({"days": days, "items": items}).to_response()
 
 
+@agents_bp.route("/health/trend", methods=["GET"])
+@unified_auth_required
+def agent_health_trend():
+    """Daily reputation-derived health trend for the current user's Agents.
+
+    Aggregates ``reputation.update`` audit entries (which carry ``new_score``
+    and ``score_delta`` in detail) by day across all of the user's Agents.
+    Per-day: average new_score (last-seen per agent that day), count of
+    positive deltas, count of negative deltas. A proxy for whether the
+    fleet's health is rising or falling over time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "trend": [], "total_positive": 0, "total_negative": 0}).to_response()
+
+    rows = (
+        AuditLog.query
+        .filter(
+            AuditLog.action == "reputation.update",
+            AuditLog.resource_type == "agent",
+            AuditLog.resource_id.in_(agent_ids),
+            AuditLog.created_at >= since,
+        )
+        .with_entities(
+            func.date(AuditLog.created_at).label("d"),
+            AuditLog.resource_id,
+            AuditLog.detail,
+        )
+        .all()
+    )
+
+    # per (day, agent) keep last new_score; track pos/neg deltas
+    last_score_by_day_agent: dict = {}
+    pos_by_day: dict = {}
+    neg_by_day: dict = {}
+    for d, aid, detail in rows:
+        if not d:
+            continue
+        key = (str(d), aid)
+        det = detail or {}
+        new_score = det.get("new_score")
+        delta = det.get("score_delta")
+        if new_score is not None:
+            last_score_by_day_agent[key] = new_score
+        if delta is not None:
+            try:
+                dval = float(delta)
+                if dval > 0:
+                    pos_by_day[str(d)] = pos_by_day.get(str(d), 0) + 1
+                elif dval < 0:
+                    neg_by_day[str(d)] = neg_by_day.get(str(d), 0) + 1
+            except (TypeError, ValueError):
+                pass
+
+    # 按日聚合平均 new_score
+    day_scores: dict = {}
+    for (day, _aid), score in last_score_by_day_agent.items():
+        day_scores.setdefault(day, []).append(score)
+
+    trend = []
+    for day in sorted(day_scores.keys()):
+        scores = day_scores[day]
+        avg = round(sum(scores) / len(scores), 2) if scores else None
+        trend.append({
+            "date": day,
+            "avg_reputation": avg,
+            "positive": pos_by_day.get(day, 0),
+            "negative": neg_by_day.get(day, 0),
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "trend": trend,
+        "total_positive": sum(pos_by_day.values()),
+        "total_negative": sum(neg_by_day.values()),
+    }).to_response()
+
+
 @agents_bp.route("/workflows/run-trend", methods=["GET"])
 @unified_auth_required
 def workflow_run_trend():
