@@ -10647,7 +10647,17 @@ def agent_productivity_trend():
     since = datetime.utcnow() - timedelta(days=days)
     agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
     if not agent_ids:
-        return ApiResponse.success({"days": days, "trend": [], "total_done": 0, "total_failed": 0}).to_response()
+        return ApiResponse.success({"days": days, "trend": [], "total_done": 0, "total_failed": 0, "by_kind_totals": {}}).to_response()
+
+    # 取 agent_id -> kind 映射，用于按 kind 分层趋势
+    kind_map: dict = {}
+    for aid, kind in (
+        Agent.query
+        .filter(Agent.id.in_(agent_ids))
+        .with_entities(Agent.id, Agent.kind)
+        .all()
+    ):
+        kind_map[aid] = kind or "unknown"
 
     rows = (
         TaskAssignment.query
@@ -10657,6 +10667,7 @@ def agent_productivity_trend():
             TaskAssignment.state.in_([TaskAssignmentState.DONE, TaskAssignmentState.FAILED]),
         )
         .with_entities(
+            TaskAssignment.agent_id,
             TaskAssignment.state,
             func.date(TaskAssignment.completed_at).label("d"),
         )
@@ -10666,25 +10677,36 @@ def agent_productivity_trend():
     by_day: dict = {}
     total_done = 0
     total_failed = 0
-    for state, d in rows:
+    by_kind_totals: dict = {}
+    for aid, state, d in rows:
         if not d:
             continue
         key = str(d)
-        bucket = by_day.setdefault(key, {"date": key, "done": 0, "failed": 0})
+        bucket = by_day.setdefault(key, {"date": key, "done": 0, "failed": 0, "by_kind": {}})
         s = state.value if state else None
+        k = kind_map.get(aid, "unknown")
+        kind_bucket = bucket["by_kind"].setdefault(k, {"done": 0, "failed": 0})
+        kind_total = by_kind_totals.setdefault(k, {"done": 0, "failed": 0})
         if s == "done":
             bucket["done"] += 1
             total_done += 1
+            kind_bucket["done"] += 1
+            kind_total["done"] += 1
         elif s == "failed":
             bucket["failed"] += 1
             total_failed += 1
+            kind_bucket["failed"] += 1
+            kind_total["failed"] += 1
 
     trend = sorted(by_day.values(), key=lambda x: x["date"])
+    # 按 done 总数降序排列 by_kind_totals，便于前端取 top kind
+    by_kind_totals_sorted = dict(sorted(by_kind_totals.items(), key=lambda kv: kv[1]["done"], reverse=True))
     return ApiResponse.success({
         "days": days,
         "trend": trend,
         "total_done": total_done,
         "total_failed": total_failed,
+        "by_kind_totals": by_kind_totals_sorted,
     }).to_response()
 
 
