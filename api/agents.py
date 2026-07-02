@@ -8731,11 +8731,15 @@ def experiences_stats():
     confidences = []
     confidence_buckets = {"0-0.3": 0, "0.3-0.5": 0, "0.5-0.7": 0, "0.7-0.85": 0, "0.85-1.0": 0}
     reuse_candidates = []
+    domain_task_matrix: dict = {}  # {domain: {task_type: count}}
     for exp_id, domain, task_type, exp_type, is_shared, times_reused, confidence, key_learnings in rows:
         d = domain or "(未分类)"
         by_domain[d] = by_domain.get(d, 0) + 1
+        tt = task_type or "(未分类)"
         if task_type:
             by_task_type[task_type] = by_task_type.get(task_type, 0) + 1
+        domain_task_matrix.setdefault(d, {})
+        domain_task_matrix[d][tt] = domain_task_matrix[d].get(tt, 0) + 1
         et = exp_type or "(未分类)"
         by_exp_type[et] = by_exp_type.get(et, 0) + 1
         if is_shared:
@@ -8780,6 +8784,7 @@ def experiences_stats():
         "avg_confidence": avg_conf,
         "by_confidence_bucket": confidence_buckets,
         "top_reused": top_reused,
+        "by_domain_tasktype": domain_task_matrix,
     }).to_response()
 
 
