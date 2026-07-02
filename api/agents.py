@@ -8860,6 +8860,7 @@ def experiences_stats():
         return ApiResponse.success({
             "total": 0, "by_domain": {}, "by_task_type": {},
             "by_experience_type": {}, "shared": 0, "total_reuses": 0, "avg_confidence": None,
+            "by_confidence_bucket": {}, "top_reused": [], "by_domain_tasktype": {}, "by_domain_reuses": {},
         }).to_response()
 
     rows = AgentExperience.query.filter(
@@ -8885,9 +8886,11 @@ def experiences_stats():
     confidence_buckets = {"0-0.3": 0, "0.3-0.5": 0, "0.5-0.7": 0, "0.7-0.85": 0, "0.85-1.0": 0}
     reuse_candidates = []
     domain_task_matrix: dict = {}  # {domain: {task_type: count}}
+    by_domain_reuses: dict = {}  # {domain: cumulative reuse count}
     for exp_id, domain, task_type, exp_type, is_shared, times_reused, confidence, key_learnings in rows:
         d = domain or "(未分类)"
         by_domain[d] = by_domain.get(d, 0) + 1
+        by_domain_reuses[d] = by_domain_reuses.get(d, 0) + (times_reused or 0)
         tt = task_type or "(未分类)"
         if task_type:
             by_task_type[task_type] = by_task_type.get(task_type, 0) + 1
@@ -8926,6 +8929,7 @@ def experiences_stats():
     # Sort breakdowns by count desc for display
     by_domain_sorted = dict(sorted(by_domain.items(), key=lambda kv: kv[1], reverse=True))
     by_task_sorted = dict(sorted(by_task_type.items(), key=lambda kv: kv[1], reverse=True))
+    by_domain_reuses_sorted = dict(sorted(by_domain_reuses.items(), key=lambda kv: kv[1], reverse=True))
     top_reused = sorted(reuse_candidates, key=lambda x: x["times_reused"], reverse=True)[:10]
     return ApiResponse.success({
         "total": len(rows),
@@ -8938,6 +8942,7 @@ def experiences_stats():
         "by_confidence_bucket": confidence_buckets,
         "top_reused": top_reused,
         "by_domain_tasktype": domain_task_matrix,
+        "by_domain_reuses": by_domain_reuses_sorted,
     }).to_response()
 
 
