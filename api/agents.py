@@ -3482,6 +3482,130 @@ def workflow_failure_correlation_by_step():
     }).to_response()
 
 
+@agents_bp.route("/conflicts/sandbox-correlation", methods=["GET"])
+@unified_auth_required
+def conflicts_sandbox_correlation():
+    """Cross-dimension correlation between Agent conflicts and sandbox
+    violations.
+
+    For each conflict (AgentConflict, created_at within window), checks
+    whether a sandbox violation (SandboxViolation, blocked_at within
+    ±window_hours, same Agent among conflict parties) occurred. Reports
+    co-occurrence rate, breakdown by conflict_type, and the top agents
+    whose conflicts most often coincide with sandbox violations. Reveals
+    whether coordination breakdowns cluster with sandbox escape attempts.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        window_hours = max(0, min(168, int(request.args.get("window_hours", 2))))
+    except (TypeError, ValueError):
+        days = 30
+        window_hours = 2
+
+    since = datetime.utcnow() - timedelta(days=days)
+    conflicts = (
+        AgentConflict.query
+        .filter(
+            AgentConflict.owner_id == user.id,
+            AgentConflict.created_at >= since,
+        )
+        .with_entities(
+            AgentConflict.id, AgentConflict.conflict_type,
+            AgentConflict.created_at, AgentConflict.agent_ids,
+        )
+        .all()
+    )
+
+    total_conflicts = len(conflicts)
+    if total_conflicts == 0:
+        return ApiResponse.success({
+            "days": days,
+            "window_hours": window_hours,
+            "total_conflicts": 0,
+            "with_violation": 0,
+            "violation_rate": 0,
+            "by_conflict_type": {},
+            "top_agents": [],
+        }).to_response()
+
+    # Collect all agent ids involved across conflicts for violation prefetch
+    involved_ids = set()
+    for _id, ctype, created_at, agent_ids_json in conflicts:
+        if agent_ids_json:
+            for aid in agent_ids_json:
+                involved_ids.add(aid)
+
+    violations = (
+        SandboxViolation.query
+        .filter(
+            SandboxViolation.agent_id.in_(list(involved_ids)),
+            SandboxViolation.blocked_at >= since - timedelta(hours=window_hours),
+        )
+        .with_entities(SandboxViolation.agent_id, SandboxViolation.blocked_at)
+        .all()
+    ) if involved_ids else []
+    violations_by_agent: dict = {}
+    for aid, blocked_at in violations:
+        violations_by_agent.setdefault(aid, []).append(blocked_at)
+
+    with_violation = 0
+    by_type_total: dict = {}
+    by_type_with_violation: dict = {}
+    per_agent: dict = {}
+    for _id, ctype, created_at, agent_ids_json in conflicts:
+        ct = ctype.value if ctype else "(未知)"
+        by_type_total[ct] = by_type_total.get(ct, 0) + 1
+        has_v = False
+        for aid in (agent_ids_json or []):
+            v_times = violations_by_agent.get(aid, [])
+            if v_times and any(abs((t - created_at).total_seconds()) <= window_hours * 3600 for t in v_times):
+                has_v = True
+                break
+        if has_v:
+            with_violation += 1
+            by_type_with_violation[ct] = by_type_with_violation.get(ct, 0) + 1
+            for aid in (agent_ids_json or []):
+                b = per_agent.setdefault(aid, {"agent_id": aid, "conflicts": 0, "with_violation": 0})
+                b["conflicts"] += 1
+                b["with_violation"] += 1
+        else:
+            for aid in (agent_ids_json or []):
+                b = per_agent.setdefault(aid, {"agent_id": aid, "conflicts": 0, "with_violation": 0})
+                b["conflicts"] += 1
+
+    by_conflict_type = {
+        ct: {
+            "total": by_type_total.get(ct, 0),
+            "with_violation": by_type_with_violation.get(ct, 0),
+            "rate": round(by_type_with_violation.get(ct, 0) / by_type_total.get(ct, 0) * 100, 1) if by_type_total.get(ct, 0) else 0,
+        }
+        for ct in by_type_total
+    }
+
+    top_ids = sorted(per_agent.keys(), key=lambda k: per_agent[k]["with_violation"], reverse=True)[:8]
+    name_map = {a.id: a.name for a in Agent.query.filter(Agent.id.in_(top_ids)).with_entities(Agent.id, Agent.name).all()} if top_ids else {}
+    top_agents = [
+        {
+            "agent_id": aid,
+            "name": name_map.get(aid, f"#{aid}"),
+            "conflicts": per_agent[aid]["conflicts"],
+            "with_violation": per_agent[aid]["with_violation"],
+        }
+        for aid in top_ids
+    ]
+
+    return ApiResponse.success({
+        "days": days,
+        "window_hours": window_hours,
+        "total_conflicts": total_conflicts,
+        "with_violation": with_violation,
+        "violation_rate": round(with_violation / total_conflicts * 100, 1),
+        "by_conflict_type": by_conflict_type,
+        "top_agents": top_agents,
+    }).to_response()
+
+
 @agents_bp.route("/workflows/run-trend", methods=["GET"])
 @unified_auth_required
 def workflow_run_trend():
