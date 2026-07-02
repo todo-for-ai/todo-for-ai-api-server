@@ -10031,6 +10031,45 @@ def conflicts_dashboard():
     }).to_response()
 
 
+@agents_bp.route("/conflicts/by-agent", methods=["GET"])
+@unified_auth_required
+def conflicts_by_agent():
+    """Per-Agent conflict involvement counts for the current user.
+
+    Each conflict carries a JSON ``agent_ids`` list of parties; this expands
+    those lists and counts, per Agent: total conflicts, active conflicts, and
+    conflicts where the Agent appeared. Returns the top N by total, enriched
+    with the Agent's name/kind for display. Reveals which Agents are most
+    conflict-prone.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(100, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        limit = 20
+
+    rows = AgentConflict.query.filter_by(owner_id=user.id).with_entities(
+        AgentConflict.agent_ids, AgentConflict.status
+    ).all()
+    active_statuses = {ConflictStatus.DETECTED, ConflictStatus.ACKNOWLEDGED, ConflictStatus.RESOLVING}
+    agg: dict = {}
+    for agent_ids, status in rows:
+        for aid in (agent_ids or []):
+            entry = agg.setdefault(aid, {"agent_id": aid, "total": 0, "active": 0})
+            entry["total"] += 1
+            if status in active_statuses:
+                entry["active"] += 1
+
+    top = sorted(agg.values(), key=lambda x: x["total"], reverse=True)[:limit]
+    agent_ids = [e["agent_id"] for e in top]
+    agents = {a.id: a for a in Agent.query.filter(Agent.id.in_(agent_ids)).all()} if agent_ids else {}
+    for e in top:
+        a = agents.get(e["agent_id"])
+        e["name"] = a.name if a else None
+        e["kind"] = a.kind.value if a and a.kind else None
+    return ApiResponse.success({"items": top}).to_response()
+
+
 @agents_bp.route("/conflicts/trend", methods=["GET"])
 @unified_auth_required
 def conflicts_trend():
