@@ -10001,6 +10001,64 @@ def conflicts_dashboard():
     }).to_response()
 
 
+@agents_bp.route("/conflicts/trend", methods=["GET"])
+@unified_auth_required
+def conflicts_trend():
+    """Daily conflict detection vs resolution counts for the current user.
+
+    Buckets by calendar day (UTC). ``detected`` uses ``created_at`` (when the
+    scan found the conflict), ``resolved`` uses ``resolved_at`` (filled on
+    resolve/ignore/auto-resolve). Useful for charting whether conflicts are
+    accumulating faster than they are being cleared.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+    since = datetime.utcnow() - timedelta(days=days)
+
+    from sqlalchemy import func as sa_func
+    daily_detected = (
+        db.session.query(
+            sa_func.date(AgentConflict.created_at).label("date"),
+            sa_func.count(AgentConflict.id).label("detected"),
+        )
+        .filter(AgentConflict.owner_id == user.id, AgentConflict.created_at >= since)
+        .group_by(sa_func.date(AgentConflict.created_at))
+        .all()
+    )
+    daily_resolved = (
+        db.session.query(
+            sa_func.date(AgentConflict.resolved_at).label("date"),
+            sa_func.count(AgentConflict.id).label("resolved"),
+        )
+        .filter(
+            AgentConflict.owner_id == user.id,
+            AgentConflict.resolved_at.isnot(None),
+            AgentConflict.resolved_at >= since,
+        )
+        .group_by(sa_func.date(AgentConflict.resolved_at))
+        .all()
+    )
+
+    trend_map: dict = {}
+    for d, c in daily_detected:
+        key = str(d)
+        trend_map[key] = {"date": key, "detected": c, "resolved": 0}
+    for d, c in daily_resolved:
+        key = str(d)
+        if key in trend_map:
+            trend_map[key]["resolved"] = c
+        else:
+            trend_map[key] = {"date": key, "detected": 0, "resolved": c}
+    trend = sorted(trend_map.values(), key=lambda x: x["date"])
+    return ApiResponse.success({
+        "days": days,
+        "trend": trend,
+    }).to_response()
+
+
 # Strategies considered safe to apply automatically (low-risk, reversible).
 _AUTO_SAFE_STRATEGIES = {
     ConflictResolutionStrategy.AUTO_RETRY,
