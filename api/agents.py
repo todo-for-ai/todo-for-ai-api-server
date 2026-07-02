@@ -3975,11 +3975,34 @@ def workflow_run_trend():
     trend = sorted(trend_map.values(), key=lambda x: x["date"])
     total_succeeded = sum(b["succeeded"] for b in trend)
     total_failed = sum(b["failed"] for b in trend)
+
+    # 按日失败步骤数（WorkflowStepRun status=FAILED，按 finished_at 分桶）
+    step_daily = (
+        db.session.query(
+            sa_func.date(WorkflowStepRun.finished_at).label("date"),
+            sa_func.count(WorkflowStepRun.id).label("count"),
+        )
+        .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
+        .filter(
+            WorkflowRun.owner_id == user.id,
+            WorkflowStepRun.status == StepStatus.FAILED,
+            WorkflowStepRun.finished_at.isnot(None),
+            WorkflowStepRun.finished_at >= since,
+        )
+        .group_by(sa_func.date(WorkflowStepRun.finished_at))
+        .all()
+    )
+    step_failed_by_day = {str(d): c for d, c in step_daily if d}
+    for b in trend:
+        b["failed_steps"] = step_failed_by_day.get(b["date"], 0)
+    total_failed_steps = sum(step_failed_by_day.values())
+
     return ApiResponse.success({
         "days": days,
         "trend": trend,
         "total_succeeded": total_succeeded,
         "total_failed": total_failed,
+        "total_failed_steps": total_failed_steps,
     }).to_response()
 
 
