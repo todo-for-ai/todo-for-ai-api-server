@@ -3606,36 +3606,17 @@ def conflicts_sandbox_correlation():
     }).to_response()
 
 
-@agents_bp.route("/health", methods=["GET"])
-@unified_auth_required
-def agent_health():
-    """Per-Agent composite health score for the current user.
-
-    Combines multiple dimensions into a single 0-100 health score per Agent:
-      - reputation score (weight 0.4)
-      - assignment completion rate (weight 0.3)
-      - conflict penalty (weight 0.15): fewer recent conflicts is better
-      - sandbox violation penalty (weight 0.15): fewer recent violations is better
-
-    Also returns the raw sub-scores so callers can see what drags health down.
-    Reveals a single comparable metric across all of a user's Agents.
-    """
-    user = get_current_user()
-    try:
-        days = max(1, min(365, int(request.args.get("days", 30))))
-    except (TypeError, ValueError):
-        days = 30
-
+def _compute_agent_health(user, days):
+    """Shared computation for agent composite health (used by /health and
+    /health/alerts). Returns (days, items) sorted by health_score desc."""
     since = datetime.utcnow() - timedelta(days=days)
     agents = Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id, Agent.name, Agent.status).all()
     if not agents:
-        return ApiResponse.success({"days": days, "items": []}).to_response()
+        return days, []
 
     agent_ids = [a.id for a in agents]
 
-    # 声誉
     reps = {r.agent_id: r for r in AgentReputation.query.filter(AgentReputation.agent_id.in_(agent_ids)).all()}
-    # 产出（基于 TaskAssignment 状态，窗口内）
     assign_rows = (
         TaskAssignment.query
         .filter(TaskAssignment.agent_id.in_(agent_ids), TaskAssignment.created_at >= since)
@@ -3649,7 +3630,6 @@ def agent_health():
         if state and state.value == "done":
             b["done"] += 1
 
-    # 冲突计数（窗口内，agent_ids JSON 含该 agent）
     conflict_rows = (
         AgentConflict.query
         .filter(AgentConflict.owner_id == user.id, AgentConflict.created_at >= since)
@@ -3661,7 +3641,6 @@ def agent_health():
         for aid in (agent_ids_json or []):
             conflict_counts[aid] = conflict_counts.get(aid, 0) + 1
 
-    # 违规计数（窗口内）
     violation_rows = (
         SandboxViolation.query
         .filter(SandboxViolation.agent_id.in_(agent_ids), SandboxViolation.blocked_at >= since)
@@ -3680,11 +3659,9 @@ def agent_health():
         rep_score = rep.score if rep and rep.score is not None else 50.0
         p = prod.get(a.id, {"total": 0, "done": 0})
         completion_rate = (p["done"] / p["total"] * 100) if p["total"] > 0 else None
-        # 完成率子分：无分配时按 50（中性）
         completion_score = completion_rate if completion_rate is not None else 50.0
         cc = conflict_counts.get(a.id, 0)
         vc = violation_counts.get(a.id, 0)
-        # 冲突/违规子分：0 → 100，最大值 → 0，线性
         conflict_score = 100 * (1 - cc / max_conflicts) if max_conflicts > 0 else 100.0
         violation_score = 100 * (1 - vc / max_violations) if max_violations > 0 else 100.0
 
@@ -3711,8 +3688,73 @@ def agent_health():
             },
         })
     items.sort(key=lambda x: x["health_score"], reverse=True)
+    return days, items
 
+
+@agents_bp.route("/health", methods=["GET"])
+@unified_auth_required
+def agent_health():
+    """Per-Agent composite health score for the current user.
+
+    Combines multiple dimensions into a single 0-100 health score per Agent:
+      - reputation score (weight 0.4)
+      - assignment completion rate (weight 0.3)
+      - conflict penalty (weight 0.15): fewer recent conflicts is better
+      - sandbox violation penalty (weight 0.15): fewer recent violations is better
+
+    Also returns the raw sub-scores so callers can see what drags health down.
+    Reveals a single comparable metric across all of a user's Agents.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+    days, items = _compute_agent_health(user, days)
     return ApiResponse.success({"days": days, "items": items}).to_response()
+
+
+@agents_bp.route("/health/alerts", methods=["GET"])
+@unified_auth_required
+def agent_health_alerts():
+    """Low-health Agent alert list for the current user.
+
+    Returns Agents whose composite health_score falls below
+    ``min_health_score`` (default 60), with triggering reasons (low
+    reputation / low completion / conflicts / violations). Each entry
+    includes the full health fields. Surfaces Agents needing attention.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        min_health_score = max(0, min(100, float(request.args.get("min_health_score", 60))))
+    except (TypeError, ValueError):
+        days = 30
+        min_health_score = 60
+
+    _, items = _compute_agent_health(user, days)
+    alerts = []
+    for a in items:
+        if a["health_score"] >= min_health_score:
+            continue
+        reasons = []
+        if a["sub_scores"]["reputation"] < 50:
+            reasons.append(f"声誉 {a['sub_scores']['reputation']} 偏低")
+        if a["completion_rate"] is not None and a["completion_rate"] < 50:
+            reasons.append(f"完成率 {a['completion_rate']}% 偏低")
+        if a["conflicts"] > 0:
+            reasons.append(f"冲突 {a['conflicts']} 次")
+        if a["sandbox_violations"] > 0:
+            reasons.append(f"违规 {a['sandbox_violations']} 次")
+        a_copy = dict(a)
+        a_copy["reasons"] = reasons
+        alerts.append(a_copy)
+
+    return ApiResponse.success({
+        "days": days,
+        "min_health_score": min_health_score,
+        "items": alerts,
+    }).to_response()
 
 
 @agents_bp.route("/health/trend", methods=["GET"])
