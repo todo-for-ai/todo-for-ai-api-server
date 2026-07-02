@@ -6,6 +6,7 @@
 
 from datetime import datetime
 from flask import Blueprint, request
+from sqlalchemy import func
 from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 from core.auth import unified_auth_required, get_current_user
@@ -527,3 +528,98 @@ def delete_task_attachment(task_id, attachment_id):
 
     except Exception as e:
         return ApiResponse.error(f"Failed to delete task attachment: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/stats', methods=['GET'])
+@unified_auth_required
+def task_stats():
+    """Aggregate task lifecycle stats for the current user's projects.
+
+    Reports status distribution, completion/cancellation rates, average
+    lifecycle duration (done tasks: completed_at - created_at) bucketed
+    into ranges, and per-priority counts. Reveals throughput bottlenecks
+    and how often work is abandoned vs completed.
+    """
+    user = get_current_user()
+
+    # 限定当前用户的项目
+    base_query = Task.query.join(Project).filter(Project.owner_id == user.id)
+
+    total = base_query.count()
+    if total == 0:
+        return ApiResponse.success({
+            "total": 0,
+            "by_status": {},
+            "by_priority": {},
+            "completion_rate": 0,
+            "cancellation_rate": 0,
+            "avg_lifecycle_hours": None,
+            "lifecycle_buckets": {},
+            "avg_completion_rate": 0,
+        }).to_response()
+
+    # 按状态分布
+    status_rows = base_query.with_entities(Task.status, func.count(Task.id)).group_by(Task.status).all()
+    by_status = {s.value if s else "(未知)": c for s, c in status_rows}
+
+    # 按优先级分布
+    priority_rows = base_query.with_entities(Task.priority, func.count(Task.id)).group_by(Task.priority).all()
+    by_priority = {p.value if p else "(未知)": c for p, c in priority_rows}
+
+    done_count = by_status.get("done", 0)
+    cancelled_count = by_status.get("cancelled", 0)
+    completion_rate = round(done_count / total * 100, 1)
+    cancellation_rate = round(cancelled_count / total * 100, 1)
+
+    # 生命周期耗时（仅已完成且有 completed_at）
+    done_tasks = base_query.filter(
+        Task.status == TaskStatus.DONE,
+        Task.completed_at.isnot(None),
+    ).with_entities(Task.created_at, Task.completed_at).all()
+
+    lifecycle_hours = []
+    for created_at, completed_at in done_tasks:
+        if created_at and completed_at and completed_at > created_at:
+            delta_hours = (completed_at - created_at).total_seconds() / 3600
+            if delta_hours >= 0:
+                lifecycle_hours.append(delta_hours)
+
+    avg_lifecycle = round(sum(lifecycle_hours) / len(lifecycle_hours), 2) if lifecycle_hours else None
+
+    # 分桶：0-1h, 1-4h, 4-12h, 12-24h, 1-3d, 3-7d, >7d
+    buckets = {
+        "0-1h": 0, "1-4h": 0, "4-12h": 0, "12-24h": 0,
+        "1-3d": 0, "3-7d": 0, ">7d": 0,
+    }
+    for h in lifecycle_hours:
+        if h < 1:
+            buckets["0-1h"] += 1
+        elif h < 4:
+            buckets["1-4h"] += 1
+        elif h < 12:
+            buckets["4-12h"] += 1
+        elif h < 24:
+            buckets["12-24h"] += 1
+        elif h < 72:
+            buckets["1-3d"] += 1
+        elif h < 168:
+            buckets["3-7d"] += 1
+        else:
+            buckets[">7d"] += 1
+
+    # 平均完成率（completion_rate 字段）
+    cr_rows = base_query.with_entities(func.avg(Task.completion_rate)).scalar()
+    avg_completion_rate = round(cr_rows, 1) if cr_rows is not None else 0
+
+    return ApiResponse.success({
+        "total": total,
+        "by_status": by_status,
+        "by_priority": by_priority,
+        "completion_rate": completion_rate,
+        "cancellation_rate": cancellation_rate,
+        "done_count": done_count,
+        "cancelled_count": cancelled_count,
+        "avg_lifecycle_hours": avg_lifecycle,
+        "lifecycle_buckets": buckets,
+        "avg_completion_rate": avg_completion_rate,
+    }).to_response()
