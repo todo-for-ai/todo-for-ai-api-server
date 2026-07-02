@@ -8087,6 +8087,70 @@ def delete_agent_experience(agent_id, experience_id):
     return ApiResponse.success(None, "Experience deleted").to_response()
 
 
+@agents_bp.route("/experiences/stats", methods=["GET"])
+@unified_auth_required
+def experiences_stats():
+    """Aggregate AgentExperience stats for the current user.
+
+    Breaks down experiences (valid only) by domain, task_type, and
+    experience_type across all of the user's Agents. Also reports shared
+    count, total reuse count, and average confidence. Reveals where the
+    collective knowledge base is concentrated and where it is thin.
+    """
+    user = get_current_user()
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({
+            "total": 0, "by_domain": {}, "by_task_type": {},
+            "by_experience_type": {}, "shared": 0, "total_reuses": 0, "avg_confidence": None,
+        }).to_response()
+
+    rows = AgentExperience.query.filter(
+        AgentExperience.agent_id.in_(agent_ids),
+        AgentExperience.is_valid.is_(True),
+    ).with_entities(
+        AgentExperience.domain,
+        AgentExperience.task_type,
+        AgentExperience.experience_type,
+        AgentExperience.is_shared,
+        AgentExperience.times_reused,
+        AgentExperience.confidence,
+    ).all()
+
+    by_domain: dict = {}
+    by_task_type: dict = {}
+    by_exp_type: dict = {}
+    shared = 0
+    total_reuses = 0
+    confidences = []
+    for domain, task_type, exp_type, is_shared, times_reused, confidence in rows:
+        d = domain or "(未分类)"
+        by_domain[d] = by_domain.get(d, 0) + 1
+        if task_type:
+            by_task_type[task_type] = by_task_type.get(task_type, 0) + 1
+        et = exp_type or "(未分类)"
+        by_exp_type[et] = by_exp_type.get(et, 0) + 1
+        if is_shared:
+            shared += 1
+        total_reuses += times_reused or 0
+        if confidence is not None:
+            confidences.append(confidence)
+
+    avg_conf = round(sum(confidences) / len(confidences), 2) if confidences else None
+    # Sort breakdowns by count desc for display
+    by_domain_sorted = dict(sorted(by_domain.items(), key=lambda kv: kv[1], reverse=True))
+    by_task_sorted = dict(sorted(by_task_type.items(), key=lambda kv: kv[1], reverse=True))
+    return ApiResponse.success({
+        "total": len(rows),
+        "by_domain": by_domain_sorted,
+        "by_task_type": by_task_sorted,
+        "by_experience_type": by_exp_type,
+        "shared": shared,
+        "total_reuses": total_reuses,
+        "avg_confidence": avg_conf,
+    }).to_response()
+
+
 @agents_bp.route("/<int:agent_id>/experiences/recommend", methods=["GET"])
 @unified_auth_required
 def recommend_experiences(agent_id):
