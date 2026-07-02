@@ -3194,16 +3194,20 @@ def workflow_step_stats():
             WorkflowStepRun.status,
             WorkflowStepRun.started_at,
             WorkflowStepRun.finished_at,
+            WorkflowStepRun.attempt,
         )
         .all()
     )
     agg: dict = {}
-    for step_key, status, started, finished in rows:
+    for step_key, status, started, finished, attempt in rows:
         entry = agg.setdefault(step_key, {
             "step_key": step_key, "total": 0, "succeeded": 0,
-            "failed": 0, "skipped": 0, "durations": [],
+            "failed": 0, "skipped": 0, "durations": [], "retry_count": 0,
         })
         entry["total"] += 1
+        # attempt defaults to 1 on first try; >1 means a retry happened
+        if attempt and attempt > 1:
+            entry["retry_count"] += attempt - 1
         if status == StepStatus.SUCCEEDED:
             entry["succeeded"] += 1
         elif status == StepStatus.FAILED:
@@ -3227,6 +3231,8 @@ def workflow_step_stats():
             "success_rate": round(e["succeeded"] / denom, 3),
             "avg_duration_seconds": avg_dur,
             "sample_size_duration": len(durations),
+            "retries": e["retry_count"],
+            "avg_retries": round(e["retry_count"] / denom, 2),
         })
     items.sort(key=lambda x: x["total"], reverse=True)
     return ApiResponse.success({"items": items[:limit]}).to_response()
