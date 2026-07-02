@@ -10050,6 +10050,65 @@ def agent_productivity():
     return ApiResponse.success({"days": days, "items": items[:limit]}).to_response()
 
 
+@agents_bp.route("/productivity/trend", methods=["GET"])
+@unified_auth_required
+def agent_productivity_trend():
+    """Daily Agent assignment completion trend for the current user.
+
+    Buckets done TaskAssignments (state=DONE, completed_at within window)
+    by day, returning per-day done count and failed count (state=FAILED).
+    Reveals whether throughput is rising or falling over time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "trend": [], "total_done": 0, "total_failed": 0}).to_response()
+
+    rows = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.agent_id.in_(agent_ids),
+            TaskAssignment.created_at >= since,
+            TaskAssignment.state.in_([TaskAssignmentState.DONE, TaskAssignmentState.FAILED]),
+        )
+        .with_entities(
+            TaskAssignment.state,
+            func.date(TaskAssignment.completed_at).label("d"),
+        )
+        .all()
+    )
+
+    by_day: dict = {}
+    total_done = 0
+    total_failed = 0
+    for state, d in rows:
+        if not d:
+            continue
+        key = str(d)
+        bucket = by_day.setdefault(key, {"date": key, "done": 0, "failed": 0})
+        s = state.value if state else None
+        if s == "done":
+            bucket["done"] += 1
+            total_done += 1
+        elif s == "failed":
+            bucket["failed"] += 1
+            total_failed += 1
+
+    trend = sorted(by_day.values(), key=lambda x: x["date"])
+    return ApiResponse.success({
+        "days": days,
+        "trend": trend,
+        "total_done": total_done,
+        "total_failed": total_failed,
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
