@@ -3606,9 +3606,37 @@ def conflicts_sandbox_correlation():
     }).to_response()
 
 
-def _compute_agent_health(user, days):
+_SUB_SCORE_LABELS = {
+    "reputation": "声誉",
+    "completion": "完成率",
+    "conflict": "冲突控制",
+    "violation": "沙盒合规",
+}
+
+
+def _compute_agent_health(user, days, weights=None, with_recommendations=False):
     """Shared computation for agent composite health (used by /health and
-    /health/alerts). Returns (days, items) sorted by health_score desc."""
+    /health/alerts). Returns (days, items) sorted by health_score desc.
+
+    ``weights`` optionally overrides the default sub-score weights
+    {reputation: 0.4, completion: 0.3, conflict: 0.15, violation: 0.15};
+    they are normalised to sum to 1.0. When ``with_recommendations`` is
+    True, each item carries a ``recommendations`` list of concrete
+    improvement suggestions derived from its weakest sub-scores."""
+    w = {"reputation": 0.4, "completion": 0.3, "conflict": 0.15, "violation": 0.15}
+    if weights:
+        for k in w:
+            try:
+                v = float(weights.get(k, w[k]))
+            except (TypeError, ValueError):
+                v = w[k]
+            w[k] = max(0.0, v)
+    total_w = sum(w.values())
+    if total_w <= 0:
+        w = {"reputation": 0.4, "completion": 0.3, "conflict": 0.15, "violation": 0.15}
+        total_w = sum(w.values())
+    w = {k: v / total_w for k, v in w.items()}
+
     since = datetime.utcnow() - timedelta(days=days)
     agents = Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id, Agent.name, Agent.status).all()
     if not agents:
@@ -3666,10 +3694,17 @@ def _compute_agent_health(user, days):
         violation_score = 100 * (1 - vc / max_violations) if max_violations > 0 else 100.0
 
         health = round(
-            rep_score * 0.4 + completion_score * 0.3 + conflict_score * 0.15 + violation_score * 0.15,
+            rep_score * w["reputation"] + completion_score * w["completion"]
+            + conflict_score * w["conflict"] + violation_score * w["violation"],
             1,
         )
-        items.append({
+        sub_scores = {
+            "reputation": round(rep_score, 1),
+            "completion": round(completion_score, 1),
+            "conflict": round(conflict_score, 1),
+            "violation": round(violation_score, 1),
+        }
+        item = {
             "agent_id": a.id,
             "name": a.name,
             "status": a.status.value if a.status else None,
@@ -3680,13 +3715,27 @@ def _compute_agent_health(user, days):
             "done_assignments": p["done"],
             "conflicts": cc,
             "sandbox_violations": vc,
-            "sub_scores": {
-                "reputation": round(rep_score, 1),
-                "completion": round(completion_score, 1),
-                "conflict": round(conflict_score, 1),
-                "violation": round(violation_score, 1),
-            },
-        })
+            "sub_scores": sub_scores,
+        }
+        if with_recommendations:
+            recs = []
+            if rep_score < 50:
+                recs.append("声誉分偏低，建议复盘近期失败任务并补充正向反馈以恢复信任")
+            if completion_rate is not None and completion_rate < 50:
+                recs.append("完成率偏低，建议核减负载或拆解复杂任务后再分配")
+            elif p["total"] == 0:
+                recs.append("近期无任务分配，建议主动领取任务以建立产出记录")
+            if cc > 0:
+                recs.append(f"近期发生 {cc} 次协作冲突，建议复核协作边界与消息协议")
+            if vc > 0:
+                recs.append(f"近期发生 {vc} 次沙盒违规，建议收紧工具权限并复查沙盒策略")
+            # 按子分数升序追加最弱维度提示
+            weakest = sorted(sub_scores.items(), key=lambda x: x[1])[:1]
+            for name, score in weakest:
+                if not recs:
+                    recs.append(f"当前最弱维度为「{_SUB_SCORE_LABELS.get(name, name)}」({score})，建议针对性改进")
+            item["recommendations"] = recs
+        items.append(item)
     items.sort(key=lambda x: x["health_score"], reverse=True)
     return days, items
 
@@ -3703,14 +3752,23 @@ def agent_health():
       - sandbox violation penalty (weight 0.15): fewer recent violations is better
 
     Also returns the raw sub-scores so callers can see what drags health down.
-    Reveals a single comparable metric across all of a user's Agents.
+    Optional ``w_reputation`` / ``w_completion`` / ``w_conflict`` /
+    ``w_violation`` query params override the default sub-score weights
+    (normalised to sum to 1). Reveals a single comparable metric across all
+    of a user's Agents.
     """
     user = get_current_user()
     try:
         days = max(1, min(365, int(request.args.get("days", 30))))
     except (TypeError, ValueError):
         days = 30
-    days, items = _compute_agent_health(user, days)
+    weights = {
+        "reputation": request.args.get("w_reputation"),
+        "completion": request.args.get("w_completion"),
+        "conflict": request.args.get("w_conflict"),
+        "violation": request.args.get("w_violation"),
+    }
+    days, items = _compute_agent_health(user, days, weights=weights)
     return ApiResponse.success({"days": days, "items": items}).to_response()
 
 
@@ -3721,8 +3779,11 @@ def agent_health_alerts():
 
     Returns Agents whose composite health_score falls below
     ``min_health_score`` (default 60), with triggering reasons (low
-    reputation / low completion / conflicts / violations). Each entry
-    includes the full health fields. Surfaces Agents needing attention.
+    reputation / low completion / conflicts / violations) and concrete
+    ``recommendations``. Optional weight overrides (``w_reputation`` /
+    ``w_completion`` / ``w_conflict`` / ``w_violation``) re-weight the
+    composite score. Each entry includes the full health fields. Surfaces
+    Agents needing attention.
     """
     user = get_current_user()
     try:
@@ -3731,8 +3792,13 @@ def agent_health_alerts():
     except (TypeError, ValueError):
         days = 30
         min_health_score = 60
-
-    _, items = _compute_agent_health(user, days)
+    weights = {
+        "reputation": request.args.get("w_reputation"),
+        "completion": request.args.get("w_completion"),
+        "conflict": request.args.get("w_conflict"),
+        "violation": request.args.get("w_violation"),
+    }
+    _, items = _compute_agent_health(user, days, weights=weights, with_recommendations=True)
     alerts = []
     for a in items:
         if a["health_score"] >= min_health_score:
