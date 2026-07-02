@@ -3889,6 +3889,26 @@ def agent_health_trend():
     for (day, _aid), score in last_score_by_day_agent.items():
         day_scores.setdefault(day, []).append(score)
 
+    # 按日附加冲突事件计数（owner_id 命中当前用户）
+    conflict_rows = (
+        AgentConflict.query
+        .filter(AgentConflict.owner_id == user.id, AgentConflict.created_at >= since)
+        .with_entities(func.date(AgentConflict.created_at).label("d"), func.count(AgentConflict.id))
+        .group_by("d")
+        .all()
+    )
+    conflict_by_day = {str(d): c for d, c in conflict_rows if d}
+
+    # 按日附加沙盒违规事件计数
+    violation_rows = (
+        SandboxViolation.query
+        .filter(SandboxViolation.agent_id.in_(agent_ids), SandboxViolation.blocked_at >= since)
+        .with_entities(func.date(SandboxViolation.blocked_at).label("d"), func.count(SandboxViolation.id))
+        .group_by("d")
+        .all()
+    )
+    violation_by_day = {str(d): c for d, c in violation_rows if d}
+
     trend = []
     for day in sorted(day_scores.keys()):
         scores = day_scores[day]
@@ -3898,6 +3918,8 @@ def agent_health_trend():
             "avg_reputation": avg,
             "positive": pos_by_day.get(day, 0),
             "negative": neg_by_day.get(day, 0),
+            "conflicts": conflict_by_day.get(day, 0),
+            "sandbox_violations": violation_by_day.get(day, 0),
         })
 
     return ApiResponse.success({
@@ -3905,6 +3927,8 @@ def agent_health_trend():
         "trend": trend,
         "total_positive": sum(pos_by_day.values()),
         "total_negative": sum(neg_by_day.values()),
+        "total_conflicts": sum(conflict_by_day.values()),
+        "total_violations": sum(violation_by_day.values()),
     }).to_response()
 
 
