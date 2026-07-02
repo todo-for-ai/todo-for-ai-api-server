@@ -8788,6 +8788,62 @@ def experiences_stats():
     }).to_response()
 
 
+@agents_bp.route("/experiences/low-confidence", methods=["GET"])
+@unified_auth_required
+def experiences_low_confidence():
+    """List the current user's valid experiences with low confidence.
+
+    Returns experiences (across all of the user's Agents) whose confidence
+    falls below ``max_confidence`` (default 0.5), sorted by confidence
+    ascending. Each entry includes agent_id, domain, task_type,
+    experience_type, confidence, times_reused, and a key_learnings excerpt.
+    Surfaces weak knowledge entries that may need reinforcement or removal.
+    """
+    user = get_current_user()
+    try:
+        max_confidence = max(0.0, min(1.0, float(request.args.get("max_confidence", 0.5))))
+        limit = max(1, min(100, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        max_confidence = 0.5
+        limit = 20
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"max_confidence": max_confidence, "items": []}).to_response()
+
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+            AgentExperience.confidence.isnot(None),
+            AgentExperience.confidence < max_confidence,
+        )
+        .order_by(AgentExperience.confidence.asc())
+        .limit(limit)
+        .with_entities(
+            AgentExperience.id, AgentExperience.agent_id,
+            AgentExperience.domain, AgentExperience.task_type,
+            AgentExperience.experience_type, AgentExperience.confidence,
+            AgentExperience.times_reused, AgentExperience.key_learnings,
+        )
+        .all()
+    )
+
+    items = [{
+        "id": r.id,
+        "agent_id": r.agent_id,
+        "domain": r.domain or "(未分类)",
+        "task_type": r.task_type,
+        "experience_type": r.experience_type or "(未分类)",
+        "confidence": r.confidence,
+        "times_reused": r.times_reused or 0,
+        "key_learnings": (r.key_learnings or "")[:120],
+    } for r in rows]
+
+    return ApiResponse.success({"max_confidence": max_confidence, "items": items}).to_response()
+
+
 @agents_bp.route("/<int:agent_id>/experiences/recommend", methods=["GET"])
 @unified_auth_required
 def recommend_experiences(agent_id):
