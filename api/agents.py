@@ -7,7 +7,7 @@ import io
 import re
 from datetime import datetime, timedelta
 from flask import Blueprint, make_response, request
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, false as sa_false
 
 from core.auth import get_current_user, unified_auth_required
 from models import (
@@ -3236,6 +3236,146 @@ def workflow_step_stats():
         })
     items.sort(key=lambda x: x["total"], reverse=True)
     return ApiResponse.success({"items": items[:limit]}).to_response()
+
+
+@agents_bp.route("/workflows/failure-correlation", methods=["GET"])
+@unified_auth_required
+def workflow_failure_correlation():
+    """Cross-dimension correlation between failed workflow steps and
+    collaboration conflicts / sandbox violations.
+
+    For every failed step (status=failed) within the window, checks whether a
+    conflict (AgentConflict) or sandbox violation (SandboxViolation) involving
+    the same Agent occurred within ±window_hours of the step's finished_at.
+    Reports totals and co-occurrence rates, plus the top agents whose failures
+    most often coincide with conflicts/violations. Reveals whether failures
+    cluster with coordination breakdowns or sandbox escapes.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        window_hours = max(0, min(168, int(request.args.get("window_hours", 2))))
+    except (TypeError, ValueError):
+        days = 30
+        window_hours = 2
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+
+    failed_steps = (
+        WorkflowStepRun.query
+        .filter(
+            WorkflowStepRun.agent_id.in_(agent_ids) if agent_ids else sa_false(),
+            WorkflowStepRun.status == StepStatus.FAILED,
+            WorkflowStepRun.finished_at.isnot(None),
+            WorkflowStepRun.finished_at >= since,
+        )
+        .with_entities(
+            WorkflowStepRun.id, WorkflowStepRun.step_key, WorkflowStepRun.agent_id,
+            WorkflowStepRun.finished_at, WorkflowStepRun.task_id, WorkflowStepRun.run_id,
+        )
+        .all()
+    )
+
+    total_failed = len(failed_steps)
+    if total_failed == 0:
+        return ApiResponse.success({
+            "days": days,
+            "window_hours": window_hours,
+            "total_failed_steps": 0,
+            "with_conflict": 0,
+            "with_violation": 0,
+            "with_both": 0,
+            "conflict_rate": 0,
+            "violation_rate": 0,
+            "both_rate": 0,
+            "top_agents": [],
+        }).to_response()
+
+    # Pre-fetch conflicts and violations in the window for these agents
+    conflicts = (
+        AgentConflict.query
+        .filter(
+            AgentConflict.owner_id == user.id,
+            AgentConflict.created_at >= since - timedelta(hours=window_hours),
+        )
+        .with_entities(AgentConflict.created_at, AgentConflict.agent_ids)
+        .all()
+    ) if agent_ids else []
+    violations = (
+        SandboxViolation.query
+        .filter(
+            SandboxViolation.agent_id.in_(agent_ids),
+            SandboxViolation.blocked_at >= since - timedelta(hours=window_hours),
+        )
+        .with_entities(SandboxViolation.agent_id, SandboxViolation.blocked_at)
+        .all()
+    ) if agent_ids else []
+
+    def _near(times, target, agent_id, hours):
+        lo = target - timedelta(hours=hours)
+        hi = target + timedelta(hours=hours)
+        return any(lo <= t <= hi for t in times)
+
+    # Index violations by agent for speed
+    violations_by_agent: dict = {}
+    for aid, blocked_at in violations:
+        violations_by_agent.setdefault(aid, []).append(blocked_at)
+
+    per_agent = {}  # agent_id -> {failed, conflict, violation}
+    with_conflict = 0
+    with_violation = 0
+    with_both = 0
+    for _id, step_key, aid, finished_at, task_id, run_id in failed_steps:
+        aid_int = aid
+        v_times = violations_by_agent.get(aid_int, [])
+        has_v = _near(v_times, finished_at, aid_int, window_hours) if v_times else False
+        # conflicts store agent_ids list; check membership + time
+        has_c = False
+        for created_at, agent_ids_json in conflicts:
+            if agent_ids_json and aid_int in (agent_ids_json or []):
+                if abs((created_at - finished_at).total_seconds()) <= window_hours * 3600:
+                    has_c = True
+                    break
+        if has_c:
+            with_conflict += 1
+        if has_v:
+            with_violation += 1
+        if has_c and has_v:
+            with_both += 1
+        bucket = per_agent.setdefault(aid_int, {"failed": 0, "conflict": 0, "violation": 0, "agent_id": aid_int})
+        bucket["failed"] += 1
+        if has_c:
+            bucket["conflict"] += 1
+        if has_v:
+            bucket["violation"] += 1
+
+    # Enrich top agents with name
+    top_agent_ids = sorted(per_agent.keys(), key=lambda k: per_agent[k]["conflict"] + per_agent[k]["violation"], reverse=True)[:8]
+    name_map = {a.id: a.name for a in Agent.query.filter(Agent.id.in_(top_agent_ids)).with_entities(Agent.id, Agent.name).all()} if top_agent_ids else {}
+    top_agents = []
+    for aid in top_agent_ids:
+        b = per_agent[aid]
+        top_agents.append({
+            "agent_id": aid,
+            "name": name_map.get(aid, f"#{aid}"),
+            "failed_steps": b["failed"],
+            "with_conflict": b["conflict"],
+            "with_violation": b["violation"],
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "window_hours": window_hours,
+        "total_failed_steps": total_failed,
+        "with_conflict": with_conflict,
+        "with_violation": with_violation,
+        "with_both": with_both,
+        "conflict_rate": round(with_conflict / total_failed * 100, 1),
+        "violation_rate": round(with_violation / total_failed * 100, 1),
+        "both_rate": round(with_both / total_failed * 100, 1),
+        "top_agents": top_agents,
+    }).to_response()
 
 
 @agents_bp.route("/workflows/run-trend", methods=["GET"])
