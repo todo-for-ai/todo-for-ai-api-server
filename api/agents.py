@@ -3606,6 +3606,115 @@ def conflicts_sandbox_correlation():
     }).to_response()
 
 
+@agents_bp.route("/health", methods=["GET"])
+@unified_auth_required
+def agent_health():
+    """Per-Agent composite health score for the current user.
+
+    Combines multiple dimensions into a single 0-100 health score per Agent:
+      - reputation score (weight 0.4)
+      - assignment completion rate (weight 0.3)
+      - conflict penalty (weight 0.15): fewer recent conflicts is better
+      - sandbox violation penalty (weight 0.15): fewer recent violations is better
+
+    Also returns the raw sub-scores so callers can see what drags health down.
+    Reveals a single comparable metric across all of a user's Agents.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agents = Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id, Agent.name, Agent.status).all()
+    if not agents:
+        return ApiResponse.success({"days": days, "items": []}).to_response()
+
+    agent_ids = [a.id for a in agents]
+
+    # 声誉
+    reps = {r.agent_id: r for r in AgentReputation.query.filter(AgentReputation.agent_id.in_(agent_ids)).all()}
+    # 产出（基于 TaskAssignment 状态，窗口内）
+    assign_rows = (
+        TaskAssignment.query
+        .filter(TaskAssignment.agent_id.in_(agent_ids), TaskAssignment.created_at >= since)
+        .with_entities(TaskAssignment.agent_id, TaskAssignment.state)
+        .all()
+    )
+    prod: dict = {}
+    for aid, state in assign_rows:
+        b = prod.setdefault(aid, {"total": 0, "done": 0})
+        b["total"] += 1
+        if state and state.value == "done":
+            b["done"] += 1
+
+    # 冲突计数（窗口内，agent_ids JSON 含该 agent）
+    conflict_rows = (
+        AgentConflict.query
+        .filter(AgentConflict.owner_id == user.id, AgentConflict.created_at >= since)
+        .with_entities(AgentConflict.agent_ids)
+        .all()
+    )
+    conflict_counts: dict = {}
+    for (agent_ids_json,) in conflict_rows:
+        for aid in (agent_ids_json or []):
+            conflict_counts[aid] = conflict_counts.get(aid, 0) + 1
+
+    # 违规计数（窗口内）
+    violation_rows = (
+        SandboxViolation.query
+        .filter(SandboxViolation.agent_id.in_(agent_ids), SandboxViolation.blocked_at >= since)
+        .with_entities(SandboxViolation.agent_id, func.count(SandboxViolation.id))
+        .group_by(SandboxViolation.agent_id)
+        .all()
+    )
+    violation_counts = {aid: c for aid, c in violation_rows}
+
+    max_conflicts = max(conflict_counts.values(), default=1)
+    max_violations = max(violation_counts.values(), default=1)
+
+    items = []
+    for a in agents:
+        rep = reps.get(a.id)
+        rep_score = rep.score if rep and rep.score is not None else 50.0
+        p = prod.get(a.id, {"total": 0, "done": 0})
+        completion_rate = (p["done"] / p["total"] * 100) if p["total"] > 0 else None
+        # 完成率子分：无分配时按 50（中性）
+        completion_score = completion_rate if completion_rate is not None else 50.0
+        cc = conflict_counts.get(a.id, 0)
+        vc = violation_counts.get(a.id, 0)
+        # 冲突/违规子分：0 → 100，最大值 → 0，线性
+        conflict_score = 100 * (1 - cc / max_conflicts) if max_conflicts > 0 else 100.0
+        violation_score = 100 * (1 - vc / max_violations) if max_violations > 0 else 100.0
+
+        health = round(
+            rep_score * 0.4 + completion_score * 0.3 + conflict_score * 0.15 + violation_score * 0.15,
+            1,
+        )
+        items.append({
+            "agent_id": a.id,
+            "name": a.name,
+            "status": a.status.value if a.status else None,
+            "health_score": health,
+            "reputation_score": round(rep_score, 1),
+            "completion_rate": round(completion_rate, 1) if completion_rate is not None else None,
+            "total_assignments": p["total"],
+            "done_assignments": p["done"],
+            "conflicts": cc,
+            "sandbox_violations": vc,
+            "sub_scores": {
+                "reputation": round(rep_score, 1),
+                "completion": round(completion_score, 1),
+                "conflict": round(conflict_score, 1),
+                "violation": round(violation_score, 1),
+            },
+        })
+    items.sort(key=lambda x: x["health_score"], reverse=True)
+
+    return ApiResponse.success({"days": days, "items": items}).to_response()
+
+
 @agents_bp.route("/workflows/run-trend", methods=["GET"])
 @unified_auth_required
 def workflow_run_trend():
