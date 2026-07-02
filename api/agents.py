@@ -10109,6 +10109,114 @@ def agent_productivity_trend():
     }).to_response()
 
 
+@agents_bp.route("/productivity/alerts", methods=["GET"])
+@unified_auth_required
+def agent_productivity_alerts():
+    """Low-efficiency Agent alert list for the current user.
+
+    Returns Agents whose assignment completion rate falls below
+    ``min_completion_rate`` (default 50%) OR whose failure rate exceeds
+    ``max_failure_rate`` (default 30%) within the window, provided they have
+    at least ``min_assignments`` (default 3) assignments. Each entry includes
+    the same productivity fields as ``/agents/productivity`` plus the
+    triggering reason. Surfaces Agents needing attention.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        min_completion_rate = max(0, min(100, float(request.args.get("min_completion_rate", 50))))
+        max_failure_rate = max(0, min(100, float(request.args.get("max_failure_rate", 30))))
+        min_assignments = max(1, min(1000, int(request.args.get("min_assignments", 3))))
+    except (TypeError, ValueError):
+        days = 30
+        min_completion_rate = 50
+        max_failure_rate = 30
+        min_assignments = 3
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "items": []}).to_response()
+
+    rows = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.agent_id.in_(agent_ids),
+            TaskAssignment.created_at >= since,
+        )
+        .with_entities(
+            TaskAssignment.agent_id, TaskAssignment.state,
+            TaskAssignment.claimed_at, TaskAssignment.completed_at,
+        )
+        .all()
+    )
+
+    agg: dict = {}
+    durations = {}
+    for aid, state, claimed_at, completed_at in rows:
+        bucket = agg.setdefault(aid, {
+            "agent_id": aid, "total": 0, "done": 0, "failed": 0,
+            "cancelled": 0, "expired": 0, "in_progress": 0,
+        })
+        bucket["total"] += 1
+        s = state.value if state else None
+        if s == "done":
+            bucket["done"] += 1
+            if claimed_at and completed_at and completed_at > claimed_at:
+                durations.setdefault(aid, []).append((completed_at - claimed_at).total_seconds() / 3600)
+        elif s == "failed":
+            bucket["failed"] += 1
+        elif s == "cancelled":
+            bucket["cancelled"] += 1
+        elif s == "expired":
+            bucket["expired"] += 1
+        else:
+            bucket["in_progress"] += 1
+
+    name_map = {a.id: a.name for a in Agent.query.filter(Agent.id.in_(list(agg.keys()))).with_entities(Agent.id, Agent.name).all()} if agg else {}
+    items = []
+    for aid, b in agg.items():
+        total = b["total"]
+        if total < min_assignments:
+            continue
+        done = b["done"]
+        failed = b["failed"]
+        completion_rate = round(done / total * 100, 1) if total else 0
+        failure_rate = round(failed / total * 100, 1) if total else 0
+        reasons = []
+        if completion_rate < min_completion_rate:
+            reasons.append(f"完成率 {completion_rate}% < {min_completion_rate}%")
+        if failure_rate > max_failure_rate:
+            reasons.append(f"失败率 {failure_rate}% > {max_failure_rate}%")
+        if not reasons:
+            continue
+        ds = durations.get(aid, [])
+        items.append({
+            "agent_id": aid,
+            "name": name_map.get(aid, f"#{aid}"),
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "cancelled": b["cancelled"],
+            "expired": b["expired"],
+            "in_progress": b["in_progress"],
+            "completion_rate": completion_rate,
+            "failure_rate": failure_rate,
+            "avg_completion_hours": round(sum(ds) / len(ds), 2) if ds else None,
+            "reasons": reasons,
+        })
+    # 最差优先：按完成率升序、失败率降序
+    items.sort(key=lambda x: (x["completion_rate"], -x["failure_rate"]))
+
+    return ApiResponse.success({
+        "days": days,
+        "min_completion_rate": min_completion_rate,
+        "max_failure_rate": max_failure_rate,
+        "min_assignments": min_assignments,
+        "items": items,
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
