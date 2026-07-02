@@ -3419,6 +3419,7 @@ def workflow_failure_correlation_by_step():
             "days": days,
             "window_hours": window_hours,
             "items": [],
+            "step_conflict_type_matrix": {},
         }).to_response()
 
     conflicts = (
@@ -3427,7 +3428,7 @@ def workflow_failure_correlation_by_step():
             AgentConflict.owner_id == user.id,
             AgentConflict.created_at >= since - timedelta(hours=window_hours),
         )
-        .with_entities(AgentConflict.created_at, AgentConflict.agent_ids)
+        .with_entities(AgentConflict.created_at, AgentConflict.agent_ids, AgentConflict.conflict_type)
         .all()
     ) if agent_ids else []
     violations = (
@@ -3450,15 +3451,19 @@ def workflow_failure_correlation_by_step():
         v_times = violations_by_agent.get(aid_int, [])
         has_v = any(abs((t - finished_at).total_seconds()) <= window_hours * 3600 for t in v_times) if v_times else False
         has_c = False
-        for created_at, agent_ids_json in conflicts:
+        matched_conflict_types: set = set()
+        for created_at, agent_ids_json, ctype in conflicts:
             if agent_ids_json and aid_int in (agent_ids_json or []):
                 if abs((created_at - finished_at).total_seconds()) <= window_hours * 3600:
                     has_c = True
-                    break
-        bucket = per_step.setdefault(step_key, {"step_key": step_key, "failed": 0, "with_conflict": 0, "with_violation": 0})
+                    if ctype is not None:
+                        matched_conflict_types.add(ctype.value if hasattr(ctype, 'value') else str(ctype))
+        bucket = per_step.setdefault(step_key, {"step_key": step_key, "failed": 0, "with_conflict": 0, "with_violation": 0, "conflict_types": {}})
         bucket["failed"] += 1
         if has_c:
             bucket["with_conflict"] += 1
+            for ct in matched_conflict_types:
+                bucket["conflict_types"][ct] = bucket["conflict_types"].get(ct, 0) + 1
         if has_v:
             bucket["with_violation"] += 1
 
@@ -3472,13 +3477,21 @@ def workflow_failure_correlation_by_step():
             "with_violation": b["with_violation"],
             "conflict_rate": round(b["with_conflict"] / f * 100, 1) if f else 0,
             "violation_rate": round(b["with_violation"] / f * 100, 1) if f else 0,
+            "conflict_types": b.get("conflict_types", {}),
         })
     items.sort(key=lambda x: (x["with_conflict"] + x["with_violation"], x["failed"]), reverse=True)
+
+    # 步骤 × 冲突类型矩阵：{step_key: {conflict_type: count}}
+    step_conflict_type_matrix: dict = {}
+    for it in items:
+        for ct, c in (it.get("conflict_types") or {}).items():
+            step_conflict_type_matrix.setdefault(it["step_key"], {})[ct] = c
 
     return ApiResponse.success({
         "days": days,
         "window_hours": window_hours,
         "items": items[:30],
+        "step_conflict_type_matrix": step_conflict_type_matrix,
     }).to_response()
 
 
