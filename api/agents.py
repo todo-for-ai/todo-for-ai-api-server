@@ -3378,6 +3378,110 @@ def workflow_failure_correlation():
     }).to_response()
 
 
+@agents_bp.route("/workflows/failure-correlation-by-step", methods=["GET"])
+@unified_auth_required
+def workflow_failure_correlation_by_step():
+    """Per-step-key failure correlation with conflicts / sandbox violations.
+
+    Like ``workflow_failure_correlation`` but aggregated by ``step_key``:
+    for each step key, how many of its failures coincided (±window_hours,
+    same Agent) with a conflict or sandbox violation. Reveals which steps
+    are most prone to triggering coordination breakdowns or sandbox escapes.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        window_hours = max(0, min(168, int(request.args.get("window_hours", 2))))
+    except (TypeError, ValueError):
+        days = 30
+        window_hours = 2
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+
+    failed_steps = (
+        WorkflowStepRun.query
+        .filter(
+            WorkflowStepRun.agent_id.in_(agent_ids) if agent_ids else sa_false(),
+            WorkflowStepRun.status == StepStatus.FAILED,
+            WorkflowStepRun.finished_at.isnot(None),
+            WorkflowStepRun.finished_at >= since,
+        )
+        .with_entities(
+            WorkflowStepRun.step_key, WorkflowStepRun.agent_id,
+            WorkflowStepRun.finished_at,
+        )
+        .all()
+    )
+
+    if not failed_steps:
+        return ApiResponse.success({
+            "days": days,
+            "window_hours": window_hours,
+            "items": [],
+        }).to_response()
+
+    conflicts = (
+        AgentConflict.query
+        .filter(
+            AgentConflict.owner_id == user.id,
+            AgentConflict.created_at >= since - timedelta(hours=window_hours),
+        )
+        .with_entities(AgentConflict.created_at, AgentConflict.agent_ids)
+        .all()
+    ) if agent_ids else []
+    violations = (
+        SandboxViolation.query
+        .filter(
+            SandboxViolation.agent_id.in_(agent_ids),
+            SandboxViolation.blocked_at >= since - timedelta(hours=window_hours),
+        )
+        .with_entities(SandboxViolation.agent_id, SandboxViolation.blocked_at)
+        .all()
+    ) if agent_ids else []
+
+    violations_by_agent: dict = {}
+    for aid, blocked_at in violations:
+        violations_by_agent.setdefault(aid, []).append(blocked_at)
+
+    per_step: dict = {}
+    for step_key, aid, finished_at in failed_steps:
+        aid_int = aid
+        v_times = violations_by_agent.get(aid_int, [])
+        has_v = any(abs((t - finished_at).total_seconds()) <= window_hours * 3600 for t in v_times) if v_times else False
+        has_c = False
+        for created_at, agent_ids_json in conflicts:
+            if agent_ids_json and aid_int in (agent_ids_json or []):
+                if abs((created_at - finished_at).total_seconds()) <= window_hours * 3600:
+                    has_c = True
+                    break
+        bucket = per_step.setdefault(step_key, {"step_key": step_key, "failed": 0, "with_conflict": 0, "with_violation": 0})
+        bucket["failed"] += 1
+        if has_c:
+            bucket["with_conflict"] += 1
+        if has_v:
+            bucket["with_violation"] += 1
+
+    items = []
+    for b in per_step.values():
+        f = b["failed"]
+        items.append({
+            "step_key": b["step_key"],
+            "failed": f,
+            "with_conflict": b["with_conflict"],
+            "with_violation": b["with_violation"],
+            "conflict_rate": round(b["with_conflict"] / f * 100, 1) if f else 0,
+            "violation_rate": round(b["with_violation"] / f * 100, 1) if f else 0,
+        })
+    items.sort(key=lambda x: (x["with_conflict"] + x["with_violation"], x["failed"]), reverse=True)
+
+    return ApiResponse.success({
+        "days": days,
+        "window_hours": window_hours,
+        "items": items[:30],
+    }).to_response()
+
+
 @agents_bp.route("/workflows/run-trend", methods=["GET"])
 @unified_auth_required
 def workflow_run_trend():
