@@ -8249,12 +8249,14 @@ def experiences_stats():
         AgentExperience.agent_id.in_(agent_ids),
         AgentExperience.is_valid.is_(True),
     ).with_entities(
+        AgentExperience.id,
         AgentExperience.domain,
         AgentExperience.task_type,
         AgentExperience.experience_type,
         AgentExperience.is_shared,
         AgentExperience.times_reused,
         AgentExperience.confidence,
+        AgentExperience.key_learnings,
     ).all()
 
     by_domain: dict = {}
@@ -8263,7 +8265,9 @@ def experiences_stats():
     shared = 0
     total_reuses = 0
     confidences = []
-    for domain, task_type, exp_type, is_shared, times_reused, confidence in rows:
+    confidence_buckets = {"0-0.3": 0, "0.3-0.5": 0, "0.5-0.7": 0, "0.7-0.85": 0, "0.85-1.0": 0}
+    reuse_candidates = []
+    for exp_id, domain, task_type, exp_type, is_shared, times_reused, confidence, key_learnings in rows:
         d = domain or "(未分类)"
         by_domain[d] = by_domain.get(d, 0) + 1
         if task_type:
@@ -8275,11 +8279,33 @@ def experiences_stats():
         total_reuses += times_reused or 0
         if confidence is not None:
             confidences.append(confidence)
+            c = confidence
+            if c < 0.3:
+                confidence_buckets["0-0.3"] += 1
+            elif c < 0.5:
+                confidence_buckets["0.3-0.5"] += 1
+            elif c < 0.7:
+                confidence_buckets["0.5-0.7"] += 1
+            elif c < 0.85:
+                confidence_buckets["0.7-0.85"] += 1
+            else:
+                confidence_buckets["0.85-1.0"] += 1
+        if (times_reused or 0) > 0:
+            reuse_candidates.append({
+                "id": exp_id,
+                "domain": d,
+                "task_type": task_type,
+                "experience_type": et,
+                "times_reused": times_reused or 0,
+                "confidence": confidence,
+                "key_learnings": (key_learnings or "")[:120],
+            })
 
     avg_conf = round(sum(confidences) / len(confidences), 2) if confidences else None
     # Sort breakdowns by count desc for display
     by_domain_sorted = dict(sorted(by_domain.items(), key=lambda kv: kv[1], reverse=True))
     by_task_sorted = dict(sorted(by_task_type.items(), key=lambda kv: kv[1], reverse=True))
+    top_reused = sorted(reuse_candidates, key=lambda x: x["times_reused"], reverse=True)[:10]
     return ApiResponse.success({
         "total": len(rows),
         "by_domain": by_domain_sorted,
@@ -8288,6 +8314,8 @@ def experiences_stats():
         "shared": shared,
         "total_reuses": total_reuses,
         "avg_confidence": avg_conf,
+        "by_confidence_bucket": confidence_buckets,
+        "top_reused": top_reused,
     }).to_response()
 
 
