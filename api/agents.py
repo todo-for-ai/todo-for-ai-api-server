@@ -10070,6 +10070,68 @@ def conflicts_by_agent():
     return ApiResponse.success({"items": top}).to_response()
 
 
+@agents_bp.route("/conflicts/strategy-stats", methods=["GET"])
+@unified_auth_required
+def conflicts_strategy_stats():
+    """Resolution strategy effectiveness for the current user.
+
+    For each ``ConflictResolutionStrategy`` actually used (resolution_strategy
+    set on a resolved/ignored conflict): usage count, and the recurrence rate
+    — the fraction of conflicts resolved with that strategy whose ``task_id``
+    later saw another conflict. A high recurrence rate flags strategies that
+    suppress rather than solve. Conflicts without a task_id are excluded from
+    recurrence calculation (cannot be linked to a later conflict).
+    """
+    user = get_current_user()
+    rows = AgentConflict.query.filter_by(owner_id=user.id).filter(
+        AgentConflict.resolution_strategy.isnot(None)
+    ).with_entities(
+        AgentConflict.resolution_strategy, AgentConflict.task_id
+    ).all()
+
+    usage: dict = {}
+    task_strategies: list = []  # (task_id, strategy) for recurrence join
+    for strat, task_id in rows:
+        if strat is None:
+            continue
+        s = strat.value if hasattr(strat, "value") else str(strat)
+        entry = usage.setdefault(s, {"strategy": s, "uses": 0, "recurrences": 0, "with_task": 0})
+        entry["uses"] += 1
+        if task_id is not None:
+            entry["with_task"] += 1
+            task_strategies.append((task_id, s))
+
+    # Recurrence: a task that had a conflict resolved with strategy S, then
+    # later had *any* conflict again. Count distinct tasks per strategy.
+    all_task_conflicts = AgentConflict.query.filter_by(owner_id=user.id).filter(
+        AgentConflict.task_id.isnot(None)
+    ).with_entities(AgentConflict.task_id).all()
+    task_conflict_count: dict = {}
+    for (tid,) in all_task_conflicts:
+        task_conflict_count[tid] = task_conflict_count.get(tid, 0) + 1
+
+    seen_tasks: dict = {}
+    for tid, s in task_strategies:
+        if tid in seen_tasks:
+            continue
+        seen_tasks[tid] = s
+        if task_conflict_count.get(tid, 0) > 1:
+            usage[s]["recurrences"] += 1
+
+    items = []
+    for s, entry in usage.items():
+        denom = entry["with_task"] or 1
+        items.append({
+            "strategy": s,
+            "uses": entry["uses"],
+            "with_task": entry["with_task"],
+            "recurrences": entry["recurrences"],
+            "recurrence_rate": round(entry["recurrences"] / denom, 3),
+        })
+    items.sort(key=lambda x: x["uses"], reverse=True)
+    return ApiResponse.success({"items": items}).to_response()
+
+
 @agents_bp.route("/conflicts/trend", methods=["GET"])
 @unified_auth_required
 def conflicts_trend():
