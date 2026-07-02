@@ -9385,6 +9385,54 @@ def sandbox_dashboard():
     }).to_response()
 
 
+@agents_bp.route("/sandboxes/violation-trend", methods=["GET"])
+@unified_auth_required
+def sandbox_violation_trend():
+    """Daily sandbox violation counts + by-type breakdown for the current user.
+
+    Buckets by calendar day (UTC) using ``blocked_at``. Also returns a
+    by-violation-type aggregate over the window. Useful for spotting whether
+    a policy tightening or Agent change is producing more violations.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+    since = datetime.utcnow() - timedelta(days=days)
+
+    sandbox_ids = [s.id for s in AgentSandbox.query.filter_by(owner_id=user.id).with_entities(AgentSandbox.id).all()]
+    if not sandbox_ids:
+        return ApiResponse.success({"days": days, "trend": [], "by_type": {}}).to_response()
+
+    from sqlalchemy import func as sa_func
+    daily = (
+        db.session.query(
+            sa_func.date(SandboxViolation.blocked_at).label("date"),
+            sa_func.count(SandboxViolation.id).label("count"),
+        )
+        .filter(SandboxViolation.sandbox_id.in_(sandbox_ids), SandboxViolation.blocked_at >= since)
+        .group_by(sa_func.date(SandboxViolation.blocked_at))
+        .order_by(sa_func.date(SandboxViolation.blocked_at))
+        .all()
+    )
+    trend = [{"date": str(d), "count": c} for d, c in daily]
+
+    by_type = {}
+    for vt in SandboxViolationType:
+        by_type[vt.value] = SandboxViolation.query.filter(
+            SandboxViolation.sandbox_id.in_(sandbox_ids),
+            SandboxViolation.violation_type == vt,
+            SandboxViolation.blocked_at >= since,
+        ).count()
+
+    return ApiResponse.success({
+        "days": days,
+        "trend": trend,
+        "by_type": by_type,
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
