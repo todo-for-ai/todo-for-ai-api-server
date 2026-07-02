@@ -3479,6 +3479,12 @@ def complete_workflow_step(run_id, step_key):
             agent_id=sr.agent_id,
             success=(sr.status == StepStatus.SUCCEEDED),
             completion_time=completion_time,
+            context={
+                "task_id": sr.task_id,
+                "step_key": sr.step_key,
+                "workflow_run_id": sr.run_id,
+                "duration_sec": round(completion_time, 1) if completion_time else None,
+            },
         )
 
         # Auto-extract experience from step outcome
@@ -3628,6 +3634,11 @@ def _propagate_sub_workflow_completion(sub_wf_run):
             AgentReputation.record_outcome(
                 agent_id=psr.agent_id,
                 success=(sub_wf_run.status == WorkflowStatus.SUCCEEDED),
+                context={
+                    "parent_workflow_run_id": psr.run_id,
+                    "sub_workflow_run_id": sub_wf_run.id,
+                    "step_key": psr.step_key,
+                },
             )
 
         # Advance the parent workflow
@@ -7794,11 +7805,20 @@ def get_agent_reputation_history(agent_id):
         d = r.detail or {}
         points.append({
             "at": r.created_at.isoformat() if r.created_at else None,
+            "audit_id": r.id,
             "new_score": d.get("new_score"),
             "score_delta": d.get("score_delta"),
             "quality_delta": d.get("quality_delta"),
             "success": d.get("success"),
             "total_tasks": d.get("total_tasks"),
+            # Originating task/step context (only present for outcomes recorded
+            # after the context fields were added; older audit rows lack them).
+            "task_id": d.get("task_id"),
+            "step_key": d.get("step_key"),
+            "workflow_run_id": d.get("workflow_run_id"),
+            "parent_workflow_run_id": d.get("parent_workflow_run_id"),
+            "sub_workflow_run_id": d.get("sub_workflow_run_id"),
+            "duration_sec": d.get("duration_sec"),
         })
 
     rep = AgentReputation.get_or_create(agent_id)

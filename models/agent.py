@@ -1555,13 +1555,18 @@ class AgentReputation(BaseModel):
         return rep
 
     @classmethod
-    def record_outcome(cls, agent_id, success: bool, completion_time=None, on_time=True, quality_delta=0):
+    def record_outcome(cls, agent_id, success: bool, completion_time=None, on_time=True, quality_delta=0, context=None):
         """Record a task outcome and update the reputation score.
 
         Scoring:
         - Success: +2 base, +bonus for on_time, +bonus for fast completion
         - Failure: -5 base
         - Quality feedback: +/- quality_delta
+
+        ``context`` is an optional dict merged into the audit ``detail`` so a
+        reputation change point can be traced back to the originating task /
+        workflow step (e.g. ``{"task_id":.., "step_key":.., "workflow_run_id":..}``).
+        Only forward-only fields; do not put unserializable objects here.
         """
         rep = cls.get_or_create(agent_id)
         rep.total_tasks += 1
@@ -1593,12 +1598,15 @@ class AgentReputation(BaseModel):
         # too frequent and low-signal to audit individually.
         if not success or quality_delta != 0:
             try:
+                detail = {"success": success, "score_delta": score_delta,
+                          "quality_delta": quality_delta, "new_score": rep.score,
+                          "total_tasks": rep.total_tasks}
+                if context:
+                    detail.update(context)
                 AuditLog.record(
                     action="reputation.update", resource_type="agent", resource_id=agent_id,
                     actor_type="system", actor_agent_id=agent_id,
-                    detail={"success": success, "score_delta": score_delta,
-                            "quality_delta": quality_delta, "new_score": rep.score,
-                            "total_tasks": rep.total_tasks},
+                    detail=detail,
                 )
             except Exception:
                 pass  # Never fail the reputation update on an audit error
