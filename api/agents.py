@@ -9482,6 +9482,35 @@ def sandbox_violations_by_agent():
     return ApiResponse.success({"days": days, "items": top}).to_response()
 
 
+@agents_bp.route("/sandboxes/template-usage", methods=["GET"])
+@unified_auth_required
+def sandbox_template_usage():
+    """Sandbox policy template instantiation stats for the current user.
+
+    Aggregates ``sandbox.template_instantiate`` audit events by template_key:
+    how many times each preset template was instantiated, and how many of
+    those instances were bound to an Agent (vs. left as a reusable policy).
+    Reveals which templates are most popular in practice.
+    """
+    user = get_current_user()
+    rows = AuditLog.query.filter(
+        AuditLog.action == "sandbox.template_instantiate",
+        AuditLog.actor_user_id == user.id,
+    ).all()
+    agg: dict = {}
+    for r in rows:
+        d = r.detail or {}
+        key = d.get("template_key")
+        if not key:
+            continue
+        entry = agg.setdefault(key, {"template_key": key, "uses": 0, "bound_to_agent": 0})
+        entry["uses"] += 1
+        if d.get("agent_id") is not None:
+            entry["bound_to_agent"] += 1
+    items = sorted(agg.values(), key=lambda x: x["uses"], reverse=True)
+    return ApiResponse.success({"items": items}).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
