@@ -9433,6 +9433,55 @@ def sandbox_violation_trend():
     }).to_response()
 
 
+@agents_bp.route("/sandboxes/violations-by-agent", methods=["GET"])
+@unified_auth_required
+def sandbox_violations_by_agent():
+    """Per-Agent sandbox violation counts for the current user.
+
+    Aggregates SandboxViolation by ``agent_id`` over the lookback window,
+    with a by-violation-type sub-count. Returns the top N by total, enriched
+    with the Agent's name/kind. Reveals which Agents most frequently attempt
+    disallowed actions.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+    since = datetime.utcnow() - timedelta(days=days)
+    try:
+        limit = max(1, min(100, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        limit = 20
+
+    sandbox_ids = [s.id for s in AgentSandbox.query.filter_by(owner_id=user.id).with_entities(AgentSandbox.id).all()]
+    if not sandbox_ids:
+        return ApiResponse.success({"days": days, "items": []}).to_response()
+
+    rows = SandboxViolation.query.filter(
+        SandboxViolation.sandbox_id.in_(sandbox_ids),
+        SandboxViolation.blocked_at >= since,
+    ).with_entities(SandboxViolation.agent_id, SandboxViolation.violation_type).all()
+
+    agg: dict = {}
+    for aid, vt in rows:
+        if aid is None:
+            continue
+        entry = agg.setdefault(aid, {"agent_id": aid, "total": 0, "by_type": {}})
+        entry["total"] += 1
+        key = vt.value if hasattr(vt, "value") else str(vt)
+        entry["by_type"][key] = entry["by_type"].get(key, 0) + 1
+
+    top = sorted(agg.values(), key=lambda x: x["total"], reverse=True)[:limit]
+    agent_ids = [e["agent_id"] for e in top]
+    agents = {a.id: a for a in Agent.query.filter(Agent.id.in_(agent_ids)).all()} if agent_ids else {}
+    for e in top:
+        a = agents.get(e["agent_id"])
+        e["name"] = a.name if a else None
+        e["kind"] = a.kind.value if a and a.kind else None
+    return ApiResponse.success({"days": days, "items": top}).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
