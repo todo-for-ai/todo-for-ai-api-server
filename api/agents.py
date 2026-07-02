@@ -3232,6 +3232,57 @@ def workflow_step_stats():
     return ApiResponse.success({"items": items[:limit]}).to_response()
 
 
+@agents_bp.route("/workflows/run-trend", methods=["GET"])
+@unified_auth_required
+def workflow_run_trend():
+    """Daily workflow run outcome trend for the current user.
+
+    Buckets by calendar day (UTC) using ``finished_at`` (when the run reached
+    a terminal state). Each bucket has ``succeeded`` and ``failed`` counts.
+    Runs still pending/running/paused/cancelled are excluded (no finish time
+    or non-terminal). Useful for charting workflow reliability over time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+    since = datetime.utcnow() - timedelta(days=days)
+
+    from sqlalchemy import func as sa_func
+    daily = (
+        db.session.query(
+            sa_func.date(WorkflowRun.finished_at).label("date"),
+            WorkflowRun.status,
+            sa_func.count(WorkflowRun.id).label("count"),
+        )
+        .filter(
+            WorkflowRun.owner_id == user.id,
+            WorkflowRun.finished_at.isnot(None),
+            WorkflowRun.finished_at >= since,
+        )
+        .group_by(sa_func.date(WorkflowRun.finished_at), WorkflowRun.status)
+        .all()
+    )
+    trend_map: dict = {}
+    for d, status, c in daily:
+        key = str(d)
+        bucket = trend_map.setdefault(key, {"date": key, "succeeded": 0, "failed": 0})
+        if status == WorkflowStatus.SUCCEEDED:
+            bucket["succeeded"] = c
+        elif status == WorkflowStatus.FAILED:
+            bucket["failed"] = c
+    trend = sorted(trend_map.values(), key=lambda x: x["date"])
+    total_succeeded = sum(b["succeeded"] for b in trend)
+    total_failed = sum(b["failed"] for b in trend)
+    return ApiResponse.success({
+        "days": days,
+        "trend": trend,
+        "total_succeeded": total_succeeded,
+        "total_failed": total_failed,
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>", methods=["GET"])
 @unified_auth_required
 def get_workflow_run(run_id):
