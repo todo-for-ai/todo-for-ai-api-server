@@ -556,6 +556,10 @@ def task_stats():
             "avg_lifecycle_hours": None,
             "lifecycle_buckets": {},
             "avg_completion_rate": 0,
+            "by_project": [],
+            "overdue_count": 0,
+            "with_due_date": 0,
+            "overdue_rate": 0,
         }).to_response()
 
     # 按状态分布
@@ -611,6 +615,29 @@ def task_stats():
     cr_rows = base_query.with_entities(func.avg(Task.completion_rate)).scalar()
     avg_completion_rate = round(cr_rows, 1) if cr_rows is not None else 0
 
+    # 按项目分布
+    project_rows = (
+        base_query.with_entities(Task.project_id, Project.name, func.count(Task.id))
+        .group_by(Task.project_id, Project.name)
+        .order_by(func.count(Task.id).desc())
+        .limit(10)
+        .all()
+    )
+    by_project = [{"project_id": pid, "name": pname or f"#{pid}", "count": c} for pid, pname, c in project_rows]
+
+    # 逾期统计：有 due_date，未结束（非 done/cancelled），且 due_date < now
+    now = datetime.utcnow()
+    terminal_states = [TaskStatus.DONE, TaskStatus.CANCELLED]
+    overdue_query = base_query.filter(
+        Task.due_date.isnot(None),
+        Task.due_date < now,
+        ~Task.status.in_(terminal_states),
+    )
+    overdue_count = overdue_query.count()
+    # 有 due_date 的任务总数（用于算逾期率分母）
+    with_due = base_query.filter(Task.due_date.isnot(None)).count()
+    overdue_rate = round(overdue_count / with_due * 100, 1) if with_due else 0
+
     return ApiResponse.success({
         "total": total,
         "by_status": by_status,
@@ -622,4 +649,8 @@ def task_stats():
         "avg_lifecycle_hours": avg_lifecycle,
         "lifecycle_buckets": buckets,
         "avg_completion_rate": avg_completion_rate,
+        "by_project": by_project,
+        "overdue_count": overdue_count,
+        "with_due_date": with_due,
+        "overdue_rate": overdue_rate,
     }).to_response()
