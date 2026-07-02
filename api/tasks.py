@@ -560,6 +560,7 @@ def task_stats():
             "overdue_count": 0,
             "with_due_date": 0,
             "overdue_rate": 0,
+            "by_priority_status": {},
         }).to_response()
 
     # 按状态分布
@@ -638,6 +639,14 @@ def task_stats():
     with_due = base_query.filter(Task.due_date.isnot(None)).count()
     overdue_rate = round(overdue_count / with_due * 100, 1) if with_due else 0
 
+    # 优先级 × 状态矩阵：{priority: {status: count}}
+    ps_rows = base_query.with_entities(Task.priority, Task.status, func.count(Task.id)).group_by(Task.priority, Task.status).all()
+    by_priority_status: dict = {}
+    for p, s, c in ps_rows:
+        pk = p.value if p else "(未知)"
+        sk = s.value if s else "(未知)"
+        by_priority_status.setdefault(pk, {})[sk] = by_priority_status.get(pk, {}).get(sk, 0) + c
+
     return ApiResponse.success({
         "total": total,
         "by_status": by_status,
@@ -653,4 +662,5 @@ def task_stats():
         "overdue_count": overdue_count,
         "with_due_date": with_due,
         "overdue_rate": overdue_rate,
+        "by_priority_status": by_priority_status,
     }).to_response()
