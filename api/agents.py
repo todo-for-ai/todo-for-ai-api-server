@@ -10638,6 +10638,99 @@ def agent_productivity_alerts():
     }).to_response()
 
 
+@agents_bp.route("/productivity/by-kind", methods=["GET"])
+@unified_auth_required
+def agent_productivity_by_kind():
+    """Productivity comparison grouped by Agent kind for the current user.
+
+    Aggregates TaskAssignment rows by the owning Agent's ``kind`` field:
+    per-kind totals, done, failed, cancelled, expired, in_progress,
+    agent count, average completion rate, average failure rate, and average
+    completion duration (hours). Surfaces how each Agent class performs
+    relative to its peers of the same kind.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "items": []}).to_response()
+
+    # kind per agent
+    kind_map = {
+        aid: (k.value if k else "unknown")
+        for aid, k in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.kind).all()
+    }
+
+    rows = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.agent_id.in_(agent_ids),
+            TaskAssignment.created_at >= since,
+        )
+        .with_entities(
+            TaskAssignment.agent_id, TaskAssignment.state,
+            TaskAssignment.claimed_at, TaskAssignment.completed_at,
+        )
+        .all()
+    )
+
+    agg: dict = {}  # kind -> bucket
+    durations: dict = {}  # kind -> list of hours
+    agents_seen: dict = {}  # kind -> set of agent_id
+    for aid, state, claimed_at, completed_at in rows:
+        kind = kind_map.get(aid, "unknown")
+        bucket = agg.setdefault(kind, {
+            "kind": kind, "total": 0, "done": 0, "failed": 0,
+            "cancelled": 0, "expired": 0, "in_progress": 0,
+        })
+        bucket["total"] += 1
+        agents_seen.setdefault(kind, set()).add(aid)
+        s = state.value if state else None
+        if s == "done":
+            bucket["done"] += 1
+            if claimed_at and completed_at and completed_at > claimed_at:
+                durations.setdefault(kind, []).append((completed_at - claimed_at).total_seconds() / 3600)
+        elif s == "failed":
+            bucket["failed"] += 1
+        elif s == "cancelled":
+            bucket["cancelled"] += 1
+        elif s == "expired":
+            bucket["expired"] += 1
+        else:
+            bucket["in_progress"] += 1
+
+    items = []
+    for kind, b in agg.items():
+        total = b["total"]
+        done = b["done"]
+        failed = b["failed"]
+        ds = durations.get(kind, [])
+        completion_rate = round(done / total * 100, 1) if total else 0
+        failure_rate = round(failed / total * 100, 1) if total else 0
+        items.append({
+            "kind": kind,
+            "agent_count": len(agents_seen.get(kind, set())),
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "cancelled": b["cancelled"],
+            "expired": b["expired"],
+            "in_progress": b["in_progress"],
+            "completion_rate": completion_rate,
+            "failure_rate": failure_rate,
+            "avg_completion_hours": round(sum(ds) / len(ds), 2) if ds else None,
+        })
+    # 完成率降序，失败率升序
+    items.sort(key=lambda x: (-x["completion_rate"], x["failure_rate"]))
+
+    return ApiResponse.success({"days": days, "items": items}).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
