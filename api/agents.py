@@ -3169,6 +3169,69 @@ def list_workflow_runs():
     return ApiResponse.paginated(items, result["pagination"]).to_response()
 
 
+@agents_bp.route("/workflows/step-stats", methods=["GET"])
+@unified_auth_required
+def workflow_step_stats():
+    """Per-step-key execution stats across the current user's workflow runs.
+
+    For each ``step_key``: total runs, succeeded, failed, skipped, success
+    rate, and average duration (finished_at - started_at, in seconds) for
+    completed steps. Reveals which steps are bottlenecks or chronic failure
+    points across all workflows the user has launched.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(100, int(request.args.get("limit", 30))))
+    except (TypeError, ValueError):
+        limit = 30
+
+    rows = (
+        WorkflowStepRun.query
+        .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
+        .filter(WorkflowRun.owner_id == user.id)
+        .with_entities(
+            WorkflowStepRun.step_key,
+            WorkflowStepRun.status,
+            WorkflowStepRun.started_at,
+            WorkflowStepRun.finished_at,
+        )
+        .all()
+    )
+    agg: dict = {}
+    for step_key, status, started, finished in rows:
+        entry = agg.setdefault(step_key, {
+            "step_key": step_key, "total": 0, "succeeded": 0,
+            "failed": 0, "skipped": 0, "durations": [],
+        })
+        entry["total"] += 1
+        if status == StepStatus.SUCCEEDED:
+            entry["succeeded"] += 1
+        elif status == StepStatus.FAILED:
+            entry["failed"] += 1
+        elif status == StepStatus.SKIPPED:
+            entry["skipped"] += 1
+        if started and finished and finished > started:
+            entry["durations"].append((finished - started).total_seconds())
+
+    items = []
+    for step_key, e in agg.items():
+        durations = e["durations"]
+        avg_dur = round(sum(durations) / len(durations), 1) if durations else None
+        denom = e["total"] - e["skipped"] or 1
+        items.append({
+            "step_key": step_key,
+            "total": e["total"],
+            "succeeded": e["succeeded"],
+            "failed": e["failed"],
+            "skipped": e["skipped"],
+            "success_rate": round(e["succeeded"] / denom, 3),
+            "avg_duration_seconds": avg_dur,
+            "sample_size_duration": len(durations),
+        })
+    items.sort(key=lambda x: x["total"], reverse=True)
+    return ApiResponse.success({"items": items[:limit]}).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>", methods=["GET"])
 @unified_auth_required
 def get_workflow_run(run_id):
