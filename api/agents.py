@@ -11134,6 +11134,82 @@ def agent_productivity_hourly_heatmap():
     }).to_response()
 
 
+@agents_bp.route("/failure-reasons", methods=["GET"])
+@unified_auth_required
+def agent_failure_reasons():
+    """Distribution of Agent run failure reasons for the current user.
+
+    Looks at FAILED AgentRun rows for the user's Agents within the window and
+    buckets them by a normalized error type derived from the ``error`` text
+    (first line, lowercased, truncated). Returns per-reason counts and the
+    affected agents, sorted by count descending. Surfaces the most common
+    failure causes across the fleet.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(50, int(request.args.get("limit", 15))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 15
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "total_failed_runs": 0, "items": []}).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    rows = (
+        AgentRun.query
+        .filter(
+            AgentRun.agent_id.in_(agent_ids),
+            AgentRun.status == AgentRunStatus.FAILED,
+            AgentRun.started_at >= since,
+        )
+        .with_entities(AgentRun.agent_id, AgentRun.error)
+        .all()
+    )
+
+    # 归一化错误类型：首行小写、去标点、截断 80 字
+    def normalize(err):
+        if not err or not str(err).strip():
+            return "(无错误信息)"
+        first = str(err).strip().splitlines()[0].strip()
+        # 去除常见前缀冒号前缀（如 "ValueError: ..." 取冒号前）
+        lowered = first.lower()
+        # 截断
+        return lowered[:80]
+
+    by_reason: dict = {}  # {reason: {count, agents: set}}
+    total = 0
+    for aid, err in rows:
+        reason = normalize(err)
+        entry = by_reason.setdefault(reason, {"count": 0, "agents": set()})
+        entry["count"] += 1
+        entry["agents"].add(aid)
+        total += 1
+
+    items = [
+        {
+            "reason": reason,
+            "count": e["count"],
+            "affected_agents": sorted(e["agents"]),
+            "affected_agent_names": [name_map.get(a, f"Agent#{a}") for a in sorted(e["agents"])],
+        }
+        for reason, e in by_reason.items()
+    ]
+    items.sort(key=lambda x: x["count"], reverse=True)
+    return ApiResponse.success({
+        "days": days,
+        "total_failed_runs": total,
+        "items": items[:limit],
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
