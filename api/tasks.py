@@ -4,7 +4,7 @@
 提供任务的 CRUD 操作接口
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Blueprint, request
 from sqlalchemy import func
 from models import db, Task, TaskStatus, TaskPriority, Project, TaskHistory, ActionType, UserActivity
@@ -663,4 +663,71 @@ def task_stats():
         "with_due_date": with_due,
         "overdue_rate": overdue_rate,
         "by_priority_status": by_priority_status,
+    }).to_response()
+
+
+@tasks_bp.route('/overdue-trend', methods=['GET'])
+@unified_auth_required
+def task_overdue_trend():
+    """Daily overdue task trend by due_date for the current user.
+
+    Buckets overdue tasks (due_date < now, status not done/cancelled) by the
+    calendar day of their due_date within the lookback window. Also reports
+    per-priority overdue counts for the same set. Reveals whether overdue
+    workload is accumulating over time and which priorities bear the brunt.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    base_query = (
+        Task.query
+        .join(Project)
+        .filter(Project.owner_id == user.id)
+    )
+    now = datetime.utcnow()
+    since = now - timedelta(days=days)
+    terminal_states = [TaskStatus.DONE, TaskStatus.CANCELLED]
+
+    # 逾期且 due_date 在窗口内的任务，按 due_date 日期分桶
+    rows = (
+        base_query
+        .filter(
+            Task.due_date.isnot(None),
+            Task.due_date < now,
+            Task.due_date >= since,
+            ~Task.status.in_(terminal_states),
+        )
+        .with_entities(
+            func.date(Task.due_date).label("d"),
+            Task.priority,
+            func.count(Task.id),
+        )
+        .group_by(func.date(Task.due_date), Task.priority)
+        .all()
+    )
+
+    by_day: dict = {}
+    by_priority_totals: dict = {}
+    total_overdue = 0
+    for d, priority, c in rows:
+        if not d:
+            continue
+        key = str(d)
+        bucket = by_day.setdefault(key, {"date": key, "overdue": 0, "by_priority": {}})
+        bucket["overdue"] += c
+        pk = priority.value if priority else "(未知)"
+        bucket["by_priority"][pk] = bucket["by_priority"].get(pk, 0) + c
+        by_priority_totals[pk] = by_priority_totals.get(pk, 0) + c
+        total_overdue += c
+
+    trend = sorted(by_day.values(), key=lambda x: x["date"])
+    by_priority_sorted = dict(sorted(by_priority_totals.items(), key=lambda kv: kv[1], reverse=True))
+    return ApiResponse.success({
+        "days": days,
+        "trend": trend,
+        "total_overdue": total_overdue,
+        "by_priority_totals": by_priority_sorted,
     }).to_response()
