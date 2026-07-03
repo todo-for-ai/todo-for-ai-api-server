@@ -3924,16 +3924,22 @@ def agent_health_trend():
     since = datetime.utcnow() - timedelta(days=days)
     agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
     if agent_id is not None and agent_id not in agent_ids:
-        return ApiResponse.success({"days": days, "trend": [], "total_positive": 0, "total_negative": 0, "agent_id": agent_id, "agent_name": None}).to_response()
+        return ApiResponse.success({"days": days, "trend": [], "total_positive": 0, "total_negative": 0, "agent_id": agent_id, "agent_name": None, "by_kind_overall": {}}).to_response()
     if agent_id is not None:
         agent_ids = [agent_id]
     if not agent_ids:
-        return ApiResponse.success({"days": days, "trend": [], "total_positive": 0, "total_negative": 0}).to_response()
+        return ApiResponse.success({"days": days, "trend": [], "total_positive": 0, "total_negative": 0, "by_kind_overall": {}}).to_response()
 
     selected_name = None
     if agent_id is not None:
         selected_name = Agent.query.filter_by(id=agent_id).with_entities(Agent.name).first()
         selected_name = selected_name[0] if selected_name else None
+
+    # agent_id -> kind 映射，用于按 kind 分组趋势
+    kind_map = {
+        aid: (k.value if k else "unknown")
+        for aid, k in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.kind).all()
+    }
 
     rows = (
         AuditLog.query
@@ -3976,8 +3982,11 @@ def agent_health_trend():
 
     # 按日聚合平均 new_score
     day_scores: dict = {}
-    for (day, _aid), score in last_score_by_day_agent.items():
+    day_kind_scores: dict = {}  # {day: {kind: [scores]}}
+    for (day, aid), score in last_score_by_day_agent.items():
         day_scores.setdefault(day, []).append(score)
+        k = kind_map.get(aid, "unknown")
+        day_kind_scores.setdefault(day, {}).setdefault(k, []).append(score)
 
     # 按日附加冲突事件计数（owner_id 命中当前用户；单 Agent 时进一步按参与方过滤）
     if agent_id is not None:
@@ -4014,9 +4023,16 @@ def agent_health_trend():
     violation_by_day = {str(d): c for d, c in violation_rows if d}
 
     trend = []
+    kind_overall: dict = {}  # {kind: [scores]} 用于顶层 overall
     for day in sorted(day_scores.keys()):
         scores = day_scores[day]
         avg = round(sum(scores) / len(scores), 2) if scores else None
+        dk = day_kind_scores.get(day, {})
+        by_kind_avg: dict = {}
+        for k, ks in dk.items():
+            if ks:
+                by_kind_avg[k] = round(sum(ks) / len(ks), 2)
+                kind_overall.setdefault(k, []).extend(ks)
         trend.append({
             "date": day,
             "avg_reputation": avg,
@@ -4024,7 +4040,11 @@ def agent_health_trend():
             "negative": neg_by_day.get(day, 0),
             "conflicts": conflict_by_day.get(day, 0),
             "sandbox_violations": violation_by_day.get(day, 0),
+            "by_kind_avg": by_kind_avg,
         })
+
+    by_kind_overall = {k: round(sum(ks) / len(ks), 2) for k, ks in kind_overall.items() if ks}
+    by_kind_overall_sorted = dict(sorted(by_kind_overall.items(), key=lambda kv: kv[1], reverse=True))
 
     return ApiResponse.success({
         "days": days,
@@ -4035,6 +4055,7 @@ def agent_health_trend():
         "total_violations": sum(violation_by_day.values()),
         "agent_id": agent_id,
         "agent_name": selected_name,
+        "by_kind_overall": by_kind_overall_sorted,
     }).to_response()
 
 
