@@ -9097,6 +9097,107 @@ def experiences_scatter():
     return ApiResponse.success({"points": points, "max_reuses": max_reuses}).to_response()
 
 
+@agents_bp.route("/experiences/reuse-trend", methods=["GET"])
+@unified_auth_required
+def experiences_reuse_trend():
+    """Daily reuse + decay trend for the user's experiences.
+
+    Buckets valid experiences by the date they were last reused (falling back
+    to creation date when never reused). For each day reports: number of
+    experiences reused that day, total reuse count accumulated that day,
+    average confidence, and how many of those experiences are now decayed
+    (confidence < 0.5) — surfacing whether reuse keeps knowledge fresh or
+    whether stale experiences still linger. Supports ``days`` window.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+    since = datetime.utcnow() - timedelta(days=days)
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({
+            "trend": [],
+            "total_reused": 0,
+            "total_reuse_count": 0,
+            "decayed_count": 0,
+            "total_experiences": 0,
+        }).to_response()
+
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+        )
+        .with_entities(
+            AgentExperience.id,
+            AgentExperience.times_reused,
+            AgentExperience.confidence,
+            AgentExperience.last_reused_at,
+            AgentExperience.created_at,
+        )
+        .all()
+    )
+
+    buckets = {}
+    total_reused = 0          # experiences with times_reused > 0
+    total_reuse_count = 0     # sum of times_reused
+    decayed_count = 0         # confidence < 0.5
+    for _exp_id, times_reused, confidence, last_reused_at, created_at in rows:
+        tr = times_reused or 0
+        conf = confidence if confidence is not None else 0.0
+        ref = last_reused_at or created_at
+        if ref is None:
+            continue
+        if ref < since:
+            # Only count experiences that were reused/created within the window
+            # for the daily buckets, but still contribute to totals.
+            total_reuse_count += tr
+            if tr > 0:
+                total_reused += 1
+            if conf < 0.5:
+                decayed_count += 1
+            continue
+        d = ref.date().isoformat()
+        b = buckets.get(d)
+        if b is None:
+            b = {"date": d, "reused": 0, "reuse_count": 0, "conf_sum": 0.0, "conf_n": 0, "decayed": 0}
+            buckets[d] = b
+        b["reused"] += 1 if tr > 0 else 0
+        b["reuse_count"] += tr
+        b["conf_sum"] += conf
+        b["conf_n"] += 1
+        if conf < 0.5:
+            b["decayed"] += 1
+        total_reuse_count += tr
+        if tr > 0:
+            total_reused += 1
+        if conf < 0.5:
+            decayed_count += 1
+
+    trend = []
+    for d in sorted(buckets.keys()):
+        b = buckets[d]
+        trend.append({
+            "date": b["date"],
+            "reused": b["reused"],
+            "reuse_count": b["reuse_count"],
+            "avg_confidence": round(b["conf_sum"] / b["conf_n"], 3) if b["conf_n"] else 0.0,
+            "decayed": b["decayed"],
+        })
+
+    return ApiResponse.success({
+        "trend": trend,
+        "total_reused": total_reused,
+        "total_reuse_count": total_reuse_count,
+        "decayed_count": decayed_count,
+        "total_experiences": len(rows),
+    }).to_response()
+
+
 @agents_bp.route("/experiences/low-confidence", methods=["GET"])
 @unified_auth_required
 def experiences_low_confidence():
