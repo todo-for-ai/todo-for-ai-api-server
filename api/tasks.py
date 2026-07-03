@@ -731,3 +731,77 @@ def task_overdue_trend():
         "total_overdue": total_overdue,
         "by_priority_totals": by_priority_sorted,
     }).to_response()
+
+
+@tasks_bp.route('/completion-by-project', methods=['GET'])
+@unified_auth_required
+def task_completion_by_project():
+    """Daily task completion trend grouped by project for the current user.
+
+    Buckets done tasks (state=DONE, completed_at within window) by calendar
+    day of completed_at and project_id. Returns a per-project series plus
+    per-project totals, sorted by total completed descending. Reveals which
+    projects are actively delivering over time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 8))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 8
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    rows = (
+        Task.query
+        .join(Project)
+        .filter(
+            Project.owner_id == user.id,
+            Task.status == TaskStatus.DONE,
+            Task.completed_at.isnot(None),
+            Task.completed_at >= since,
+        )
+        .with_entities(
+            func.date(Task.completed_at).label("d"),
+            Task.project_id,
+            Project.name,
+            func.count(Task.id),
+        )
+        .group_by(func.date(Task.completed_at), Task.project_id, Project.name)
+        .all()
+    )
+
+    proj_meta: dict = {}  # {project_id: name}
+    proj_totals: dict = {}  # {project_id: total}
+    by_day_proj: dict = {}  # {date: {project_id: count}}
+    for d, pid, pname, c in rows:
+        if not d:
+            continue
+        key = str(d)
+        proj_meta[pid] = pname or f"Project#{pid}"
+        proj_totals[pid] = proj_totals.get(pid, 0) + c
+        by_day_proj.setdefault(key, {})[pid] = c
+
+    # 按 total 降序取 top N
+    top = sorted(proj_totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    top_ids = [pid for pid, _ in top]
+
+    # 构建每个 top 项目的每日序列
+    all_days = sorted(by_day_proj.keys())
+    series = []
+    for pid, total in top:
+        daily = [{"date": d, "done": (by_day_proj.get(d, {}) or {}).get(pid, 0)} for d in all_days]
+        series.append({
+            "project_id": pid,
+            "name": proj_meta.get(pid, f"Project#{pid}"),
+            "total": total,
+            "daily": daily,
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "total_done": sum(proj_totals.values()),
+        "all_days": all_days,
+        "series": series,
+    }).to_response()
