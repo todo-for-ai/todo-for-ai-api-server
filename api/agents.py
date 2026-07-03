@@ -11041,6 +11041,78 @@ def agent_productivity_by_kind():
     return ApiResponse.success({"days": days, "items": items}).to_response()
 
 
+@agents_bp.route("/productivity/hourly-heatmap", methods=["GET"])
+@unified_auth_required
+def agent_productivity_hourly_heatmap():
+    """Hour-of-day × Agent completion heatmap for the current user.
+
+    Buckets done TaskAssignments (state=DONE, completed_at within window) by
+    the hour-of-day (0-23) of ``completed_at`` and the agent_id. Returns a
+    matrix {agent_id: {hour: count}} plus per-agent totals, revealing when
+    each Agent is most productive. Uses Python-side hour extraction for
+    cross-DB compatibility (SQLite has no EXTRACT).
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(50, int(request.args.get("limit", 15))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 15
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "agents": [], "matrix": {}, "max_cell": 0, "peak_hour": None}).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    rows = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.agent_id.in_(agent_ids),
+            TaskAssignment.state == TaskAssignmentState.DONE,
+            TaskAssignment.completed_at.isnot(None),
+            TaskAssignment.completed_at >= since,
+        )
+        .with_entities(TaskAssignment.agent_id, TaskAssignment.completed_at)
+        .all()
+    )
+
+    matrix: dict = {}  # {agent_id: {hour: count}}
+    totals: dict = {}  # {agent_id: total}
+    hour_totals = [0] * 24
+    max_cell = 0
+    for aid, completed_at in rows:
+        h = completed_at.hour
+        bucket = matrix.setdefault(aid, {})
+        bucket[h] = bucket.get(h, 0) + 1
+        if bucket[h] > max_cell:
+            max_cell = bucket[h]
+        totals[aid] = totals.get(aid, 0) + 1
+        hour_totals[h] += 1
+
+    # 按 done 总数降序取 top N agents
+    top_agents = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    peak_hour = max(range(24), key=lambda h: hour_totals[h]) if any(hour_totals) else None
+    agents_out = [
+        {"agent_id": aid, "name": name_map.get(aid, f"Agent#{aid}"), "done": totals.get(aid, 0)}
+        for aid, _ in top_agents
+    ]
+    matrix_out = {str(aid): matrix.get(aid, {}) for aid, _ in top_agents}
+    return ApiResponse.success({
+        "days": days,
+        "agents": agents_out,
+        "matrix": matrix_out,
+        "hour_totals": hour_totals,
+        "max_cell": max_cell,
+        "peak_hour": peak_hour,
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
