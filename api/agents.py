@@ -2021,6 +2021,106 @@ def handoff_task(task_id):
 
 
 DISPATCH_MAX_ASSIGNMENTS = 20
+DISPATCH_PREVIEW_CANDIDATE_LIMIT = 5
+DISPATCH_POLICY_DEFAULTS = {
+    "auto_dispatch_enabled": False,
+    "project_id": None,
+    "max_assignments": DISPATCH_MAX_ASSIGNMENTS,
+    "lease_seconds": 1800,
+    "match_capabilities": True,
+    "require_capability_match": False,
+    "candidate_agent_ids": [],
+    "include_self": False,
+}
+
+
+def normalize_dispatch_policy(data, current_user=None):
+    """Validate and normalize a coordinator dispatch policy payload."""
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError("dispatch policy must be an object")
+
+    policy = dict(DISPATCH_POLICY_DEFAULTS)
+
+    if "auto_dispatch_enabled" in data:
+        policy["auto_dispatch_enabled"] = bool(data.get("auto_dispatch_enabled"))
+
+    if "project_id" in data:
+        project_id = data.get("project_id")
+        if project_id in ("", None):
+            policy["project_id"] = None
+        else:
+            project_id = int(project_id)
+            if project_id <= 0:
+                raise ValueError("project_id must be a positive integer")
+            if current_user is not None:
+                project = Project.query.filter_by(id=project_id, owner_id=current_user.id).first()
+                if not project:
+                    raise ValueError("project_id does not belong to current user")
+            policy["project_id"] = project_id
+
+    if "max_assignments" in data:
+        max_assignments = int(data.get("max_assignments") or DISPATCH_MAX_ASSIGNMENTS)
+        policy["max_assignments"] = max(1, min(max_assignments, DISPATCH_MAX_ASSIGNMENTS))
+
+    if "lease_seconds" in data:
+        lease_seconds = int(data.get("lease_seconds") or 1800)
+        policy["lease_seconds"] = max(60, min(lease_seconds, 24 * 60 * 60))
+
+    if "match_capabilities" in data:
+        policy["match_capabilities"] = data.get("match_capabilities") is not False
+
+    if "require_capability_match" in data:
+        policy["require_capability_match"] = bool(data.get("require_capability_match"))
+
+    if "include_self" in data:
+        policy["include_self"] = bool(data.get("include_self"))
+
+    if "candidate_agent_ids" in data:
+        candidate_agent_ids = data.get("candidate_agent_ids")
+        if candidate_agent_ids in (None, ""):
+            policy["candidate_agent_ids"] = []
+        elif not isinstance(candidate_agent_ids, list):
+            raise ValueError("candidate_agent_ids must be a list of agent ids")
+        else:
+            normalized_ids = []
+            for raw_agent_id in candidate_agent_ids:
+                agent_id = int(raw_agent_id)
+                if agent_id <= 0:
+                    raise ValueError("candidate_agent_ids must contain positive integers")
+                if agent_id not in normalized_ids:
+                    normalized_ids.append(agent_id)
+            if current_user is not None and normalized_ids:
+                owned_count = Agent.query.filter(
+                    Agent.owner_id == current_user.id,
+                    Agent.id.in_(normalized_ids),
+                ).count()
+                if owned_count != len(normalized_ids):
+                    raise ValueError("candidate_agent_ids must belong to current user")
+            policy["candidate_agent_ids"] = normalized_ids
+
+    if policy["match_capabilities"] is False:
+        policy["require_capability_match"] = False
+
+    return policy
+
+
+def get_coordinator_dispatch_policy(coordinator, current_user=None):
+    config = coordinator.config or {}
+    stored_policy = config.get("dispatch_policy") if isinstance(config, dict) else None
+    return normalize_dispatch_policy(stored_policy or {}, current_user=current_user)
+
+
+def resolve_dispatch_options(coordinator, data, current_user=None):
+    policy = get_coordinator_dispatch_policy(coordinator, current_user=current_user)
+    overrides = {}
+    for key in DISPATCH_POLICY_DEFAULTS:
+        if key in data:
+            overrides[key] = data[key]
+
+    resolved = normalize_dispatch_policy({**policy, **overrides}, current_user=current_user)
+    return resolved, policy
 
 
 def collect_claimable_tasks(current_user, project_id=None, limit=50):
@@ -2074,6 +2174,232 @@ def find_available_worker_agents(current_user, coordinator, candidate_agent_ids=
     return available
 
 
+def serialize_dispatch_candidate(worker, match, match_capabilities=True):
+    strategy = "capability_match" if (match_capabilities and match["score"] > 0) else "priority_fifo"
+    return {
+        "agent": worker.to_dict(include_stats=False),
+        "score": match["score"],
+        "strategy": strategy,
+        "matched_capabilities": match.get("matched_capabilities", []),
+        "matched_tags": match.get("matched_tags", []),
+        "matched_text": match.get("matched_text", []),
+        "missing_required": match.get("missing_required", []),
+        "experience_bonus": match.get("experience_bonus", 0),
+    }
+
+
+@agents_bp.route("/<int:agent_id>/dispatch/policy", methods=["GET"])
+@unified_auth_required
+def get_dispatch_policy(agent_id):
+    """Return the reusable dispatch policy stored on a coordinator Agent."""
+    try:
+        current_user = get_current_user()
+        coordinator, response = get_owned_agent_or_response(agent_id, current_user)
+        if response:
+            return response
+
+        if coordinator.kind != AgentKind.COORDINATOR:
+            return ApiResponse.error("Dispatch policy is only available for coordinator Agents", 400).to_response()
+
+        policy = get_coordinator_dispatch_policy(coordinator, current_user=current_user)
+        return ApiResponse.success({"policy": policy}, "Dispatch policy retrieved").to_response()
+
+    except ValueError as e:
+        return ApiResponse.error(str(e), 400).to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to retrieve dispatch policy: {str(e)}", 500).to_response()
+
+
+@agents_bp.route("/<int:agent_id>/dispatch/policy", methods=["PUT"])
+@unified_auth_required
+def update_dispatch_policy(agent_id):
+    """Persist default task-distribution rules for a coordinator Agent."""
+    try:
+        current_user = get_current_user()
+        coordinator, response = get_owned_agent_or_response(agent_id, current_user)
+        if response:
+            return response
+
+        if coordinator.kind != AgentKind.COORDINATOR:
+            return ApiResponse.error("Dispatch policy is only available for coordinator Agents", 400).to_response()
+
+        data = request.get_json(silent=True) or {}
+        if "policy" in data:
+            if not isinstance(data["policy"], dict):
+                raise ValueError("policy must be an object")
+            data = data["policy"]
+
+        current_policy = get_coordinator_dispatch_policy(coordinator, current_user=current_user)
+        policy = normalize_dispatch_policy({**current_policy, **data}, current_user=current_user)
+        config = dict(coordinator.config or {})
+        config["dispatch_policy"] = policy
+        coordinator.config = config
+        db.session.commit()
+
+        _queue_sse(
+            current_user.id,
+            "agent_config_changed",
+            {"agent_id": coordinator.id, "agent_name": coordinator.name, "changed_fields": ["dispatch_policy"]},
+        )
+        Notification.create_notification(
+            user_id=current_user.id,
+            event_type="agent_config_changed",
+            agent_id=coordinator.id,
+            payload={"changed_fields": ["dispatch_policy"]},
+        )
+        AuditLog.record(
+            action="agent.dispatch_policy.updated", resource_type="agent", resource_id=coordinator.id,
+            actor_type="human", actor_user_id=current_user.id,
+            detail={"dispatch_policy": policy},
+            ip_address=_client_ip(),
+        )
+        db.session.commit()
+
+        return ApiResponse.success({"policy": policy, "coordinator": coordinator.to_dict(include_stats=True)}, "Dispatch policy updated").to_response()
+
+    except ValueError as e:
+        db.session.rollback()
+        return ApiResponse.error(str(e), 400).to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to update dispatch policy: {str(e)}", 500).to_response()
+
+
+@agents_bp.route("/<int:agent_id>/dispatch/preview", methods=["POST"])
+@unified_auth_required
+def preview_dispatch_tasks(agent_id):
+    """Dry-run coordinator dispatch without creating assignments or runs."""
+    try:
+        current_user = get_current_user()
+        coordinator, response = get_owned_agent_or_response(agent_id, current_user)
+        if response:
+            return response
+
+        if coordinator.status in [AgentStatus.DISABLED, AgentStatus.PAUSED]:
+            return ApiResponse.error("Coordinator Agent is not available to dispatch tasks", 409).to_response()
+
+        data = request.get_json(silent=True) or {}
+        options, policy = resolve_dispatch_options(coordinator, data, current_user=current_user)
+        max_assignments = options["max_assignments"]
+        match_capabilities = options["match_capabilities"]
+        require_capability_match = options["require_capability_match"]
+        include_self = options["include_self"]
+        candidate_agent_ids = options["candidate_agent_ids"]
+        project_id = options["project_id"]
+
+        mark_stale_agents_offline(owner_id=current_user.id)
+        workers = find_available_worker_agents(
+            current_user, coordinator, candidate_agent_ids=candidate_agent_ids, include_self=include_self
+        )
+        tasks = collect_claimable_tasks(current_user, project_id=project_id)
+
+        result = {
+            "coordinator": coordinator.to_dict(include_stats=True),
+            "proposed_assignments": [],
+            "task_candidates": [],
+            "unmatched_tasks": [],
+            "summary": {
+                "claimable_tasks": len(tasks),
+                "available_agents": len(workers),
+                "planned": 0,
+                "skipped_no_match": 0,
+                "skipped_capacity": 0,
+                "max_assignments": max_assignments,
+            },
+            "policy": policy,
+            "options": options,
+        }
+
+        if not workers or not tasks:
+            db.session.rollback()
+            return ApiResponse.success(result, "Dispatch preview generated").to_response()
+
+        scored = []
+        candidates_by_task = {}
+        for task in tasks:
+            task_candidates = []
+            for worker in workers:
+                match = (
+                    score_task_for_agent(task, worker)
+                    if match_capabilities
+                    else {"score": 0, "matched_capabilities": [], "matched_tags": [], "matched_text": [], "missing_required": []}
+                )
+                if not require_capability_match or match["score"] > 0:
+                    task_candidates.append((worker, match))
+                    scored.append((task, worker, match))
+
+            task_candidates.sort(key=lambda item: -item[1]["score"])
+            candidates_by_task[task.id] = task_candidates
+            result["task_candidates"].append(
+                {
+                    "task": task.to_dict(include_project=True),
+                    "candidates": [
+                        serialize_dispatch_candidate(worker, match, match_capabilities)
+                        for worker, match in task_candidates[:DISPATCH_PREVIEW_CANDIDATE_LIMIT]
+                    ],
+                }
+            )
+
+        scored.sort(key=lambda item: -item[2]["score"])
+
+        used_tasks = set()
+        used_agents = set()
+        for task, worker, match in scored:
+            if len(result["proposed_assignments"]) >= max_assignments:
+                break
+            if task.id in used_tasks or worker.id in used_agents:
+                continue
+
+            candidate = serialize_dispatch_candidate(worker, match, match_capabilities)
+            result["proposed_assignments"].append(
+                {
+                    "task": task.to_dict(include_project=True),
+                    **candidate,
+                }
+            )
+            used_tasks.add(task.id)
+            used_agents.add(worker.id)
+
+        for task in tasks:
+            if task.id in used_tasks:
+                continue
+            candidates = candidates_by_task.get(task.id, [])
+            reason = "no_matching_agent" if not candidates else "agent_capacity_exhausted"
+            result["unmatched_tasks"].append(
+                {
+                    "task": task.to_dict(include_project=True),
+                    "reason": reason,
+                    "candidate_count": len(candidates),
+                    "best_candidate": (
+                        serialize_dispatch_candidate(candidates[0][0], candidates[0][1], match_capabilities)
+                        if candidates else None
+                    ),
+                }
+            )
+
+        result["summary"]["planned"] = len(result["proposed_assignments"])
+        result["summary"]["skipped_no_match"] = sum(
+            1 for item in result["unmatched_tasks"] if item["reason"] == "no_matching_agent"
+        )
+        result["summary"]["skipped_capacity"] = sum(
+            1 for item in result["unmatched_tasks"] if item["reason"] == "agent_capacity_exhausted"
+        )
+
+        # Preview may mark stale agents or expire stale assignments inside the
+        # session to evaluate the current dispatch pool, but it must not persist
+        # those maintenance writes.
+        db.session.rollback()
+        return ApiResponse.success(result, "Dispatch preview generated").to_response()
+
+    except ValueError as e:
+        db.session.rollback()
+        return ApiResponse.error(str(e), 400).to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to preview dispatch: {str(e)}", 500).to_response()
+
+
 @agents_bp.route("/<int:agent_id>/dispatch", methods=["POST"])
 @unified_auth_required
 def dispatch_tasks(agent_id):
@@ -2100,22 +2426,14 @@ def dispatch_tasks(agent_id):
             return ApiResponse.error("Coordinator Agent is not available to dispatch tasks", 409).to_response()
 
         data = request.get_json(silent=True) or {}
-
-        lease_seconds = int(data.get("lease_seconds") or 1800)
-        lease_seconds = max(60, min(lease_seconds, 24 * 60 * 60))
-
-        max_assignments = int(data.get("max_assignments") or DISPATCH_MAX_ASSIGNMENTS)
-        max_assignments = max(1, min(max_assignments, DISPATCH_MAX_ASSIGNMENTS))
-
-        match_capabilities = data.get("match_capabilities", True) is not False
-        require_capability_match = bool(data.get("require_capability_match"))
-        include_self = bool(data.get("include_self"))
-
-        candidate_agent_ids = data.get("candidate_agent_ids")
-        if candidate_agent_ids is not None and not isinstance(candidate_agent_ids, list):
-            return ApiResponse.error("candidate_agent_ids must be a list of agent ids", 400).to_response()
-
-        project_id = data.get("project_id")
+        options, policy = resolve_dispatch_options(coordinator, data, current_user=current_user)
+        lease_seconds = options["lease_seconds"]
+        max_assignments = options["max_assignments"]
+        match_capabilities = options["match_capabilities"]
+        require_capability_match = options["require_capability_match"]
+        include_self = options["include_self"]
+        candidate_agent_ids = options["candidate_agent_ids"]
+        project_id = options["project_id"]
 
         now = datetime.utcnow()
         mark_stale_agents_offline(owner_id=current_user.id)
@@ -2134,6 +2452,8 @@ def dispatch_tasks(agent_id):
                 "dispatched": 0,
                 "skipped_no_match": 0,
             },
+            "policy": policy,
+            "options": options,
         }
 
         if not workers or not tasks:
@@ -12600,4 +12920,3 @@ def _run_orchestration(user, actor_type="human"):
         pass  # never fail the cycle on history-write error
     db.session.commit()
     return report, duration, message
-

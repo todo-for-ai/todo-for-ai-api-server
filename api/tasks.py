@@ -805,3 +805,77 @@ def task_completion_by_project():
         "all_days": all_days,
         "series": series,
     }).to_response()
+
+
+@tasks_bp.route("/completion-by-assignee", methods=["GET"])
+@unified_auth_required
+def task_completion_by_assignee():
+    """Daily task completion trend grouped by assignee (Agent) for the current user.
+
+    Buckets done assignments (state=DONE, completed_at within window) by calendar
+    day of completed_at and agent_id. Returns a per-agent series plus per-agent
+    totals, sorted by total completed descending. Reveals which agents are
+    actively delivering over time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 8))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 8
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    from models.agent import TaskAssignment, TaskAssignmentState, Agent
+
+    rows = (
+        TaskAssignment.query
+        .join(Agent)
+        .filter(
+            Agent.owner_id == user.id,
+            TaskAssignment.state == TaskAssignmentState.DONE,
+            TaskAssignment.completed_at.isnot(None),
+            TaskAssignment.completed_at >= since,
+        )
+        .with_entities(
+            func.date(TaskAssignment.completed_at).label("d"),
+            TaskAssignment.agent_id,
+            Agent.name,
+            func.count(TaskAssignment.id),
+        )
+        .group_by(func.date(TaskAssignment.completed_at), TaskAssignment.agent_id, Agent.name)
+        .all()
+    )
+
+    agent_meta: dict = {}   # {agent_id: name}
+    agent_totals: dict = {}  # {agent_id: total}
+    by_day_agent: dict = {}  # {date: {agent_id: count}}
+    for d, aid, aname, c in rows:
+        if not d:
+            continue
+        key = str(d)
+        agent_meta[aid] = aname or f"Agent#{aid}"
+        agent_totals[aid] = agent_totals.get(aid, 0) + c
+        by_day_agent.setdefault(key, {})[aid] = c
+
+    top = sorted(agent_totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    top_ids = [aid for aid, _ in top]
+
+    all_days = sorted(by_day_agent.keys())
+    series = []
+    for aid, total in top:
+        daily = [{"date": d, "done": (by_day_agent.get(d, {}) or {}).get(aid, 0)} for d in all_days]
+        series.append({
+            "agent_id": aid,
+            "name": agent_meta.get(aid, f"Agent#{aid}"),
+            "total": total,
+            "daily": daily,
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "total_done": sum(agent_totals.values()),
+        "all_days": all_days,
+        "series": series,
+    }).to_response()
