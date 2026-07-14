@@ -9718,6 +9718,68 @@ def experiences_decay_by_task_type():
     }).to_response()
 
 
+@agents_bp.route("/experiences/confidence-distribution", methods=["GET"])
+@unified_auth_required
+def experiences_confidence_distribution():
+    """Confidence interval distribution for the user's experiences.
+
+    Buckets all valid experiences by confidence into 5 intervals:
+    [0,0.2), [0.2,0.4), [0.4,0.6), [0.6,0.8), [0.8,1.0].
+    Returns per-bucket count, percentage, and average times_reused.
+    Reveals whether the experience pool is mostly high- or low-confidence.
+    """
+    user = get_current_user()
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"bins": [], "total": 0}).to_response()
+
+    BINS = [
+        ("0-0.2", 0.0, 0.2),
+        ("0.2-0.4", 0.2, 0.4),
+        ("0.4-0.6", 0.4, 0.6),
+        ("0.6-0.8", 0.6, 0.8),
+        ("0.8-1.0", 0.8, 1.01),  # include 1.0
+    ]
+
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+        )
+        .with_entities(
+            AgentExperience.confidence,
+            AgentExperience.times_reused,
+        )
+        .all()
+    )
+
+    total = len(rows)
+    bin_data = {label: {"count": 0, "reuses": 0} for label, _, _ in BINS}
+    for confidence, times_reused in rows:
+        conf = confidence if confidence is not None else 0.0
+        for label, lo, hi in BINS:
+            if lo <= conf < hi:
+                bin_data[label]["count"] += 1
+                bin_data[label]["reuses"] += (times_reused or 0)
+                break
+
+    bins = []
+    for label, lo, hi in BINS:
+        d = bin_data[label]
+        bins.append({
+            "label": label,
+            "range_low": lo,
+            "range_high": min(hi, 1.0),
+            "count": d["count"],
+            "percentage": round(d["count"] / total * 100, 1) if total else 0.0,
+            "avg_reuses": round(d["reuses"] / d["count"], 1) if d["count"] else 0.0,
+        })
+
+    return ApiResponse.success({"bins": bins, "total": total}).to_response()
+
+
 @agents_bp.route("/experiences/reuse-trend", methods=["GET"])
 @unified_auth_required
 def experiences_reuse_trend():
