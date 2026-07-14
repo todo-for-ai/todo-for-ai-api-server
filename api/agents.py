@@ -9417,6 +9417,81 @@ def experiences_scatter():
     return ApiResponse.success({"points": points, "max_reuses": max_reuses}).to_response()
 
 
+@agents_bp.route("/experiences/decay-by-domain", methods=["GET"])
+@unified_auth_required
+def experiences_decay_by_domain():
+    """Per-domain decay comparison for the user's experiences.
+
+    Aggregates valid experiences by domain, reporting for each domain:
+    total count, active count (confidence >= 0.5), decayed count
+    (confidence < 0.5), average confidence, and total reuses.
+    Sorted by decayed count descending. Reveals which knowledge
+    domains have the most stale / low-confidence entries.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(50, int(request.args.get("limit", 15))))
+    except (TypeError, ValueError):
+        limit = 15
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"domains": [], "total_active": 0, "total_decayed": 0}).to_response()
+
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+        )
+        .with_entities(
+            AgentExperience.domain,
+            AgentExperience.confidence,
+            AgentExperience.times_reused,
+        )
+        .all()
+    )
+
+    buckets = {}  # {domain: {total, active, decayed, conf_sum, conf_n, reuses}}
+    for domain, confidence, times_reused in rows:
+        d = domain or "(未分类)"
+        conf = confidence if confidence is not None else 0.0
+        b = buckets.get(d)
+        if b is None:
+            b = {"total": 0, "active": 0, "decayed": 0, "conf_sum": 0.0, "conf_n": 0, "reuses": 0}
+            buckets[d] = b
+        b["total"] += 1
+        if conf >= 0.5:
+            b["active"] += 1
+        else:
+            b["decayed"] += 1
+        b["conf_sum"] += conf
+        b["conf_n"] += 1
+        b["reuses"] += (times_reused or 0)
+
+    total_active = sum(b["active"] for b in buckets.values())
+    total_decayed = sum(b["decayed"] for b in buckets.values())
+
+    domains = []
+    for d, b in buckets.items():
+        domains.append({
+            "domain": d,
+            "total": b["total"],
+            "active": b["active"],
+            "decayed": b["decayed"],
+            "avg_confidence": round(b["conf_sum"] / b["conf_n"], 3) if b["conf_n"] else 0.0,
+            "reuses": b["reuses"],
+        })
+    domains.sort(key=lambda x: x["decayed"], reverse=True)
+    domains = domains[:limit]
+
+    return ApiResponse.success({
+        "domains": domains,
+        "total_active": total_active,
+        "total_decayed": total_decayed,
+    }).to_response()
+
+
 @agents_bp.route("/experiences/reuse-trend", methods=["GET"])
 @unified_auth_required
 def experiences_reuse_trend():
