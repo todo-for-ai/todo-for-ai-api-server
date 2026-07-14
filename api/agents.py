@@ -14551,3 +14551,135 @@ def workflow_step_dependency_bottleneck():
     # Sort by critical path duration descending, limit
     results.sort(key=lambda r: r["critical_path_duration"], reverse=True)
     return ApiResponse.success({"workflows": results[:limit]}).to_response()
+
+
+@agents_bp.route("/capability-gap-analysis", methods=["GET"])
+@unified_auth_required
+def agent_capability_gap_analysis():
+    """Analyze capability gaps for each agent.
+
+    Compares each agent's declared capabilities against their actual experience
+    domains. Identifies:
+    - Gaps: domains with successful experiences but NOT in declared capabilities
+    - Overclaims: declared capabilities with NO supporting successful experiences
+    - Coverage score: ratio of experience-backed capabilities to total declared
+
+    Returns per-agent gap analysis with recommendations.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+        min_confidence = max(0.0, min(1.0, float(request.args.get("min_confidence", 0.5))))
+    except (TypeError, ValueError):
+        limit = 10
+        min_confidence = 0.5
+
+    # Get all user's agents
+    agents = Agent.query.filter_by(owner_id=user.id).all()
+
+    results = []
+    for agent in agents:
+        caps = set(agent.capabilities or []) if agent.capabilities else set()
+        if not caps:
+            continue
+
+        # Get successful experience domains for this agent
+        success_domains = (
+            db.session.query(
+                AgentExperience.domain,
+                func.count(AgentExperience.id),
+                func.avg(AgentExperience.confidence),
+            )
+            .filter(
+                AgentExperience.agent_id == agent.id,
+                AgentExperience.experience_type == "success_pattern",
+                AgentExperience.confidence >= min_confidence,
+                AgentExperience.is_valid == True,
+                AgentExperience.domain.isnot(None),
+            )
+            .group_by(AgentExperience.domain)
+            .all()
+        )
+
+        # Also check failure domains
+        failure_domains = (
+            db.session.query(
+                AgentExperience.domain,
+                func.count(AgentExperience.id),
+            )
+            .filter(
+                AgentExperience.agent_id == agent.id,
+                AgentExperience.experience_type == "failure_pattern",
+                AgentExperience.is_valid == True,
+                AgentExperience.domain.isnot(None),
+            )
+            .group_by(AgentExperience.domain)
+            .all()
+        )
+
+        exp_domain_set = {d[0] for d in success_domains if d[0]}
+        fail_domain_map = {d[0]: d[1] for d in failure_domains if d[0]}
+
+        # Normalize: lowercase, strip for comparison
+        def normalize(s):
+            return s.strip().lower() if s else ""
+
+        norm_caps = {normalize(c): c for c in caps}
+        norm_exp = {normalize(d) for d in exp_domain_set}
+
+        # Gaps: experience domains not in capabilities
+        gap_domains = norm_exp - set(norm_caps.keys())
+        gaps = []
+        for d in success_domains:
+            if normalize(d[0]) in gap_domains:
+                gaps.append({
+                    "domain": d[0],
+                    "success_count": d[1],
+                    "avg_confidence": round(float(d[2]), 2) if d[2] else 0.0,
+                    "failure_count": fail_domain_map.get(d[0], 0),
+                })
+
+        # Overclaims: capabilities with no successful experience
+        overclaim_domains = set(norm_caps.keys()) - norm_exp
+        overclaims = []
+        for nc, oc in norm_caps.items():
+            if nc in overclaim_domains:
+                fail_count = sum(v for k, v in fail_domain_map.items() if normalize(k) == nc)
+                overclaims.append({
+                    "capability": oc,
+                    "failure_count": fail_count,
+                    "risk": "high" if fail_count > 3 else ("medium" if fail_count > 0 else "low"),
+                })
+
+        # Coverage score
+        backed_caps = set(norm_caps.keys()) & norm_exp
+        coverage_score = round(len(backed_caps) / len(norm_caps) * 100, 1) if norm_caps else 0.0
+
+        # Experience strength per matched capability
+        matched = []
+        for nc, oc in norm_caps.items():
+            if nc in norm_exp:
+                for d in success_domains:
+                    if normalize(d[0]) == nc:
+                        matched.append({
+                            "capability": oc,
+                            "domain": d[0],
+                            "success_count": d[1],
+                            "avg_confidence": round(float(d[2]), 2) if d[2] else 0.0,
+                        })
+                        break
+
+        if gaps or overclaims:
+            results.append({
+                "agent_id": agent.id,
+                "agent_name": agent.name or f"Agent#{agent.id}",
+                "total_capabilities": len(caps),
+                "coverage_score": coverage_score,
+                "gaps": gaps,
+                "overclaims": overclaims,
+                "matched": matched,
+            })
+
+    # Sort by coverage score ascending (most gaps first), limit
+    results.sort(key=lambda r: r["coverage_score"])
+    return ApiResponse.success({"agents": results[:limit]}).to_response()
