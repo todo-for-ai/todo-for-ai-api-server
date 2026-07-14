@@ -1040,3 +1040,77 @@ def task_completion_by_priority():
         })
 
     return ApiResponse.success({"priorities": priorities, "total": total_count}).to_response()
+
+
+@tasks_bp.route('/completion-rate-by-project', methods=['GET'])
+@unified_auth_required
+def task_completion_rate_by_project():
+    """Task completion rate snapshot comparison across projects.
+
+    Groups tasks by project and reports total, done, in_progress, cancelled,
+    and completion_rate. Sorted by total descending, limited to top N projects.
+    Reveals which projects have the best/worst delivery rates.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(30, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+    project_ids = [p.id for p in Project.query.filter_by(owner_id=user.id).with_entities(Project.id).all()]
+    if not project_ids:
+        return ApiResponse.success({"projects": [], "total_tasks": 0, "total_done": 0}).to_response()
+
+    rows = (
+        Task.query
+        .join(Project)
+        .filter(
+            Task.project_id.in_(project_ids),
+            Task.created_at >= since,
+        )
+        .with_entities(
+            Task.project_id,
+            Project.name,
+            Task.status,
+            func.count(Task.id),
+        )
+        .group_by(Task.project_id, Project.name, Task.status)
+        .all()
+    )
+
+    proj_data: dict = {}  # {project_id: {name, total, done, cancelled, in_progress, other}}
+    total_tasks = 0
+    total_done = 0
+    for pid, pname, status, count in rows:
+        if pid not in proj_data:
+            proj_data[pid] = {"name": pname or f"Project#{pid}", "total": 0, "done": 0, "cancelled": 0, "in_progress": 0, "other": 0}
+        proj_data[pid]["total"] += count
+        total_tasks += count
+        s = status.value if status else ""
+        if s == "done":
+            proj_data[pid]["done"] += count
+            total_done += count
+        elif s == "cancelled":
+            proj_data[pid]["cancelled"] += count
+        elif s == "in_progress":
+            proj_data[pid]["in_progress"] += count
+        else:
+            proj_data[pid]["other"] += count
+
+    projects = []
+    for pid, d in sorted(proj_data.items(), key=lambda kv: kv[1]["total"], reverse=True)[:limit]:
+        total = d["total"]
+        projects.append({
+            "project_id": pid,
+            "name": d["name"],
+            "total": total,
+            "done": d["done"],
+            "cancelled": d["cancelled"],
+            "in_progress": d["in_progress"],
+            "completion_rate": round(d["done"] / total * 100, 1) if total else 0.0,
+        })
+
+    return ApiResponse.success({"projects": projects, "total_tasks": total_tasks, "total_done": total_done}).to_response()
