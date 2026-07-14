@@ -969,3 +969,74 @@ def task_completion_by_assignee():
         "all_days": all_days,
         "series": series,
     }).to_response()
+
+
+@tasks_bp.route("/completion-by-priority", methods=["GET"])
+@unified_auth_required
+def task_completion_by_priority():
+    """Task completion rate by priority for the current user's projects.
+
+    Groups tasks by priority and reports total, done, cancelled, and
+    completion rate. Reveals whether high-priority tasks are being
+    delivered at a comparable rate to low-priority ones.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+    project_ids = [p.id for p in Project.query.filter_by(owner_id=user.id).with_entities(Project.id).all()]
+    if not project_ids:
+        return ApiResponse.success({"priorities": [], "total": 0}).to_response()
+
+    from models.agent import TaskAssignment, TaskAssignmentState
+
+    # Get all tasks in window by priority
+    tasks = (
+        Task.query
+        .filter(
+            Task.project_id.in_(project_ids),
+            Task.created_at >= since,
+        )
+        .with_entities(
+            Task.priority,
+            Task.status,
+            func.count(Task.id),
+        )
+        .group_by(Task.priority, Task.status)
+        .all()
+    )
+
+    priority_data: dict = {}  # {priority: {total, done, cancelled, ...}}
+    total_count = 0
+    for priority, status, count in tasks:
+        p = priority.value if priority else "unknown"
+        if p not in priority_data:
+            priority_data[p] = {"total": 0, "done": 0, "cancelled": 0, "in_progress": 0, "other": 0}
+        priority_data[p]["total"] += count
+        total_count += count
+        s = status.value if status else ""
+        if s == "done":
+            priority_data[p]["done"] += count
+        elif s == "cancelled":
+            priority_data[p]["cancelled"] += count
+        elif s == "in_progress":
+            priority_data[p]["in_progress"] += count
+        else:
+            priority_data[p]["other"] += count
+
+    priorities = []
+    for p, d in sorted(priority_data.items(), key=lambda kv: kv[1]["total"], reverse=True):
+        total = d["total"]
+        priorities.append({
+            "priority": p,
+            "total": total,
+            "done": d["done"],
+            "cancelled": d["cancelled"],
+            "in_progress": d["in_progress"],
+            "completion_rate": round(d["done"] / total * 100, 1) if total else 0.0,
+        })
+
+    return ApiResponse.success({"priorities": priorities, "total": total_count}).to_response()
