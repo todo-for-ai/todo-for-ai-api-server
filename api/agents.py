@@ -12446,6 +12446,84 @@ def agent_productivity_hourly_heatmap():
     }).to_response()
 
 
+@agents_bp.route("/productivity/calendar-heatmap", methods=["GET"])
+@unified_auth_required
+def agent_productivity_calendar_heatmap():
+    """Date × Agent completion calendar heatmap for the current user.
+
+    Buckets done TaskAssignments by calendar date (YYYY-MM-DD) and agent_id
+    over the last N days. Returns a {agent_id: {date: count}} matrix plus
+    per-agent totals and overall date range. Ideal for a GitHub-style
+    contribution calendar per agent.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 90))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 90
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({
+            "days": days, "agents": [], "matrix": {},
+            "max_cell": 0, "date_range": [],
+        }).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    rows = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.agent_id.in_(agent_ids),
+            TaskAssignment.state == TaskAssignmentState.DONE,
+            TaskAssignment.completed_at.isnot(None),
+            TaskAssignment.completed_at >= since,
+        )
+        .with_entities(TaskAssignment.agent_id, TaskAssignment.completed_at)
+        .all()
+    )
+
+    matrix: dict = {}  # {agent_id: {date_str: count}}
+    totals: dict = {}  # {agent_id: total}
+    max_cell = 0
+    for aid, completed_at in rows:
+        ds = completed_at.strftime("%Y-%m-%d")
+        bucket = matrix.setdefault(aid, {})
+        bucket[ds] = bucket.get(ds, 0) + 1
+        if bucket[ds] > max_cell:
+            max_cell = bucket[ds]
+        totals[aid] = totals.get(aid, 0) + 1
+
+    top_agents = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    agents_out = [
+        {"agent_id": aid, "name": name_map.get(aid, f"Agent#{aid}"), "done": totals.get(aid, 0)}
+        for aid, _ in top_agents
+    ]
+    matrix_out = {str(aid): matrix.get(aid, {}) for aid, _ in top_agents}
+
+    # Build full date range
+    date_range = []
+    d = since.date() + timedelta(days=1)
+    end = datetime.utcnow().date()
+    while d <= end:
+        date_range.append(d.isoformat())
+        d += timedelta(days=1)
+
+    return ApiResponse.success({
+        "days": days,
+        "agents": agents_out,
+        "matrix": matrix_out,
+        "max_cell": max_cell,
+        "date_range": date_range,
+    }).to_response()
+
+
 @agents_bp.route("/productivity/weekly-comparison", methods=["GET"])
 @unified_auth_required
 def agent_productivity_weekly_comparison():
