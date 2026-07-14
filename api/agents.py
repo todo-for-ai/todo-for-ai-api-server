@@ -4178,6 +4178,96 @@ def workflow_step_cofailure_matrix():
     }).to_response()
 
 
+@agents_bp.route("/workflows/step-retry-topology", methods=["GET"])
+@unified_auth_required
+def workflow_step_retry_topology():
+    """Step retry topology for the current user's workflows.
+
+    Groups WorkflowStepRun by (workflow_id, step_key) and counts attempts
+    (attempt > 1). Returns per-step: total_runs, retry_count, retry_rate,
+    first_attempt_success_rate, retry_success_rate. Shows whether retries
+    actually recover failures.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(30, int(request.args.get("limit", 15))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 15
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Get workflow IDs owned by user
+    wf_ids = [wid for wid, in WorkflowRun.query.filter(
+        WorkflowRun.owner_id == user.id,
+        WorkflowRun.finished_at.isnot(None),
+        WorkflowRun.finished_at >= since,
+    ).with_entities(WorkflowRun.workflow_id).all()]
+
+    if not wf_ids:
+        return ApiResponse.success({"days": days, "steps": [], "total_retries": 0}).to_response()
+
+    # Get step runs for those runs
+    rows = (
+        WorkflowStepRun.query
+        .filter(
+            WorkflowStepRun.run_id.in_(
+                WorkflowRun.query.filter(
+                    WorkflowRun.owner_id == user.id,
+                    WorkflowRun.finished_at >= since,
+                ).with_entities(WorkflowRun.id)
+            ),
+        )
+        .with_entities(
+            WorkflowStepRun.step_key,
+            WorkflowStepRun.attempt,
+            WorkflowStepRun.status,
+        )
+        .all()
+    )
+
+    # Group by step_key
+    step_data: dict = {}  # {step_key: {total_runs, retries, first_success, retry_success}}
+    for step_key, attempt, status in rows:
+        if not step_key:
+            continue
+        d = step_data.setdefault(step_key, {"total_runs": 0, "retries": 0, "first_success": 0, "retry_success": 0, "first_attempts": 0, "retry_attempts": 0})
+        d["total_runs"] += 1
+        s = status.value if status else ""
+        if attempt == 1 or attempt is None:
+            d["first_attempts"] += 1
+            if s == "succeeded":
+                d["first_success"] += 1
+        else:
+            d["retries"] += 1
+            d["retry_attempts"] += 1
+            if s == "succeeded":
+                d["retry_success"] += 1
+
+    # Sort by retry count desc, limit
+    sorted_steps = sorted(step_data.items(), key=lambda kv: kv[1]["retries"], reverse=True)[:limit]
+    total_retries = sum(d["retries"] for _, d in sorted_steps)
+    steps_out = []
+    for sk, d in sorted_steps:
+        first_total = max(d["first_attempts"], 1)
+        retry_total = max(d["retry_attempts"], 1)
+        steps_out.append({
+            "step_key": sk,
+            "total_runs": d["total_runs"],
+            "retries": d["retries"],
+            "retry_rate": round(d["retries"] / max(d["total_runs"], 1) * 100, 1),
+            "first_attempt_success_rate": round(d["first_success"] / first_total * 100, 1),
+            "retry_success_rate": round(d["retry_success"] / retry_total * 100, 1) if d["retry_attempts"] else 0.0,
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "steps": steps_out,
+        "total_retries": total_retries,
+    }).to_response()
+
+
 @agents_bp.route("/conflicts/sandbox-correlation", methods=["GET"])
 @unified_auth_required
 def conflicts_sandbox_correlation():
