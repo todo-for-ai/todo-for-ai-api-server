@@ -9780,6 +9780,65 @@ def experiences_confidence_distribution():
     return ApiResponse.success({"bins": bins, "total": total}).to_response()
 
 
+@agents_bp.route("/experiences/source-distribution", methods=["GET"])
+@unified_auth_required
+def experiences_source_distribution():
+    """Experience count by creation source for the current user.
+
+    Groups valid experiences by origin: manual (no workflow run),
+    workflow (has source_workflow_run_id), auto_step (has source_step_key
+    but no workflow run). Per-source: count, percentage, avg confidence,
+    avg times_reused. Reveals where the experience pool comes from.
+    """
+    user = get_current_user()
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"sources": [], "total": 0}).to_response()
+
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+        )
+        .with_entities(
+            AgentExperience.source_workflow_run_id,
+            AgentExperience.source_step_key,
+            AgentExperience.confidence,
+            AgentExperience.times_reused,
+        )
+        .all()
+    )
+
+    total = len(rows)
+    src_data: dict = {}
+    for wf_run_id, step_key, confidence, times_reused in rows:
+        if wf_run_id is not None:
+            src = "workflow"
+        elif step_key is not None:
+            src = "auto_step"
+        else:
+            src = "manual"
+        if src not in src_data:
+            src_data[src] = {"count": 0, "conf_sum": 0.0, "reuse_sum": 0}
+        src_data[src]["count"] += 1
+        src_data[src]["conf_sum"] += (confidence if confidence is not None else 0.0)
+        src_data[src]["reuse_sum"] += (times_reused or 0)
+
+    sources = []
+    for src, d in sorted(src_data.items(), key=lambda kv: kv[1]["count"], reverse=True):
+        sources.append({
+            "source": src,
+            "count": d["count"],
+            "percentage": round(d["count"] / total * 100, 1) if total else 0.0,
+            "avg_confidence": round(d["conf_sum"] / d["count"], 3) if d["count"] else 0.0,
+            "avg_reuses": round(d["reuse_sum"] / d["count"], 1) if d["count"] else 0.0,
+        })
+
+    return ApiResponse.success({"sources": sources, "total": total}).to_response()
+
+
 @agents_bp.route("/experiences/reuse-trend", methods=["GET"])
 @unified_auth_required
 def experiences_reuse_trend():
