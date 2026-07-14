@@ -13015,6 +13015,85 @@ def agent_failure_reasons():
     }).to_response()
 
 
+@agents_bp.route("/failure-error-patterns", methods=["GET"])
+@unified_auth_required
+def agent_failure_error_patterns():
+    """Agent failure error pattern clustering for the current user.
+
+    Groups FAILED AgentRun rows by error text prefix (first N chars),
+    then clusters similar prefixes. Returns pattern clusters with
+    count, representative error, affected agents, and time distribution
+    (by hour-of-day). Reveals systemic failure patterns.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+        prefix_len = max(10, min(120, int(request.args.get("prefix_len", 40))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+        prefix_len = 40
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "patterns": [], "total_failed": 0}).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    rows = (
+        AgentRun.query
+        .filter(
+            AgentRun.agent_id.in_(agent_ids),
+            AgentRun.status == AgentRunStatus.FAILED,
+            AgentRun.started_at >= since,
+        )
+        .with_entities(AgentRun.agent_id, AgentRun.error, AgentRun.started_at)
+        .all()
+    )
+
+    # Group by error prefix
+    pattern_data: dict = {}  # {prefix: {count, agents: set, hours: [h...], sample: str}}
+    for aid, err, started_at in rows:
+        if not err or not str(err).strip():
+            prefix = "(无错误信息)"
+        else:
+            prefix = str(err).strip().splitlines()[0].strip()[:prefix_len]
+        d = pattern_data.setdefault(prefix, {"count": 0, "agents": set(), "hours": [], "sample": err or ""})
+        d["count"] += 1
+        d["agents"].add(aid)
+        if started_at:
+            d["hours"].append(started_at.hour)
+
+    # Sort by count desc, limit
+    sorted_patterns = sorted(pattern_data.items(), key=lambda kv: kv[1]["count"], reverse=True)[:limit]
+    total_failed = sum(d["count"] for _, d in sorted_patterns)
+
+    patterns_out = []
+    for prefix, d in sorted_patterns:
+        hour_dist: dict = {}
+        for h in d["hours"]:
+            hour_dist[h] = hour_dist.get(h, 0) + 1
+        peak_hour = max(hour_dist, key=hour_dist.get) if hour_dist else None
+        patterns_out.append({
+            "pattern": prefix,
+            "count": d["count"],
+            "affected_agents": [{"agent_id": aid, "name": name_map.get(aid, f"Agent#{aid}")} for aid in sorted(d["agents"])],
+            "peak_hour": peak_hour,
+            "hour_distribution": dict(sorted(hour_dist.items())),
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "patterns": patterns_out,
+        "total_failed": total_failed,
+    }).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>/steps/<step_key>/sandbox-execution", methods=["GET"])
 @unified_auth_required
 def get_step_sandbox_execution(run_id, step_key):
