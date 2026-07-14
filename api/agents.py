@@ -10140,6 +10140,96 @@ def experiences_propagation_chain():
     }).to_response()
 
 
+@agents_bp.route("/experiences/skill-coverage-radar", methods=["GET"])
+@unified_auth_required
+def experiences_skill_coverage_radar():
+    """Per-Agent skill coverage radar across experience domains.
+
+    For each of the user's agents, counts distinct domain entries in
+    AgentExperience (valid only). Returns a domain list (up to N most
+    common) and per-agent normalized scores (0-100) so the front end can
+    render a radar/spider chart.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(20, int(request.args.get("limit", 6))))
+        domains = max(3, min(12, int(request.args.get("domains", 8))))
+    except (TypeError, ValueError):
+        limit = 6
+        domains = 8
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({
+            "agents": [], "domain_labels": [], "max_count": 0,
+        }).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    # Find top N domains by total experience count
+    domain_rows = (
+        AgentExperience.query
+        .filter(AgentExperience.agent_id.in_(agent_ids), AgentExperience.is_valid.is_(True))
+        .with_entities(AgentExperience.domain, func.count().label("cnt"))
+        .group_by(AgentExperience.domain)
+        .order_by(func.count().desc())
+        .limit(domains)
+        .all()
+    )
+    domain_labels = [d for d, _ in domain_rows if d]
+    if not domain_labels:
+        return ApiResponse.success({
+            "agents": [], "domain_labels": [], "max_count": 0,
+        }).to_response()
+
+    # Per-agent per-domain counts
+    exp_rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+            AgentExperience.domain.in_(domain_labels),
+        )
+        .with_entities(AgentExperience.agent_id, AgentExperience.domain, func.count().label("cnt"))
+        .group_by(AgentExperience.agent_id, AgentExperience.domain)
+        .all()
+    )
+
+    # Build {agent_id: {domain: count}}
+    data: dict = {}
+    for aid, dom, cnt in exp_rows:
+        data.setdefault(aid, {})[dom] = cnt
+
+    # Find max count for normalization
+    max_count = max((cnt for _, _, cnt in exp_rows), default=1)
+
+    # Sort agents by total experience count
+    totals = {aid: sum(d.values()) for aid, d in data.items()}
+    top = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+    agents_out = []
+    for aid, _ in top:
+        scores = []
+        for dom in domain_labels:
+            raw = data.get(aid, {}).get(dom, 0)
+            scores.append(round(raw / max_count * 100, 1) if max_count else 0.0)
+        agents_out.append({
+            "agent_id": aid,
+            "name": name_map.get(aid, f"Agent#{aid}"),
+            "scores": scores,
+            "total_experiences": totals.get(aid, 0),
+        })
+
+    return ApiResponse.success({
+        "agents": agents_out,
+        "domain_labels": domain_labels,
+        "max_count": max_count,
+    }).to_response()
+
+
 @agents_bp.route("/experiences/reuse-trend", methods=["GET"])
 @unified_auth_required
 def experiences_reuse_trend():
