@@ -1256,3 +1256,90 @@ def task_priority_trend():
         "trend": out,
         "totals": totals,
     }).to_response()
+
+
+@tasks_bp.route('/completion-forecast', methods=['GET'])
+@unified_auth_required
+def task_completion_forecast():
+    """Task completion forecast based on historical velocity.
+
+    Computes daily completion velocity (done tasks per day) over the
+    lookback window, then extrapolates to estimate when all remaining
+    non-done tasks will be completed. Also provides per-priority
+    breakdown of remaining counts and estimated completion dates.
+    """
+    user = get_current_user()
+    try:
+        days = max(7, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Count done tasks per day in window
+    done_rows = (
+        Task.query
+        .filter(Task.owner_id == user.id, Task.status == TaskStatus.DONE, Task.updated_at >= since)
+        .with_entities(func.date(Task.updated_at).label("d"), func.count().label("cnt"))
+        .group_by(func.date(Task.updated_at))
+        .all()
+    )
+
+    # Calculate velocity
+    total_done_in_window = sum(r.cnt for r in done_rows)
+    velocity = total_done_in_window / days  # tasks/day
+
+    # Count remaining tasks by status and priority
+    remaining = (
+        Task.query
+        .filter(Task.owner_id == user.id, ~Task.status.in_([TaskStatus.DONE, TaskStatus.CANCELLED]))
+        .with_entities(Task.status, Task.priority, func.count().label("cnt"))
+        .group_by(Task.status, Task.priority)
+        .all()
+    )
+
+    total_remaining = sum(r.cnt for r in remaining)
+    priority_remaining: dict = {}
+    for status, pri, cnt in remaining:
+        p = pri.value if hasattr(pri, "value") else str(pri)
+        priority_remaining.setdefault(p, {"remaining": 0})
+        priority_remaining[p]["remaining"] += cnt
+
+    # Estimate completion date
+    if velocity > 0 and total_remaining > 0:
+        days_to_complete = total_remaining / velocity
+        estimated_date = (datetime.utcnow() + timedelta(days=days_to_complete)).strftime("%Y-%m-%d")
+    else:
+        days_to_complete = None
+        estimated_date = None
+
+    # Per-priority estimated dates (proportional share of velocity)
+    priority_forecast = []
+    priority_order = ["critical", "high", "medium", "low"]
+    cum_days = 0.0
+    for p in priority_order:
+        pr = priority_remaining.get(p, {})
+        rem = pr.get("remaining", 0)
+        if rem > 0 and velocity > 0:
+            days_for_p = rem / velocity
+            cum_days += days_for_p
+            est = (datetime.utcnow() + timedelta(days=cum_days)).strftime("%Y-%m-%d")
+        else:
+            days_for_p = 0
+            est = None
+        priority_forecast.append({
+            "priority": p,
+            "remaining": rem,
+            "estimated_days": round(days_for_p, 1) if days_for_p else 0,
+            "estimated_date": est,
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "velocity": round(velocity, 2),
+        "total_done_in_window": total_done_in_window,
+        "total_remaining": total_remaining,
+        "days_to_complete": round(days_to_complete, 1) if days_to_complete else None,
+        "estimated_completion_date": estimated_date,
+        "priority_forecast": priority_forecast,
+    }).to_response()
