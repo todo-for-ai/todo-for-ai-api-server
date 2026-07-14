@@ -14383,3 +14383,171 @@ def _run_orchestration(user, actor_type="human"):
         pass  # never fail the cycle on history-write error
     db.session.commit()
     return report, duration, message
+
+
+@agents_bp.route("/workflows/step-dependency-bottleneck", methods=["GET"])
+@unified_auth_required
+def workflow_step_dependency_bottleneck():
+    """Identify bottleneck steps in workflow DAG critical paths.
+
+    For each workflow with step dependency information, computes:
+    - The critical path (longest total duration path through the DAG)
+    - Average duration per step across completed runs
+    - Bottleneck score: step's share of total critical path time
+
+    Returns per-workflow critical path with step durations and bottleneck scores.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Find workflows owned by user that have step definitions with depends_on
+    workflows = (
+        Workflow.query
+        .filter(Workflow.owner_id == user.id)
+        .all()
+    )
+
+    results = []
+    for wf in workflows:
+        steps = wf.steps or []
+        if not steps:
+            continue
+
+        # Build step_key -> depends_on mapping from definitions
+        step_defs = {}  # step_key -> {depends_on: [...], name: ...}
+        for s in steps:
+            dep = s.depends_on or []
+            if not isinstance(dep, list):
+                dep = []
+            step_defs[s.step_key] = {"depends_on": dep, "name": s.name or s.step_key}
+
+        # Only analyze workflows with at least one dependency edge
+        has_dep = any(v["depends_on"] for v in step_defs.values())
+        if not has_dep:
+            continue
+
+        # Get average duration per step_key from completed step runs
+        step_dur_rows = (
+            db.session.query(
+                WorkflowStepRun.step_key,
+                func.avg(
+                    func.extract("epoch", WorkflowStepRun.finished_at - WorkflowStepRun.started_at)
+                ),
+            )
+            .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
+            .filter(
+                WorkflowRun.owner_id == user.id,
+                WorkflowRun.workflow_id == wf.id,
+                WorkflowStepRun.started_at.isnot(None),
+                WorkflowStepRun.finished_at.isnot(None),
+                WorkflowStepRun.started_at >= since,
+            )
+            .group_by(WorkflowStepRun.step_key)
+            .all()
+        )
+        avg_durations = {row[0]: float(row[1]) if row[1] else 0.0 for row in step_dur_rows}
+
+        # Only include steps that have actual execution data
+        active_steps = {k: v for k, v in step_defs.items() if k in avg_durations}
+        if not active_steps:
+            continue
+
+        # Topological sort using Kahn's algorithm
+        in_degree = {k: 0 for k in active_steps}
+        adj = {k: [] for k in active_steps}  # dep -> [dependents]
+        for sk, info in active_steps.items():
+            for dep in info["depends_on"]:
+                if dep in active_steps:
+                    in_degree[sk] += 1
+                    adj[dep].append(sk)
+
+        queue = [k for k, d in in_degree.items() if d == 0]
+        topo_order = []
+        while queue:
+            node = queue.pop(0)
+            topo_order.append(node)
+            for nb in adj[node]:
+                in_degree[nb] -= 1
+                if in_degree[nb] == 0:
+                    queue.append(nb)
+
+        # If cycle detected, skip this workflow
+        if len(topo_order) != len(active_steps):
+            continue
+
+        # Compute longest path (critical path) using DP
+        # dist[sk] = longest total duration to reach sk
+        dist = {k: 0.0 for k in active_steps}
+        parent = {k: None for k in active_steps}
+        for sk in topo_order:
+            for dep in active_steps[sk]["depends_on"]:
+                if dep in active_steps:
+                    candidate = dist[dep] + avg_durations.get(sk, 0.0)
+                    if candidate > dist[sk]:
+                        dist[sk] = candidate
+                        parent[sk] = dep
+            # If no dependencies, dist = own duration
+            if not active_steps[sk]["depends_on"] or all(d not in active_steps for d in active_steps[sk]["depends_on"]):
+                dist[sk] = max(dist[sk], avg_durations.get(sk, 0.0))
+
+        # Find the endpoint with the longest distance
+        end_node = max(topo_order, key=lambda k: dist[k]) if topo_order else None
+        if end_node is None:
+            continue
+
+        # Trace back the critical path
+        critical_path = []
+        cur = end_node
+        visited = set()
+        while cur is not None and cur not in visited:
+            visited.add(cur)
+            critical_path.append(cur)
+            cur = parent[cur]
+        critical_path.reverse()
+
+        total_cp_duration = sum(avg_durations.get(sk, 0.0) for sk in critical_path)
+        if total_cp_duration <= 0:
+            continue
+
+        path_steps = []
+        for sk in critical_path:
+            dur = avg_durations.get(sk, 0.0)
+            path_steps.append({
+                "step_key": sk,
+                "name": active_steps[sk]["name"],
+                "depends_on": active_steps[sk]["depends_on"],
+                "avg_duration": round(dur, 1),
+                "bottleneck_score": round(dur / total_cp_duration * 100, 1),
+            })
+
+        # Also include all steps with duration for reference
+        all_steps_info = []
+        for sk, info in sorted(active_steps.items(), key=lambda kv: avg_durations.get(kv[0], 0.0), reverse=True):
+            all_steps_info.append({
+                "step_key": sk,
+                "name": info["name"],
+                "depends_on": info["depends_on"],
+                "avg_duration": round(avg_durations.get(sk, 0.0), 1),
+                "is_on_critical_path": sk in critical_path,
+            })
+
+        results.append({
+            "workflow_id": wf.id,
+            "workflow_name": wf.name or f"Workflow#{wf.id}",
+            "critical_path": path_steps,
+            "critical_path_duration": round(total_cp_duration, 1),
+            "all_steps": all_steps_info,
+            "total_steps": len(step_defs),
+            "active_steps": len(active_steps),
+        })
+
+    # Sort by critical path duration descending, limit
+    results.sort(key=lambda r: r["critical_path_duration"], reverse=True)
+    return ApiResponse.success({"workflows": results[:limit]}).to_response()
