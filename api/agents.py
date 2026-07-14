@@ -3640,6 +3640,78 @@ def workflow_step_duration_histogram():
     return ApiResponse.success({"items": items[:limit], "bin_labels": [b[0] for b in BINS]}).to_response()
 
 
+@agents_bp.route("/workflows/run-duration-percentiles", methods=["GET"])
+@unified_auth_required
+def workflow_run_duration_percentiles():
+    """Daily trend of workflow run duration percentiles (P50/P90/P95).
+
+    For each day, aggregates completed WorkflowRun durations (finished_at -
+    started_at in seconds) and returns P50, P90, P95. Useful for spotting
+    regressions in workflow execution time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    runs = (
+        db.session.query(
+            func.date(WorkflowRun.finished_at).label("day"),
+            WorkflowRun.finished_at,
+            WorkflowRun.started_at,
+        )
+        .filter(
+            WorkflowRun.status == WorkflowStatus.COMPLETED,
+            WorkflowRun.finished_at >= cutoff,
+            WorkflowRun.started_at.isnot(None),
+            WorkflowRun.finished_at.isnot(None),
+        )
+        .order_by(func.date(WorkflowRun.finished_at))
+        .all()
+    )
+
+    # Group by day
+    from collections import defaultdict
+    by_day = defaultdict(list)
+    for r in runs:
+        dur = (r.finished_at - r.started_at).total_seconds()
+        if dur >= 0:
+            by_day[str(r.day)].append(dur)
+
+    def percentile(sorted_vals, pct):
+        n = len(sorted_vals)
+        if n == 0:
+            return 0
+        idx = int(pct * (n - 1))
+        return round(sorted_vals[idx], 1)
+
+    buckets = []
+    total_runs = 0
+    total_duration = 0.0
+    for day in sorted(by_day):
+        vals = sorted(by_day[day])
+        n = len(vals)
+        total_runs += n
+        total_duration += sum(vals)
+        buckets.append({
+            "date": day,
+            "count": n,
+            "p50": percentile(vals, 0.50),
+            "p90": percentile(vals, 0.90),
+            "p95": percentile(vals, 0.95),
+            "median": percentile(vals, 0.50),
+            "avg": round(sum(vals) / n, 1) if n else 0,
+        })
+
+    return ApiResponse.success({
+        "buckets": buckets,
+        "total_runs": total_runs,
+        "total_avg_duration": round(total_duration / total_runs, 1) if total_runs else 0,
+    }).to_response()
+
+
 @agents_bp.route("/workflows/failed-steps/by-duration", methods=["GET"])
 @unified_auth_required
 def workflow_failed_steps_by_duration():
