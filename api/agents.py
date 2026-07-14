@@ -4268,6 +4268,73 @@ def workflow_step_retry_topology():
     }).to_response()
 
 
+@agents_bp.route("/workflows/step-hourly-distribution", methods=["GET"])
+@unified_auth_required
+def workflow_step_hourly_distribution():
+    """Step execution hour-of-day distribution for the current user.
+
+    Groups WorkflowStepRun by (step_key, hour_of_day) based on
+    started_at. Returns per-step hourly distribution revealing which
+    steps run during business hours vs overnight.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    rows = (
+        WorkflowStepRun.query
+        .filter(
+            WorkflowStepRun.run_id.in_(
+                WorkflowRun.query.filter(
+                    WorkflowRun.owner_id == user.id,
+                    WorkflowRun.finished_at >= since,
+                ).with_entities(WorkflowRun.id)
+            ),
+            WorkflowStepRun.started_at.isnot(None),
+        )
+        .with_entities(WorkflowStepRun.step_key, WorkflowStepRun.started_at)
+        .all()
+    )
+
+    step_hours: dict = {}  # {step_key: {hour: count}}
+    step_total: dict = {}  # {step_key: total}
+    for step_key, started_at in rows:
+        if not step_key:
+            continue
+        h = started_at.hour
+        bucket = step_hours.setdefault(step_key, {})
+        bucket[h] = bucket.get(h, 0) + 1
+        step_total[step_key] = step_total.get(step_key, 0) + 1
+
+    # Top N by total executions
+    top = sorted(step_total.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+    steps_out = []
+    for sk, total in top:
+        hours = step_hours.get(sk, {})
+        peak_hour = max(hours, key=hours.get) if hours else None
+        # Business hours ratio (8-18)
+        biz = sum(hours.get(h, 0) for h in range(8, 18))
+        steps_out.append({
+            "step_key": sk,
+            "total": total,
+            "hours": hours,
+            "peak_hour": peak_hour,
+            "business_hours_ratio": round(biz / total * 100, 1) if total else 0.0,
+        })
+
+    return ApiResponse.success({
+        "days": days,
+        "steps": steps_out,
+    }).to_response()
+
+
 @agents_bp.route("/conflicts/sandbox-correlation", methods=["GET"])
 @unified_auth_required
 def conflicts_sandbox_correlation():
