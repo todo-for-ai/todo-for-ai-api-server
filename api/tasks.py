@@ -733,6 +733,96 @@ def task_overdue_trend():
     }).to_response()
 
 
+@tasks_bp.route('/overdue-by-assignee', methods=['GET'])
+@unified_auth_required
+def task_overdue_by_assignee():
+    """Overdue task count grouped by assignee (Agent) for the current user.
+
+    Counts tasks that are overdue (due_date < now, status not done/cancelled)
+    and have an active assignment. Per agent: overdue count, by-priority
+    breakdown, and earliest overdue due_date. Sorted by overdue count
+    descending. Reveals which agents bear the heaviest overdue burden.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+
+    from models.agent import TaskAssignment, TaskAssignmentState, Agent
+
+    now = datetime.utcnow()
+    non_terminal = [TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW, TaskStatus.BLOCKED]
+
+    # Find overdue tasks with active assignments
+    overdue_tasks = (
+        Task.query
+        .join(Project)
+        .filter(
+            Project.owner_id == user.id,
+            Task.due_date.isnot(None),
+            Task.due_date < now,
+            Task.status.in_(non_terminal),
+        )
+        .with_entities(Task.id, Task.priority, Task.due_date)
+        .all()
+    )
+
+    overdue_ids = [t.id for t in overdue_tasks]
+    if not overdue_ids:
+        return ApiResponse.success({"items": [], "total_overdue": 0}).to_response()
+
+    # Map task_id -> (priority, due_date)
+    task_meta = {t.id: (t.priority, t.due_date) for t in overdue_tasks}
+
+    # Find active assignments for these overdue tasks
+    assignments = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.task_id.in_(overdue_ids),
+            TaskAssignment.state.in_([TaskAssignmentState.ASSIGNED, TaskAssignmentState.CLAIMED]),
+        )
+        .with_entities(TaskAssignment.task_id, TaskAssignment.agent_id)
+        .all()
+    )
+
+    # Resolve agent names
+    agent_ids = list(set(a.agent_id for a in assignments))
+    agent_names = {}
+    if agent_ids:
+        for a in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all():
+            agent_names[a.id] = a.name or f"Agent#{a.id}"
+
+    buckets = {}  # {agent_id: {count, by_priority, earliest_due}}
+    for task_id, agent_id in assignments:
+        priority, due_date = task_meta.get(task_id, (None, None))
+        b = buckets.get(agent_id)
+        if b is None:
+            b = {"count": 0, "by_priority": {}, "earliest_due": None}
+            buckets[agent_id] = b
+        b["count"] += 1
+        p = priority or "unknown"
+        b["by_priority"][p] = b["by_priority"].get(p, 0) + 1
+        if due_date and (b["earliest_due"] is None or due_date < b["earliest_due"]):
+            b["earliest_due"] = due_date
+
+    items = []
+    for aid, b in buckets.items():
+        items.append({
+            "agent_id": aid,
+            "name": agent_names.get(aid, f"Agent#{aid}"),
+            "overdue": b["count"],
+            "by_priority": b["by_priority"],
+            "earliest_due": b["earliest_due"].isoformat() if b["earliest_due"] else None,
+        })
+    items.sort(key=lambda x: x["overdue"], reverse=True)
+
+    return ApiResponse.success({
+        "items": items[:limit],
+        "total_overdue": len(overdue_ids),
+    }).to_response()
+
+
 @tasks_bp.route('/completion-by-project', methods=['GET'])
 @unified_auth_required
 def task_completion_by_project():
