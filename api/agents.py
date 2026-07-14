@@ -4833,6 +4833,97 @@ def agent_health_trend():
     }).to_response()
 
 
+@agents_bp.route("/health/state-transitions", methods=["GET"])
+@unified_auth_required
+def agent_health_state_transitions():
+    """Agent health state transition flow for the current user.
+
+    Based on daily health trend data, classifies each agent-day as
+    healthy/degraded/critical based on reputation score thresholds.
+    Counts transitions between states, returning a flow suitable for
+    Sankey-style visualization.
+    """
+    user = get_current_user()
+    try:
+        days = max(7, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"days": days, "transitions": [], "states": []}).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    # Get daily scores per agent from audit log
+    rows = (
+        AuditLog.query
+        .filter(
+            AuditLog.action == "reputation.update",
+            AuditLog.resource_type == "agent",
+            AuditLog.resource_id.in_(agent_ids),
+            AuditLog.created_at >= since,
+        )
+        .with_entities(
+            func.date(AuditLog.created_at).label("d"),
+            AuditLog.resource_id,
+            AuditLog.detail,
+        )
+        .all()
+    )
+
+    # Classify score → state
+    def classify(score: float) -> str:
+        if score >= 80:
+            return "healthy"
+        if score >= 50:
+            return "degraded"
+        return "critical"
+
+    # Build {agent_id: {date: state}} using last score per day
+    agent_states: dict = {}  # {agent_id: [(date, state)]}
+    for d, aid, detail in rows:
+        if not d:
+            continue
+        try:
+            new_score = detail.get("new_score", 0) if isinstance(detail, dict) else 0
+        except (AttributeError, TypeError):
+            new_score = 0
+        state = classify(new_score)
+        agent_states.setdefault(aid, {})[d.isoformat()] = state
+
+    # Count transitions
+    transitions: dict = {}  # {(from_state, to_state): count}
+    state_totals: dict = {}  # {state: count}
+    for aid, date_states in agent_states.items():
+        sorted_dates = sorted(date_states.items())
+        for i in range(len(sorted_dates)):
+            _, s = sorted_dates[i]
+            state_totals[s] = state_totals.get(s, 0) + 1
+            if i > 0:
+                prev_s = sorted_dates[i - 1][1]
+                if prev_s != s:
+                    key = (prev_s, s)
+                    transitions[key] = transitions.get(key, 0) + 1
+
+    # Format for Sankey
+    states = ["healthy", "degraded", "critical"]
+    flows = []
+    for (src, dst), cnt in sorted(transitions.items(), key=lambda kv: kv[1], reverse=True):
+        flows.append({"source": src, "target": dst, "value": cnt})
+
+    return ApiResponse.success({
+        "days": days,
+        "states": [{"name": s, "count": state_totals.get(s, 0)} for s in states],
+        "flows": flows,
+        "total_transitions": sum(transitions.values()),
+    }).to_response()
+
+
 @agents_bp.route("/workflows/run-trend", methods=["GET"])
 @unified_auth_required
 def workflow_run_trend():
