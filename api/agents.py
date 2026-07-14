@@ -12108,6 +12108,83 @@ def agent_productivity_hourly_heatmap():
     }).to_response()
 
 
+@agents_bp.route("/productivity/weekly-comparison", methods=["GET"])
+@unified_auth_required
+def agent_productivity_weekly_comparison():
+    """Week-over-week Agent productivity comparison for the current user.
+
+    Buckets done TaskAssignments by ISO week of completed_at and agent_id.
+    Returns per-agent current_week / previous_week done counts and change
+    percentage, sorted by current week descending. Reveals which agents
+    are ramping up or slowing down.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(30, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"agents": [], "total_this_week": 0, "total_last_week": 0}).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    # Compute current and previous ISO week boundaries
+    now = datetime.utcnow()
+    # Monday of current week
+    current_week_start = now - timedelta(days=now.weekday())
+    current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+    prev_week_start = current_week_start - timedelta(weeks=1)
+
+    rows = (
+        TaskAssignment.query
+        .filter(
+            TaskAssignment.agent_id.in_(agent_ids),
+            TaskAssignment.state == TaskAssignmentState.DONE,
+            TaskAssignment.completed_at.isnot(None),
+            TaskAssignment.completed_at >= prev_week_start,
+        )
+        .with_entities(TaskAssignment.agent_id, TaskAssignment.completed_at)
+        .all()
+    )
+
+    agent_week: dict = {}  # {agent_id: {"this_week": n, "last_week": m}}
+    total_this = 0
+    total_last = 0
+    for aid, completed_at in rows:
+        if aid not in agent_week:
+            agent_week[aid] = {"this_week": 0, "last_week": 0}
+        if completed_at >= current_week_start:
+            agent_week[aid]["this_week"] += 1
+            total_this += 1
+        else:
+            agent_week[aid]["last_week"] += 1
+            total_last += 1
+
+    agents_out = []
+    for aid, wk in sorted(agent_week.items(), key=lambda kv: kv[1]["this_week"], reverse=True)[:limit]:
+        this_w = wk["this_week"]
+        last_w = wk["last_week"]
+        change = round((this_w - last_w) / last_w * 100, 1) if last_w > 0 else (100.0 if this_w > 0 else 0.0)
+        agents_out.append({
+            "agent_id": aid,
+            "name": name_map.get(aid, f"Agent#{aid}"),
+            "this_week": this_w,
+            "last_week": last_w,
+            "change_pct": change,
+        })
+
+    return ApiResponse.success({
+        "agents": agents_out,
+        "total_this_week": total_this,
+        "total_last_week": total_last,
+    }).to_response()
+
+
 @agents_bp.route("/failure-reasons", methods=["GET"])
 @unified_auth_required
 def agent_failure_reasons():
