@@ -1187,3 +1187,72 @@ def task_completion_rate_by_project():
         })
 
     return ApiResponse.success({"projects": projects, "total_tasks": total_tasks, "total_done": total_done}).to_response()
+
+
+@tasks_bp.route('/priority-trend', methods=['GET'])
+@unified_auth_required
+def task_priority_trend():
+    """Daily task priority distribution trend for the current user.
+
+    Groups tasks by created_at date and priority (critical/high/medium/low),
+    returning per-day counts per priority level over the last N days.
+    Reveals how the task priority mix shifts over time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    rows = (
+        Task.query
+        .filter(Task.owner_id == user.id, Task.created_at >= since)
+        .with_entities(
+            func.date(Task.created_at).label("d"),
+            Task.priority,
+            func.count().label("cnt"),
+        )
+        .group_by(func.date(Task.created_at), Task.priority)
+        .order_by(func.date(Task.created_at))
+        .all()
+    )
+
+    priority_keys = ["critical", "high", "medium", "low"]
+    trend: dict = {}  # {date_str: {priority: count}}
+    for d, pri, cnt in rows:
+        ds = d.isoformat() if d else None
+        if not ds:
+            continue
+        bucket = trend.setdefault(ds, {})
+        p = pri.value if hasattr(pri, "value") else str(pri)
+        bucket[p] = cnt
+
+    # Build full date range
+    date_range = []
+    cur = since.date() + timedelta(days=1)
+    end = datetime.utcnow().date()
+    while cur <= end:
+        date_range.append(cur.isoformat())
+        cur += timedelta(days=1)
+
+    # Fill gaps
+    out = []
+    for ds in date_range:
+        b = trend.get(ds, {})
+        out.append({
+            "date": ds,
+            "critical": b.get("critical", 0),
+            "high": b.get("high", 0),
+            "medium": b.get("medium", 0),
+            "low": b.get("low", 0),
+        })
+
+    totals = {k: sum(d[k] for d in out) for k in priority_keys}
+
+    return ApiResponse.success({
+        "days": days,
+        "trend": out,
+        "totals": totals,
+    }).to_response()
