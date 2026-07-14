@@ -4750,6 +4750,84 @@ def workflow_run_trend():
     }).to_response()
 
 
+@agents_bp.route("/workflows/success-rate-by-workflow", methods=["GET"])
+@unified_auth_required
+def workflow_success_rate_by_workflow():
+    """Per-workflow run success rate comparison for the current user.
+
+    Groups finished workflow runs by workflow_id. Per workflow: total runs,
+    succeeded, failed, cancelled, success_rate, avg duration (seconds).
+    Sorted by total runs descending, limited to top N. Reveals which
+    workflows are the most/least reliable.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Get finished runs in window
+    rows = (
+        WorkflowRun.query
+        .filter(
+            WorkflowRun.owner_id == user.id,
+            WorkflowRun.finished_at.isnot(None),
+            WorkflowRun.finished_at >= since,
+        )
+        .with_entities(
+            WorkflowRun.workflow_id,
+            WorkflowRun.status,
+            WorkflowRun.started_at,
+            WorkflowRun.finished_at,
+        )
+        .all()
+    )
+
+    # Resolve workflow names
+    wf_ids = list(set(r.workflow_id for r in rows))
+    name_map = {}
+    if wf_ids:
+        for wid, wname in db.session.query(Workflow.id, Workflow.name).filter(Workflow.id.in_(wf_ids)).all():
+            name_map[wid] = wname or f"Workflow#{wid}"
+
+    wf_data: dict = {}  # {wf_id: {total, succeeded, failed, cancelled, dur_sum, dur_n}}
+    for wid, status, started, finished in rows:
+        if wid not in wf_data:
+            wf_data[wid] = {"total": 0, "succeeded": 0, "failed": 0, "cancelled": 0, "dur_sum": 0.0, "dur_n": 0}
+        wf_data[wid]["total"] += 1
+        s = status.value if status else ""
+        if s == "succeeded":
+            wf_data[wid]["succeeded"] += 1
+        elif s == "failed":
+            wf_data[wid]["failed"] += 1
+        elif s == "cancelled":
+            wf_data[wid]["cancelled"] += 1
+        if started and finished:
+            dur = (finished - started).total_seconds()
+            wf_data[wid]["dur_sum"] += dur
+            wf_data[wid]["dur_n"] += 1
+
+    items = []
+    for wid, d in sorted(wf_data.items(), key=lambda kv: kv[1]["total"], reverse=True)[:limit]:
+        total = d["total"]
+        items.append({
+            "workflow_id": wid,
+            "name": name_map.get(wid, f"Workflow#{wid}"),
+            "total": total,
+            "succeeded": d["succeeded"],
+            "failed": d["failed"],
+            "cancelled": d["cancelled"],
+            "success_rate": round(d["succeeded"] / total * 100, 1) if total else 0.0,
+            "avg_duration": round(d["dur_sum"] / d["dur_n"], 1) if d["dur_n"] else 0.0,
+        })
+
+    return ApiResponse.success({"workflows": items}).to_response()
+
+
 @agents_bp.route("/workflow-runs/<int:run_id>", methods=["GET"])
 @unified_auth_required
 def get_workflow_run(run_id):
