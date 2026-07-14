@@ -3558,6 +3558,88 @@ def workflow_step_stats():
     return ApiResponse.success({"items": items[:limit]}).to_response()
 
 
+@agents_bp.route("/workflows/step-duration-histogram", methods=["GET"])
+@unified_auth_required
+def workflow_step_duration_histogram():
+    """Per-step-key duration histogram for completed workflow steps.
+
+    For each step_key, buckets completed step durations into fixed bins
+    (0-30s, 30-120s, 2-5m, 5-15m, 15-30m, 30m+) and computes median
+    and P95. Reveals execution time distribution characteristics —
+    whether steps are consistently fast, have a long tail, or are bimodal.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(30, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+
+    rows = (
+        WorkflowStepRun.query
+        .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
+        .filter(
+            WorkflowRun.owner_id == user.id,
+            WorkflowStepRun.started_at.isnot(None),
+            WorkflowStepRun.finished_at.isnot(None),
+        )
+        .with_entities(
+            WorkflowStepRun.step_key,
+            WorkflowStepRun.started_at,
+            WorkflowStepRun.finished_at,
+        )
+        .all()
+    )
+
+    BINS = [
+        ("0-30s", 0, 30),
+        ("30-120s", 30, 120),
+        ("2-5m", 120, 300),
+        ("5-15m", 300, 900),
+        ("15-30m", 900, 1800),
+        ("30m+", 1800, None),
+    ]
+
+    agg = {}  # {step_key: [duration_seconds, ...]}
+    for step_key, started, finished in rows:
+        if not started or not finished or finished <= started:
+            continue
+        dur = (finished - started).total_seconds()
+        agg.setdefault(step_key, []).append(dur)
+
+    items = []
+    for step_key, durations in agg.items():
+        if not durations:
+            continue
+        sorted_d = sorted(durations)
+        n = len(sorted_d)
+        # histogram bins
+        bins = {}
+        for label, lo, hi in BINS:
+            if hi is None:
+                count = sum(1 for d in sorted_d if d >= lo)
+            else:
+                count = sum(1 for d in sorted_d if lo <= d < hi)
+            bins[label] = count
+        # median
+        mid = n // 2
+        median = sorted_d[mid] if n % 2 == 1 else (sorted_d[mid - 1] + sorted_d[mid]) / 2
+        # P95
+        p95_idx = min(n - 1, int(0.95 * (n - 1)))
+        p95 = sorted_d[p95_idx]
+        items.append({
+            "step_key": step_key,
+            "sample_size": n,
+            "bins": bins,
+            "median_seconds": round(median, 1),
+            "p95_seconds": round(p95, 1),
+            "min_seconds": round(sorted_d[0], 1),
+            "max_seconds": round(sorted_d[-1], 1),
+        })
+
+    items.sort(key=lambda x: x["sample_size"], reverse=True)
+    return ApiResponse.success({"items": items[:limit], "bin_labels": [b[0] for b in BINS]}).to_response()
+
+
 @agents_bp.route("/workflows/failed-steps/by-duration", methods=["GET"])
 @unified_auth_required
 def workflow_failed_steps_by_duration():
