@@ -10163,6 +10163,103 @@ def experiences_reuse_trend():
     }).to_response()
 
 
+@agents_bp.route("/experiences/confidence-decay-forecast", methods=["GET"])
+@unified_auth_required
+def experiences_confidence_decay_forecast():
+    """Confidence decay forecast using linear regression on daily averages.
+
+    Computes daily average confidence from the reuse trend, fits a simple
+    linear regression, and projects 7 days into the future. Returns the
+    historical trend plus forecast points, regression slope, and projected
+    days-until-decay-threshold (avg confidence < 0.5). Reveals whether
+    the experience pool is decaying and when it might cross the decay
+    threshold if the trend continues.
+    """
+    user = get_current_user()
+    try:
+        days = max(7, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"trend": [], "forecast": [], "slope": 0, "r_squared": 0, "days_to_decay": None}).to_response()
+
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_valid.is_(True),
+            AgentExperience.confidence.isnot(None),
+        )
+        .with_entities(
+            AgentExperience.confidence,
+            AgentExperience.last_reused_at,
+            AgentExperience.created_at,
+        )
+        .all()
+    )
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Bucket by date
+    buckets: dict = {}
+    for conf, last_reused_at, created_at in rows:
+        ref = last_reused_at or created_at
+        if ref is None or ref < since:
+            continue
+        d = ref.date().isoformat()
+        buckets.setdefault(d, []).append(conf if conf is not None else 0.0)
+
+    if len(buckets) < 3:
+        return ApiResponse.success({"trend": [], "forecast": [], "slope": 0, "r_squared": 0, "days_to_decay": None}).to_response()
+
+    # Build sorted daily averages
+    daily = []
+    for d in sorted(buckets.keys()):
+        vals = buckets[d]
+        daily.append({"date": d, "avg_confidence": round(sum(vals) / len(vals), 3)})
+
+    # Linear regression: y = a + b*x
+    n = len(daily)
+    xs = list(range(n))
+    ys = [d["avg_confidence"] for d in daily]
+    x_mean = sum(xs) / n
+    y_mean = sum(ys) / n
+    ss_xy = sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys))
+    ss_xx = sum((x - x_mean) ** 2 for x in xs)
+    ss_yy = sum((y - y_mean) ** 2 for y in ys)
+
+    b = ss_xy / ss_xx if ss_xx else 0.0
+    a = y_mean - b * x_mean
+    r_squared = (ss_xy ** 2) / (ss_xx * ss_yy) if ss_xx and ss_yy else 0.0
+
+    # Forecast 7 days ahead
+    from datetime import date as date_type
+    last_date = datetime.strptime(daily[-1]["date"], "%Y-%m-%d").date()
+    forecast = []
+    for i in range(1, 8):
+        fx = n - 1 + i
+        fy = a + b * fx
+        fd = last_date + timedelta(days=i)
+        forecast.append({"date": fd.isoformat(), "predicted_confidence": round(max(0, min(1, fy)), 3)})
+
+    # Days until avg confidence < 0.5
+    days_to_decay = None
+    if b < 0 and y_mean > 0.5:
+        # Solve a + b * x = 0.5
+        x_decay = (0.5 - a) / b
+        days_to_decay = max(0, round(x_decay - (n - 1)))
+
+    return ApiResponse.success({
+        "trend": daily,
+        "forecast": forecast,
+        "slope": round(b, 4),
+        "r_squared": round(r_squared, 4),
+        "days_to_decay": days_to_decay,
+    }).to_response()
+
+
 @agents_bp.route("/experiences/low-confidence", methods=["GET"])
 @unified_auth_required
 def experiences_low_confidence():
