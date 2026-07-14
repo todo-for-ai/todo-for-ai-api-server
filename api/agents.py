@@ -11481,6 +11481,77 @@ def sandbox_template_usage():
     return ApiResponse.success({"items": items}).to_response()
 
 
+@agents_bp.route("/run-resource-usage", methods=["GET"])
+@unified_auth_required
+def agent_run_resource_usage():
+    """Agent run resource usage ranking.
+
+    Per-agent: total runs, total wall-clock hours (sum of ended_at -
+    started_at for completed runs), average run duration in minutes.
+    Sorted by total hours descending. Reveals which agents consume
+    the most execution time.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(50, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"items": [], "total_runs": 0}).to_response()
+
+    rows = (
+        AgentRun.query
+        .filter(
+            AgentRun.agent_id.in_(agent_ids),
+            AgentRun.status == AgentRunStatus.COMPLETED,
+            AgentRun.ended_at >= since,
+            AgentRun.started_at.isnot(None),
+            AgentRun.ended_at.isnot(None),
+        )
+        .with_entities(
+            AgentRun.agent_id,
+            AgentRun.started_at,
+            AgentRun.ended_at,
+        )
+        .all()
+    )
+
+    from collections import defaultdict
+    agent_data: dict = {}
+    total_runs = 0
+    for aid, started, ended in rows:
+        dur = (ended - started).total_seconds()
+        if dur < 0:
+            continue
+        if aid not in agent_data:
+            agent_data[aid] = {"count": 0, "total_seconds": 0.0}
+        agent_data[aid]["count"] += 1
+        agent_data[aid]["total_seconds"] += dur
+        total_runs += 1
+
+    # Attach agent names
+    id_name_map = dict(Agent.query.filter(Agent.id.in_(agent_data.keys())).with_entities(Agent.id, Agent.name).all())
+
+    items = []
+    for aid, d in agent_data.items():
+        avg_min = round(d["total_seconds"] / d["count"] / 60, 1) if d["count"] else 0
+        items.append({
+            "agent_id": aid,
+            "name": id_name_map.get(aid, f"Agent#{aid}"),
+            "total_runs": d["count"],
+            "total_hours": round(d["total_seconds"] / 3600, 1),
+            "avg_run_minutes": avg_min,
+        })
+    items.sort(key=lambda x: x["total_hours"], reverse=True)
+
+    return ApiResponse.success({"items": items[:limit], "total_runs": total_runs}).to_response()
+
+
 @agents_bp.route("/productivity", methods=["GET"])
 @unified_auth_required
 def agent_productivity():
