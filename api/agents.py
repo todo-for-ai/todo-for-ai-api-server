@@ -3712,6 +3712,66 @@ def workflow_run_duration_percentiles():
     }).to_response()
 
 
+@agents_bp.route("/workflows/step-failure-rate", methods=["GET"])
+@unified_auth_required
+def workflow_step_failure_rate():
+    """Per-step-key failure rate ranking.
+
+    For each step_key, counts total step runs and failed ones,
+    computing the failure rate percentage. Sorted by failure rate
+    descending. Reveals which workflow steps are the least reliable.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(50, int(request.args.get("limit", 15))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 15
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+
+    rows = (
+        WorkflowStepRun.query
+        .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
+        .filter(WorkflowRun.owner_id == user.id, WorkflowStepRun.created_at >= cutoff)
+        .with_entities(
+            WorkflowStepRun.step_key,
+            WorkflowStepRun.status,
+        )
+        .all()
+    )
+
+    from collections import defaultdict
+    step_data: dict = defaultdict(lambda: {"total": 0, "failed": 0})
+    for step_key, status in rows:
+        if not step_key:
+            continue
+        step_data[step_key]["total"] += 1
+        if status == StepStatus.FAILED:
+            step_data[step_key]["failed"] += 1
+
+    items = []
+    total_steps = 0
+    total_failed = 0
+    for step_key, d in step_data.items():
+        total_steps += d["total"]
+        total_failed += d["failed"]
+        items.append({
+            "step_key": step_key,
+            "total": d["total"],
+            "failed": d["failed"],
+            "failure_rate": round(d["failed"] / d["total"] * 100, 1) if d["total"] else 0.0,
+        })
+    items.sort(key=lambda x: x["failure_rate"], reverse=True)
+
+    return ApiResponse.success({
+        "items": items[:limit],
+        "total_steps": total_steps,
+        "total_failed": total_failed,
+    }).to_response()
+
+
 @agents_bp.route("/workflows/failed-steps/by-duration", methods=["GET"])
 @unified_auth_required
 def workflow_failed_steps_by_duration():
