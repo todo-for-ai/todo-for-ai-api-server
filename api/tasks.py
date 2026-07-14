@@ -823,6 +823,79 @@ def task_overdue_by_assignee():
     }).to_response()
 
 
+@tasks_bp.route('/overdue-clustering', methods=['GET'])
+@unified_auth_required
+def task_overdue_clustering():
+    """Overdue task clustering analysis by project and priority for the current user.
+
+    Groups overdue tasks (due_date < now, status not done/cancelled) by
+    project_id and priority. Per cluster: project name, priority, count,
+    avg days overdue, and representative task names. Sorted by count
+    descending. Reveals where overdue tasks concentrate and why.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(30, int(request.args.get("limit", 15))))
+    except (TypeError, ValueError):
+        limit = 15
+
+    now = datetime.utcnow()
+    non_terminal = [TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW, TaskStatus.BLOCKED]
+
+    overdue_tasks = (
+        Task.query
+        .join(Project)
+        .filter(
+            Project.owner_id == user.id,
+            Task.due_date.isnot(None),
+            Task.due_date < now,
+            Task.status.in_(non_terminal),
+        )
+        .with_entities(
+            Task.id, Task.title, Task.priority, Task.due_date,
+            Task.project_id, Project.name,
+        )
+        .all()
+    )
+
+    if not overdue_tasks:
+        return ApiResponse.success({"clusters": [], "total_overdue": 0}).to_response()
+
+    # Group by (project_id, priority)
+    cluster_data: dict = {}  # {(pid, priority): {name, count, overdue_days_sum, titles}}
+    total_overdue = 0
+    for tid, title, priority, due_date, pid, pname in overdue_tasks:
+        p = priority.value if priority else "unknown"
+        key = (pid, p)
+        if key not in cluster_data:
+            cluster_data[key] = {
+                "project_id": pid, "project_name": pname or f"Project#{pid}",
+                "priority": p, "count": 0, "overdue_days_sum": 0.0, "titles": [],
+            }
+        cluster_data[key]["count"] += 1
+        total_overdue += 1
+        days_overdue = (now - due_date).total_seconds() / 86400 if due_date else 0
+        cluster_data[key]["overdue_days_sum"] += days_overdue
+        if title and len(cluster_data[key]["titles"]) < 3:
+            cluster_data[key]["titles"].append(title[:60])
+
+    clusters = []
+    for key, d in sorted(cluster_data.items(), key=lambda kv: kv[1]["count"], reverse=True)[:limit]:
+        clusters.append({
+            "project_id": d["project_id"],
+            "project_name": d["project_name"],
+            "priority": d["priority"],
+            "count": d["count"],
+            "avg_days_overdue": round(d["overdue_days_sum"] / d["count"], 1) if d["count"] else 0,
+            "titles": d["titles"],
+        })
+
+    return ApiResponse.success({
+        "clusters": clusters,
+        "total_overdue": total_overdue,
+    }).to_response()
+
+
 @tasks_bp.route('/completion-by-project', methods=['GET'])
 @unified_auth_required
 def task_completion_by_project():
