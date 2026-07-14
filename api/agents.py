@@ -9899,6 +9899,86 @@ def experiences_source_distribution():
     return ApiResponse.success({"sources": sources, "total": total}).to_response()
 
 
+@agents_bp.route("/experiences/propagation-chain", methods=["GET"])
+@unified_auth_required
+def experiences_propagation_chain():
+    """Experience sharing propagation chain for the current user.
+
+    Groups shared experiences (is_shared=True) by source agent_id. Per-agent:
+    shared_count, total_reuses, top domains, and top propagated experiences.
+    Reveals which agents contribute most to collective learning and how
+    knowledge flows from source to the rest of the fleet.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+    if not agent_ids:
+        return ApiResponse.success({"chains": [], "total_shared": 0, "total_propagated": 0}).to_response()
+
+    name_map = {
+        aid: name
+        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
+    }
+
+    # Query all shared, valid experiences
+    rows = (
+        AgentExperience.query
+        .filter(
+            AgentExperience.agent_id.in_(agent_ids),
+            AgentExperience.is_shared.is_(True),
+            AgentExperience.is_valid.is_(True),
+        )
+        .all()
+    )
+
+    chain_data: dict = {}  # {agent_id: {shared_count, total_reuses, domains: {d: count}, top_exp: [...]}}
+    total_shared = 0
+    total_propagated = 0
+    for exp in rows:
+        aid = exp.agent_id
+        if aid not in chain_data:
+            chain_data[aid] = {"shared_count": 0, "total_reuses": 0, "domains": {}, "top_exp": []}
+        chain_data[aid]["shared_count"] += 1
+        total_shared += 1
+        reuses = exp.times_reused or 0
+        chain_data[aid]["total_reuses"] += reuses
+        total_propagated += reuses
+        if exp.domain:
+            chain_data[aid]["domains"][exp.domain] = chain_data[aid]["domains"].get(exp.domain, 0) + 1
+        chain_data[aid]["top_exp"].append({
+            "id": exp.id,
+            "domain": exp.domain,
+            "experience_type": exp.experience_type,
+            "times_reused": reuses,
+            "confidence": exp.confidence,
+        })
+
+    chains = []
+    for aid, d in sorted(chain_data.items(), key=lambda kv: kv[1]["total_reuses"], reverse=True)[:limit]:
+        # Sort top_exp by times_reused desc, keep top 5
+        top_exp = sorted(d["top_exp"], key=lambda x: x["times_reused"], reverse=True)[:5]
+        # Top 3 domains
+        top_domains = sorted(d["domains"].items(), key=lambda kv: kv[1], reverse=True)[:3]
+        chains.append({
+            "source_agent_id": aid,
+            "source_agent_name": name_map.get(aid, f"Agent#{aid}"),
+            "shared_count": d["shared_count"],
+            "total_reuses": d["total_reuses"],
+            "top_domains": [dm for dm, _ in top_domains],
+            "top_experiences": top_exp,
+        })
+
+    return ApiResponse.success({
+        "chains": chains,
+        "total_shared": total_shared,
+        "total_propagated": total_propagated,
+    }).to_response()
+
+
 @agents_bp.route("/experiences/reuse-trend", methods=["GET"])
 @unified_auth_required
 def experiences_reuse_trend():
