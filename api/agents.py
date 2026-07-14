@@ -4095,6 +4095,89 @@ def workflow_failure_correlation_by_step():
     }).to_response()
 
 
+@agents_bp.route("/workflows/step-cofailure-matrix", methods=["GET"])
+@unified_auth_required
+def workflow_step_cofailure_matrix():
+    """Step-key co-failure matrix for the current user.
+
+    For each failed workflow run, collects the set of failed step_keys.
+    Builds a symmetric co-occurrence matrix: for each pair (step_a, step_b),
+    counts how many runs both failed. Returns top N step_keys by failure
+    count with the N×N matrix. Reveals which steps tend to fail together,
+    indicating shared failure causes or cascading failures.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(2, min(15, int(request.args.get("limit", 8))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 8
+
+    since = datetime.utcnow() - timedelta(days=days)
+    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
+
+    # Get all failed step runs in window, grouped by run_id
+    failed_steps = (
+        WorkflowStepRun.query
+        .filter(
+            WorkflowStepRun.agent_id.in_(agent_ids) if agent_ids else sa_false(),
+            WorkflowStepRun.status == StepStatus.FAILED,
+            WorkflowStepRun.finished_at.isnot(None),
+            WorkflowStepRun.finished_at >= since,
+        )
+        .with_entities(WorkflowStepRun.run_id, WorkflowStepRun.step_key)
+        .all()
+    )
+
+    # Group failed step_keys by run_id
+    run_failed: dict = {}  # {run_id: set(step_keys)}
+    for run_id, step_key in failed_steps:
+        if run_id not in run_failed:
+            run_failed[run_id] = set()
+        if step_key:
+            run_failed[run_id].add(step_key)
+
+    # Count per-step failures and co-failure pairs
+    step_fail_count: dict = {}  # {step_key: count}
+    pair_count: dict = {}  # {(a, b): count} where a < b
+    for step_keys in run_failed.values():
+        keys = sorted(step_keys)
+        for k in keys:
+            step_fail_count[k] = step_fail_count.get(k, 0) + 1
+        for i in range(len(keys)):
+            for j in range(i + 1, len(keys)):
+                pair = (keys[i], keys[j])
+                pair_count[pair] = pair_count.get(pair, 0) + 1
+
+    if not step_fail_count:
+        return ApiResponse.success({"step_keys": [], "matrix": {}, "max_cofailure": 0, "total_runs_with_multi_failure": 0}).to_response()
+
+    # Top N step_keys by failure count
+    top_keys = sorted(step_fail_count.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+    top_key_list = [k for k, _ in top_keys]
+    top_key_set = set(top_key_list)
+
+    # Build matrix
+    matrix: dict = {}  # {step_a: {step_b: count}}
+    max_cofailure = 0
+    for (a, b), c in pair_count.items():
+        if a in top_key_set and b in top_key_set:
+            matrix.setdefault(a, {})[b] = c
+            matrix.setdefault(b, {})[a] = c
+            if c > max_cofailure:
+                max_cofailure = c
+
+    total_multi = sum(1 for ks in run_failed.values() if len(ks) >= 2)
+
+    return ApiResponse.success({
+        "step_keys": [{"step_key": k, "failures": step_fail_count[k]} for k in top_key_list],
+        "matrix": matrix,
+        "max_cofailure": max_cofailure,
+        "total_runs_with_multi_failure": total_multi,
+    }).to_response()
+
+
 @agents_bp.route("/conflicts/sandbox-correlation", methods=["GET"])
 @unified_auth_required
 def conflicts_sandbox_correlation():
