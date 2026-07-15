@@ -14796,3 +14796,102 @@ def collaboration_graph_timeline():
         "days": days,
         "snapshots": snapshots,
     }).to_response()
+
+
+@agents_bp.route("/task-allocation-fairness", methods=["GET"])
+@unified_auth_required
+def task_allocation_fairness():
+    """Analyze task allocation fairness across agents using Gini coefficient.
+
+    Computes per-agent task assignment counts (total, completed, in-progress),
+    then calculates the Gini coefficient of the distribution. A Gini of 0
+    means perfectly equal distribution; 1 means all tasks go to one agent.
+
+    Also includes per-agent stats and a Lorenz curve data series.
+
+    Query params:
+    - days: lookback window (1-365, default 30)
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Count assignments per agent
+    rows = (
+        TaskAssignment.query
+        .join(Agent, TaskAssignment.agent_id == Agent.id)
+        .filter(
+            Agent.owner_id == user.id,
+            TaskAssignment.created_at >= since,
+        )
+        .with_entities(
+            TaskAssignment.agent_id,
+            Agent.name,
+            TaskAssignment.state,
+            func.count(TaskAssignment.id),
+        )
+        .group_by(TaskAssignment.agent_id, Agent.name, TaskAssignment.state)
+        .all()
+    )
+
+    # Aggregate per agent
+    agent_map = {}  # agent_id -> {name, total, completed, in_progress, assigned}
+    for aid, aname, state, cnt in rows:
+        if aid not in agent_map:
+            agent_map[aid] = {"name": aname or f"Agent#{aid}", "total": 0, "completed": 0, "in_progress": 0, "assigned": 0}
+        agent_map[aid]["total"] += cnt
+        s = state.value if state else ""
+        if s == "completed":
+            agent_map[aid]["completed"] += cnt
+        elif s in ("claimed", "in_progress"):
+            agent_map[aid]["in_progress"] += cnt
+        else:
+            agent_map[aid]["assigned"] += cnt
+
+    if not agent_map:
+        return ApiResponse.success({
+            "gini": 0.0,
+            "agents": [],
+            "lorenz_curve": [],
+            "days": days,
+            "total_tasks": 0,
+        }).to_response()
+
+    # Compute Gini coefficient
+    totals = sorted(agent_map[aid]["total"] for aid in agent_map)
+    n = len(totals)
+    total_sum = sum(totals)
+
+    if total_sum == 0 or n == 0:
+        gini = 0.0
+    else:
+        # Gini = (2 * sum(i * x_i)) / (n * sum(x_i)) - (n+1)/n
+        weighted_sum = sum((i + 1) * x for i, x in enumerate(totals))
+        gini = (2 * weighted_sum) / (n * total_sum) - (n + 1) / n
+        gini = max(0.0, min(1.0, round(gini, 3)))
+
+    # Lorenz curve: cumulative share of agents vs cumulative share of tasks
+    lorenz = []
+    cum_tasks = 0
+    for i, x in enumerate(totals):
+        cum_tasks += x
+        lorenz.append({
+            "agent_percent": round((i + 1) / n * 100, 1),
+            "task_percent": round(cum_tasks / total_sum * 100, 1),
+        })
+
+    # Build agent list sorted by total descending
+    agents_list = sorted(agent_map.values(), key=lambda a: a["total"], reverse=True)
+
+    return ApiResponse.success({
+        "gini": gini,
+        "fairness_level": "equal" if gini < 0.2 else ("moderate" if gini < 0.4 else "unequal"),
+        "agents": agents_list,
+        "lorenz_curve": lorenz,
+        "days": days,
+        "total_tasks": total_sum,
+    }).to_response()
