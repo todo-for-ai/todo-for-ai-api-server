@@ -15017,3 +15017,90 @@ def workflow_similarity_matrix():
         "workflows": results,
         "days": days,
     }).to_response()
+
+
+@agents_bp.route("/run-resource-trend", methods=["GET"])
+@unified_auth_required
+def agent_run_resource_trend():
+    """Per-agent daily run count and average duration trend.
+
+    Groups AgentRun by (agent_id, date) over the lookback window.
+    Returns per-agent sparkline-friendly daily series for run count
+    and average duration (seconds).
+
+    Query params:
+    - days: lookback window (1-90, default 14)
+    - limit: max agents returned (1-20, default 10)
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(90, int(request.args.get("days", 14))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 14
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Aggregate per (agent_id, date)
+    rows = (
+        AgentRun.query
+        .join(Agent, AgentRun.agent_id == Agent.id)
+        .filter(
+            Agent.owner_id == user.id,
+            AgentRun.started_at >= since,
+        )
+        .with_entities(
+            AgentRun.agent_id,
+            Agent.name,
+            func.date(AgentRun.started_at).label("run_date"),
+            func.count(AgentRun.id).label("run_count"),
+            func.avg(
+                func.extract("epoch", AgentRun.ended_at - AgentRun.started_at)
+            ).label("avg_duration"),
+        )
+        .group_by(AgentRun.agent_id, Agent.name, func.date(AgentRun.started_at))
+        .all()
+    )
+
+    # Build per-agent daily series
+    agent_data = {}  # agent_id -> {name, days: {date: {count, avg_dur}}}
+    for aid, aname, rdate, cnt, avg_dur in rows:
+        if aid not in agent_data:
+            agent_data[aid] = {"name": aname or f"Agent#{aid}", "days": {}, "total_runs": 0}
+        date_str = rdate.isoformat() if hasattr(rdate, 'isoformat') else str(rdate)
+        agent_data[aid]["days"][date_str] = {
+            "count": cnt,
+            "avg_duration": round(float(avg_dur), 1) if avg_dur else 0.0,
+        }
+        agent_data[aid]["total_runs"] += cnt
+
+    # Generate full date range
+    date_range = []
+    for i in range(days):
+        d = (datetime.utcnow() - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        date_range.append(d)
+
+    # Build output sorted by total runs descending
+    results = []
+    for aid, data in sorted(agent_data.items(), key=lambda kv: kv[1]["total_runs"], reverse=True)[:limit]:
+        count_series = []
+        duration_series = []
+        for d in date_range:
+            day_data = data["days"].get(d, {"count": 0, "avg_duration": 0.0})
+            count_series.append(day_data["count"])
+            duration_series.append(day_data["avg_duration"])
+
+        results.append({
+            "agent_id": aid,
+            "agent_name": data["name"],
+            "total_runs": data["total_runs"],
+            "count_series": count_series,
+            "duration_series": duration_series,
+        })
+
+    return ApiResponse.success({
+        "agents": results,
+        "days": days,
+        "date_range": date_range,
+    }).to_response()
