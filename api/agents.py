@@ -14895,3 +14895,125 @@ def task_allocation_fairness():
         "days": days,
         "total_tasks": total_sum,
     }).to_response()
+
+
+@agents_bp.route("/workflows/similarity-matrix", methods=["GET"])
+@unified_auth_required
+def workflow_similarity_matrix():
+    """Compute pairwise Jaccard similarity between workflow step sequences.
+
+    For each pair of completed workflow runs (within the same workflow
+    definition), computes Jaccard similarity of their step_key sets.
+    Returns a matrix suitable for heatmap visualization, plus a list
+    of most-similar and least-similar pairs.
+
+    Query params:
+    - days: lookback window (1-365, default 30)
+    - limit: max workflow definitions to analyze (1-10, default 5)
+    - max_runs: max runs per workflow to compare (2-50, default 20)
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(10, int(request.args.get("limit", 5))))
+        max_runs = max(2, min(50, int(request.args.get("max_runs", 20))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 5
+        max_runs = 20
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Find workflows with completed runs
+    workflows = (
+        Workflow.query
+        .filter(Workflow.owner_id == user.id)
+        .all()
+    )
+
+    results = []
+    for wf in workflows:
+        # Get completed runs with their step_keys
+        runs = (
+            WorkflowRun.query
+            .filter(
+                WorkflowRun.workflow_id == wf.id,
+                WorkflowRun.owner_id == user.id,
+                WorkflowRun.finished_at.isnot(None),
+                WorkflowRun.finished_at >= since,
+            )
+            .order_by(WorkflowRun.finished_at.desc())
+            .limit(max_runs)
+            .all()
+        )
+
+        if len(runs) < 2:
+            continue
+
+        # Collect step_key sets per run
+        run_data = []
+        for r in runs:
+            step_keys = set()
+            for sr in (r.step_runs or []):
+                if sr.step_key:
+                    step_keys.add(sr.step_key)
+            run_data.append({
+                "run_id": r.id,
+                "step_keys": step_keys,
+                "status": r.status.value if r.status else "unknown",
+                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            })
+
+        # Compute pairwise Jaccard similarity
+        n = len(run_data)
+        matrix = []
+        similar_pairs = []
+        dissimilar_pairs = []
+
+        for i in range(n):
+            row = []
+            for j in range(n):
+                if i == j:
+                    sim = 1.0
+                else:
+                    a = run_data[i]["step_keys"]
+                    b = run_data[j]["step_keys"]
+                    intersection = len(a & b)
+                    union = len(a | b)
+                    sim = round(intersection / union, 3) if union > 0 else 0.0
+                row.append(sim)
+
+                if i < j:
+                    pair_info = {
+                        "run_a": run_data[i]["run_id"],
+                        "run_b": run_data[j]["run_id"],
+                        "similarity": sim,
+                        "shared_steps": len(run_data[i]["step_keys"] & run_data[j]["step_keys"]),
+                        "unique_a": len(run_data[i]["step_keys"] - run_data[j]["step_keys"]),
+                        "unique_b": len(run_data[j]["step_keys"] - run_data[i]["step_keys"]),
+                    }
+                    similar_pairs.append(pair_info)
+                    dissimilar_pairs.append(pair_info)
+
+            matrix.append(row)
+
+        similar_pairs.sort(key=lambda p: p["similarity"], reverse=True)
+        dissimilar_pairs.sort(key=lambda p: p["similarity"])
+
+        results.append({
+            "workflow_id": wf.id,
+            "workflow_name": wf.name or f"Workflow#{wf.id}",
+            "run_count": n,
+            "matrix": matrix,
+            "run_ids": [rd["run_id"] for rd in run_data],
+            "most_similar": similar_pairs[:3],
+            "least_similar": dissimilar_pairs[:3],
+        })
+
+        if len(results) >= limit:
+            break
+
+    return ApiResponse.success({
+        "workflows": results,
+        "days": days,
+    }).to_response()
