@@ -1343,3 +1343,153 @@ def task_completion_forecast():
         "estimated_completion_date": estimated_date,
         "priority_forecast": priority_forecast,
     }).to_response()
+
+
+@tasks_bp.route("/dependency-chain", methods=["GET"])
+@login_required
+def task_dependency_chain():
+    """Analyze task dependency chains for the current user.
+
+    Finds tasks with subtask relationships and builds dependency chains.
+    Returns per-chain: root task, depth, total tasks, completion progress.
+
+    Query params:
+    - project_id: optional project filter
+    - limit: max chains returned (1-20, default 10)
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+    project_id = request.args.get("project_id", type=int)
+
+    from models.agent import Task
+    q = Task.query.filter(Task.owner_id == user.id, Task.parent_id == None)
+    if project_id:
+        q = q.filter(Task.project_id == project_id)
+
+    root_tasks = q.order_by(Task.created_at.desc()).limit(limit * 3).all()
+
+    chains = []
+    for root in root_tasks:
+        # BFS to find all descendants
+        visited = set()
+        queue = [root.id]
+        all_ids = [root.id]
+        max_depth = 0
+        depth_map = {root.id: 0}
+        while queue:
+            tid = queue.pop(0)
+            if tid in visited:
+                continue
+            visited.add(tid)
+            children = Task.query.filter_by(parent_id=tid).all()
+            for child in children:
+                if child.id not in visited:
+                    all_ids.append(child.id)
+                    depth_map[child.id] = depth_map[tid] + 1
+                    max_depth = max(max_depth, depth_map[child.id])
+                    queue.append(child.id)
+
+        if len(all_ids) < 2:
+            continue
+
+        # Count completed
+        all_tasks = Task.query.filter(Task.id.in_(all_ids)).all()
+        completed = sum(1 for t in all_tasks if t.status and t.status.value == "done")
+        in_progress = sum(1 for t in all_tasks if t.status and t.status.value == "in_progress")
+
+        chains.append({
+            "root_id": root.id,
+            "root_title": root.title or f"Task#{root.id}",
+            "depth": max_depth,
+            "total_tasks": len(all_ids),
+            "completed": completed,
+            "in_progress": in_progress,
+            "progress_pct": round(completed / len(all_ids) * 100, 1) if all_ids else 0.0,
+        })
+
+    chains.sort(key=lambda c: c["total_tasks"], reverse=True)
+    return ApiResponse.success({"chains": chains[:limit]}).to_response()
+
+
+@tasks_bp.route("/comment-sentiment-trend", methods=["GET"])
+@login_required
+def task_comment_sentiment_trend():
+    """Task comment sentiment trend.
+
+    Aggregates comment events by day and classifies sentiment
+    based on keyword matching.
+
+    Positive: 完成/成功/好/赞/解决/通过
+    Negative: 失败/问题/bug/错/崩溃/超时/拒绝
+    Neutral: everything else
+
+    Query params:
+    - days: lookback window (1-90, default 30)
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(90, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    from models.agent import TaskEvent
+    comments = (
+        TaskEvent.query
+        .filter(
+            TaskEvent.owner_id == user.id,
+            TaskEvent.event_type == "comment",
+            TaskEvent.created_at >= since,
+        )
+        .with_entities(
+            func.date(TaskEvent.created_at).label("event_date"),
+            TaskEvent.content,
+        )
+        .all()
+    )
+
+    positive_words = {"完成", "成功", "好", "赞", "解决", "通过", "修复", "合并", "上线", "搞定"}
+    negative_words = {"失败", "问题", "bug", "错", "崩溃", "超时", "拒绝", "阻塞", "错误", "异常", "报错"}
+
+    day_data = {}  # date -> {positive, negative, neutral}
+    for event_date, content in comments:
+        date_str = event_date.isoformat() if hasattr(event_date, 'isoformat') else str(event_date)
+        if date_str not in day_data:
+            day_data[date_str] = {"positive": 0, "negative": 0, "neutral": 0}
+
+        if not content:
+            day_data[date_str]["neutral"] += 1
+            continue
+
+        text_lower = content.lower()
+        has_pos = any(w in text_lower for w in positive_words)
+        has_neg = any(w in text_lower for w in negative_words)
+
+        if has_neg and not has_pos:
+            day_data[date_str]["negative"] += 1
+        elif has_pos and not has_neg:
+            day_data[date_str]["positive"] += 1
+        else:
+            day_data[date_str]["neutral"] += 1
+
+    # Build full date range
+    date_range = []
+    for i in range(days):
+        d = (datetime.utcnow() - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        date_range.append(d)
+
+    trend = []
+    for d in date_range:
+        data = day_data.get(d, {"positive": 0, "negative": 0, "neutral": 0})
+        trend.append({
+            "date": d,
+            "positive": data["positive"],
+            "negative": data["negative"],
+            "neutral": data["neutral"],
+        })
+
+    return ApiResponse.success({"trend": trend, "days": days}).to_response()

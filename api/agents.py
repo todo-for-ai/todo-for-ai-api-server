@@ -15104,3 +15104,302 @@ def agent_run_resource_trend():
         "days": days,
         "date_range": date_range,
     }).to_response()
+
+
+@agents_bp.route("/skill-matching", methods=["GET"])
+@login_required
+def agent_skill_matching():
+    """Agent skill matching recommendation.
+
+    For unassigned in-progress tasks, match task title/description keywords
+    to agent capabilities and experience domains. Returns per-task
+    recommended agents with match scores.
+
+    Query params:
+    - limit: max tasks returned (1-20, default 10)
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        limit = 10
+
+    from models.agent import Task, TaskAssignment
+    # Find unassigned in-progress tasks
+    unassigned_tasks = (
+        Task.query
+        .filter(
+            Task.owner_id == user.id,
+            Task.status == "in_progress",
+            ~Task.id.in_(
+                TaskAssignment.query
+                .filter(TaskAssignment.status == "active")
+                .with_entities(TaskAssignment.task_id)
+            ),
+        )
+        .order_by(Task.created_at.desc())
+        .limit(limit * 2)
+        .all()
+    )
+
+    # Get all active agents with capabilities
+    agents = Agent.query.filter(Agent.owner_id == user.id, Agent.status == "active").all()
+    agent_caps = {}
+    for a in agents:
+        caps = set()
+        if a.capabilities:
+            for c in (a.capabilities if isinstance(a.capabilities, list) else []):
+                caps.add(c.lower())
+        # Add experience domains
+        if hasattr(a, 'experiences') and a.experiences:
+            for exp in a.experiences:
+                if hasattr(exp, 'domain') and exp.domain:
+                    caps.add(exp.domain.lower())
+        agent_caps[a.id] = {"name": a.name or f"Agent#{a.id}", "caps": caps}
+
+    results = []
+    for task in unassigned_tasks:
+        # Extract keywords from task title and description
+        text = (task.title or "") + " " + (task.description or "")
+        keywords = set(w.lower() for w in text.split() if len(w) > 2)
+        if not keywords:
+            continue
+
+        recommendations = []
+        for aid, info in agent_caps.items():
+            if not info["caps"]:
+                continue
+            matched = keywords & info["caps"]
+            if matched:
+                score = round(len(matched) / len(keywords) * 100, 1)
+                recommendations.append({
+                    "agent_id": aid,
+                    "agent_name": info["name"],
+                    "match_score": score,
+                    "matched_capabilities": sorted(matched),
+                })
+
+        recommendations.sort(key=lambda r: r["match_score"], reverse=True)
+        if recommendations:
+            results.append({
+                "task_id": task.id,
+                "task_title": task.title or f"Task#{task.id}",
+                "recommendations": recommendations[:3],
+            })
+
+    return ApiResponse.success({"tasks": results[:limit]}).to_response()
+
+
+@agents_bp.route("/workflows/step-duration-histogram", methods=["GET"])
+@login_required
+def workflow_step_duration_histogram():
+    """Workflow step duration histogram.
+
+    Buckets completed step durations into time ranges per step_key.
+    Reveals whether step durations are normal or long-tailed.
+
+    Buckets: 0-10s, 10-30s, 30-60s, 60-120s, 120-300s, 300s+
+
+    Query params:
+    - days: lookback window (1-90, default 30)
+    - limit: max step keys returned (1-20, default 10)
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(90, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Get completed steps with duration
+    from models.agent import WorkflowRunStep
+    steps = (
+        WorkflowRunStep.query
+        .join(AgentRun, WorkflowRunStep.run_id == AgentRun.id)
+        .join(Agent, AgentRun.agent_id == Agent.id)
+        .filter(
+            Agent.owner_id == user.id,
+            WorkflowRunStep.completed_at >= since,
+            WorkflowRunStep.completed_at != None,
+            WorkflowRunStep.started_at != None,
+        )
+        .with_entities(
+            WorkflowRunStep.step_key,
+            WorkflowRunStep.started_at,
+            WorkflowRunStep.completed_at,
+        )
+        .all()
+    )
+
+    bucket_ranges = ["0-10s", "10-30s", "30-60s", "60-120s", "120-300s", "300s+"]
+    bucket_thresholds = [0, 10, 30, 60, 120, 300]
+
+    step_data = {}  # step_key -> [count per bucket]
+    for step_key, started_at, completed_at in steps:
+        if not step_key or not started_at or not completed_at:
+            continue
+        dur = (completed_at - started_at).total_seconds()
+        if dur < 0:
+            continue
+
+        if step_key not in step_data:
+            step_data[step_key] = [0] * 6
+
+        # Find bucket
+        for i in range(len(bucket_thresholds) - 1, -1, -1):
+            if dur >= bucket_thresholds[i]:
+                step_data[step_key][i] += 1
+                break
+
+    # Sort by total count descending
+    sorted_steps = sorted(step_data.items(), key=lambda kv: sum(kv[1]), reverse=True)[:limit]
+
+    results = []
+    for step_key, counts in sorted_steps:
+        buckets = [{"range": bucket_ranges[i], "count": counts[i]} for i in range(6)]
+        results.append({
+            "step_key": step_key,
+            "buckets": buckets,
+            "total": sum(counts),
+        })
+
+    return ApiResponse.success({"steps": results, "days": days}).to_response()
+
+
+@agents_bp.route("/task-handoff-stats", methods=["GET"])
+@login_required
+def agent_task_handoff_stats():
+    """Agent task handoff statistics.
+
+    Aggregates handoff events by (from_agent, to_agent) pairs,
+    counts frequency and average handoff duration.
+
+    Query params:
+    - days: lookback window (1-90, default 30)
+    - limit: max handoff pairs returned (1-20, default 10)
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(90, int(request.args.get("days", 30))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 30
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    from models.agent import AuditLog
+    handoffs = (
+        AuditLog.query
+        .filter(
+            AuditLog.owner_id == user.id,
+            AuditLog.action == "agent.handoff",
+            AuditLog.created_at >= since,
+        )
+        .order_by(AuditLog.created_at.desc())
+        .all()
+    )
+
+    pair_data = {}  # (from, to) -> {count, durations}
+    for h in handoffs:
+        details = h.details if isinstance(h.details, dict) else {}
+        from_agent = details.get("from_agent", "unknown")
+        to_agent = details.get("to_agent", "unknown")
+        dur = details.get("duration_seconds")
+
+        key = (from_agent, to_agent)
+        if key not in pair_data:
+            pair_data[key] = {"count": 0, "durations": []}
+        pair_data[key]["count"] += 1
+        if dur is not None:
+            pair_data[key]["durations"].append(float(dur))
+
+    sorted_pairs = sorted(pair_data.items(), key=lambda kv: kv[1]["count"], reverse=True)[:limit]
+
+    results = []
+    for (from_a, to_a), data in sorted_pairs:
+        avg_dur = None
+        if data["durations"]:
+            avg_dur = round(sum(data["durations"]) / len(data["durations"]), 1)
+        results.append({
+            "from_agent": from_a,
+            "to_agent": to_a,
+            "count": data["count"],
+            "avg_duration_seconds": avg_dur,
+        })
+
+    return ApiResponse.success({"handoffs": results, "days": days}).to_response()
+
+
+@agents_bp.route("/channels/activity-trend", methods=["GET"])
+@login_required
+def channel_activity_trend():
+    """Channel activity trend.
+
+    Per-channel daily message count sparkline and active member count.
+
+    Query params:
+    - days: lookback window (1-90, default 14)
+    - limit: max channels returned (1-20, default 10)
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(90, int(request.args.get("days", 14))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days = 14
+        limit = 10
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    from models.agent import AgentChannel, AgentChannelMessage
+    channels = (
+        AgentChannel.query
+        .filter(AgentChannel.owner_id == user.id)
+        .order_by(AgentChannel.created_at.desc())
+        .limit(limit * 2)
+        .all()
+    )
+
+    date_range = []
+    for i in range(days):
+        d = (datetime.utcnow() - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        date_range.append(d)
+
+    results = []
+    for ch in channels:
+        # Daily message counts
+        daily_counts = []
+        active_senders = set()
+        for d in date_range:
+            day_start = datetime.strptime(d, "%Y-%m-%d")
+            day_end = day_start + timedelta(days=1)
+            msgs = (
+                AgentChannelMessage.query
+                .filter(
+                    AgentChannelMessage.channel_id == ch.id,
+                    AgentChannelMessage.created_at >= day_start,
+                    AgentChannelMessage.created_at < day_end,
+                )
+                .all()
+            )
+            daily_counts.append(len(msgs))
+            for m in msgs:
+                if m.sender_id:
+                    active_senders.add(m.sender_id)
+
+        total = sum(daily_counts)
+        if total > 0:
+            results.append({
+                "channel_id": ch.id,
+                "channel_name": ch.name or f"Channel#{ch.id}",
+                "daily_counts": daily_counts,
+                "active_members": len(active_senders),
+                "date_range": date_range,
+            })
+
+    results.sort(key=lambda c: sum(c["daily_counts"]), reverse=True)
+    return ApiResponse.success({"channels": results[:limit], "days": days}).to_response()
