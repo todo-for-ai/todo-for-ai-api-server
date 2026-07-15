@@ -14683,3 +14683,116 @@ def agent_capability_gap_analysis():
     # Sort by coverage score ascending (most gaps first), limit
     results.sort(key=lambda r: r["coverage_score"])
     return ApiResponse.success({"agents": results[:limit]}).to_response()
+
+
+@agents_bp.route("/collaboration-graph-timeline", methods=["GET"])
+@unified_auth_required
+def collaboration_graph_timeline():
+    """Day-by-day collaboration graph snapshots for timeline replay.
+
+    Returns a sequence of daily snapshots showing active collaboration edges
+    for each day in the lookback window. Each snapshot contains only the
+    edges active on that day (at least one message between agent pair).
+
+    Query params:
+    - days: lookback window (1-90, default 14)
+    - bucket: 'day' or 'week' (default 'day')
+    - limit: max edges per snapshot (1-200, default 50)
+
+    Returns: { bucket_type, days, snapshots: [{ date, edges: [...] }] }
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(90, int(request.args.get("days", 14))))
+        limit = max(1, min(200, int(request.args.get("limit", 50))))
+    except (TypeError, ValueError):
+        days = 14
+        limit = 50
+    bucket = request.args.get("bucket", "day")
+    if bucket not in ("day", "week"):
+        bucket = "day"
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    # Get all agent-message audit logs in window
+    rows = (
+        AuditLog.query.filter(
+            AuditLog.action == "agent.direct_message",
+            AuditLog.resource_type == "agent",
+            AuditLog.actor_user_id == user.id,
+            AuditLog.actor_agent_id.isnot(None),
+            AuditLog.created_at >= since,
+        )
+        .with_entities(
+            AuditLog.actor_agent_id,
+            AuditLog.resource_id,
+            AuditLog.created_at,
+        )
+        .all()
+    )
+
+    # Bucket by date (or week)
+    bucket_map = {}  # {bucket_key: {(a,b): {"total", "fwd", "rev"}}}
+    for actor_id, resource_id, created_at in rows:
+        if actor_id is None or resource_id is None or actor_id == resource_id:
+            continue
+        if bucket == "week":
+            # ISO week start (Monday)
+            week_start = created_at - timedelta(days=created_at.weekday())
+            bk = week_start.strftime("%Y-%m-%d")
+        else:
+            bk = created_at.strftime("%Y-%m-%d")
+
+        key = (actor_id, resource_id) if actor_id < resource_id else (resource_id, actor_id)
+        if bk not in bucket_map:
+            bucket_map[bk] = {}
+        entry = bucket_map[bk].setdefault(key, {"total": 0, "fwd": 0, "rev": 0})
+        entry["total"] += 1
+        if actor_id == key[0]:
+            entry["fwd"] += 1
+        else:
+            entry["rev"] += 1
+
+    # Resolve agent names
+    all_agent_ids = set()
+    for bk_edges in bucket_map.values():
+        for (a, b) in bk_edges.keys():
+            all_agent_ids.add(a)
+            all_agent_ids.add(b)
+
+    name_map = {}
+    if all_agent_ids:
+        for aid, aname in db.session.query(Agent.id, Agent.name).filter(Agent.id.in_(all_agent_ids)).all():
+            name_map[aid] = aname or f"Agent#{aid}"
+
+    # Build snapshots sorted by date
+    snapshots = []
+    for bk in sorted(bucket_map.keys()):
+        edges_data = bucket_map[bk]
+        edges_sorted = sorted(edges_data.items(), key=lambda kv: kv[1]["total"], reverse=True)[:limit]
+        edges = []
+        node_ids_in_snapshot = set()
+        for (a, b), entry in edges_sorted:
+            node_ids_in_snapshot.add(a)
+            node_ids_in_snapshot.add(b)
+            edges.append({
+                "source": a,
+                "target": b,
+                "source_name": name_map.get(a, f"Agent#{a}"),
+                "target_name": name_map.get(b, f"Agent#{b}"),
+                "count": entry["total"],
+                "source_to_target": entry["fwd"],
+                "target_to_source": entry["rev"],
+            })
+        snapshots.append({
+            "date": bk,
+            "edges": edges,
+            "total_edges": len(edges_data),
+            "active_agents": len(node_ids_in_snapshot),
+        })
+
+    return ApiResponse.success({
+        "bucket_type": bucket,
+        "days": days,
+        "snapshots": snapshots,
+    }).to_response()
