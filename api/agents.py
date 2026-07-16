@@ -15620,3 +15620,81 @@ def protocol_decision_latency():
         })
 
     return ApiResponse.success({"types": types, "days": days, "total": total}).to_response()
+
+
+@agents_bp.route("/specialization-evolution", methods=["GET"])
+@unified_auth_required
+def agent_specialization_evolution():
+    """Track how each Agent's domain coverage evolves over time.
+
+    Buckets AgentExperience by (agent, week) and counts distinct domains
+    per week. Returns per-agent weekly domain coverage series and the
+    list of domains learned, revealing specialization vs generalization.
+    """
+    user = get_current_user()
+    try:
+        weeks = max(2, min(26, int(request.args.get("weeks", 12))))
+        limit = max(1, min(15, int(request.args.get("limit", 8))))
+    except (TypeError, ValueError):
+        weeks, limit = 12, 8
+
+    from models.agent import AgentExperience
+    days = weeks * 7
+    since = datetime.utcnow() - timedelta(days=days)
+
+    rows = (
+        AgentExperience.query
+        .join(Agent, AgentExperience.agent_id == Agent.id)
+        .filter(
+            Agent.owner_id == user.id,
+            AgentExperience.created_at >= since,
+            AgentExperience.domain.isnot(None),
+        )
+        .with_entities(
+            AgentExperience.agent_id,
+            Agent.name,
+            AgentExperience.domain,
+            AgentExperience.created_at,
+        )
+        .all()
+    )
+
+    now = datetime.utcnow()
+    agent_weeks = {}
+    for aid, aname, domain, created in rows:
+        if not domain or not created:
+            continue
+        delta_days = (now - created).days
+        week_idx = weeks - 1 - (delta_days // 7)
+        if week_idx < 0 or week_idx >= weeks:
+            continue
+        info = agent_weeks.setdefault(aid, {"name": aname or f"Agent#{aid}", "weeks": {}})
+        info["weeks"].setdefault(week_idx, set()).add(domain)
+
+    results = []
+    for aid, info in agent_weeks.items():
+        series = [len(info["weeks"].get(w, set())) for w in range(weeks)]
+        all_domains = set()
+        for ds in info["weeks"].values():
+            all_domains.update(ds)
+        if sum(series) == 0:
+            continue
+        peak = max(series)
+        peak_week = series.index(peak) if peak > 0 else 0
+        results.append({
+            "agent_id": aid,
+            "agent_name": info["name"],
+            "series": series,
+            "peak_domains": peak,
+            "peak_week_idx": peak_week,
+            "total_domains": len(all_domains),
+            "domains": sorted(all_domains)[:10],
+        })
+
+    results.sort(key=lambda r: r["total_domains"], reverse=True)
+    week_labels = [f"W-{weeks - 1 - w}" for w in range(weeks)]
+    return ApiResponse.success({
+        "agents": results[:limit],
+        "weeks": weeks,
+        "week_labels": week_labels,
+    }).to_response()
