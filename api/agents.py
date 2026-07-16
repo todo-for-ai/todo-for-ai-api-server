@@ -15879,3 +15879,110 @@ def cross_project_efficiency():
         "utilization_rate": round(rate, 3),
         "days": days,
     }).to_response()
+
+
+@agents_bp.route("/capability-supply-demand", methods=["GET"])
+@unified_auth_required
+def capability_supply_demand():
+    """Analyze supply vs demand for each capability.
+
+    Supply = number of the user's Agents declaring a capability.
+    Demand = number of active (non-terminal) tasks requiring that
+    capability, across projects owned by the user. Identifies
+    bottleneck capabilities (demand exceeds supply) and surplus
+    capabilities (supply with no demand) so owners can rebalance the
+    fleet's declared skills against actual task requirements.
+    """
+    import json
+    user = get_current_user()
+    try:
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        limit = 20
+
+    from models.task import Task, TaskStatus
+    from models.project import Project
+
+    def _as_list(raw):
+        if not raw:
+            return []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return []
+        if isinstance(raw, list):
+            return [str(c) for c in raw if c]
+        return []
+
+    # supply: capabilities declared by the user's agents
+    agents = Agent.query.filter_by(owner_id=user.id).with_entities(Agent.capabilities).all()
+    supply = {}
+    agent_total = 0
+    for (caps,) in agents:
+        unique = set(_as_list(caps))
+        if not unique:
+            continue
+        agent_total += 1
+        for c in unique:
+            supply[c] = supply.get(c, 0) + 1
+
+    # demand: capabilities required by active tasks in the user's projects
+    tasks = (
+        Task.query
+        .join(Project, Task.project_id == Project.id)
+        .filter(
+            Project.owner_id == user.id,
+            Task.status.in_([
+                TaskStatus.TODO,
+                TaskStatus.IN_PROGRESS,
+                TaskStatus.REVIEW,
+                TaskStatus.BLOCKED,
+            ]),
+        )
+        .with_entities(Task.required_capabilities)
+        .all()
+    )
+    demand = {}
+    active_task_total = 0
+    for (req,) in tasks:
+        unique = set(_as_list(req))
+        if not unique:
+            continue
+        active_task_total += 1
+        for c in unique:
+            demand[c] = demand.get(c, 0) + 1
+
+    all_caps = sorted(set(supply) | set(demand))
+    items = []
+    for c in all_caps:
+        s = supply.get(c, 0)
+        d = demand.get(c, 0)
+        if d > 0 and s == 0:
+            status = "missing"
+        elif d > s:
+            status = "bottleneck"
+        elif d == 0 and s > 0:
+            status = "unused_supply"
+        elif s > d:
+            status = "surplus"
+        else:
+            status = "balanced"
+        items.append({
+            "capability": c,
+            "supply": s,
+            "demand": d,
+            "gap": s - d,
+            "ratio": round(d / s, 2) if s > 0 else None,
+            "status": status,
+        })
+
+    items.sort(key=lambda x: (x["demand"], x["supply"]), reverse=True)
+    bottleneck = [i for i in items if i["status"] in ("bottleneck", "missing")]
+    return ApiResponse.success({
+        "capabilities": items[:limit],
+        "total_capabilities": len(items),
+        "bottleneck_count": len(bottleneck),
+        "agent_total": agent_total,
+        "active_task_total": active_task_total,
+    }).to_response()
