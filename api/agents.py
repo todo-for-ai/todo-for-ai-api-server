@@ -15556,3 +15556,67 @@ def workflow_step_bottleneck_timeline():
         "days": days,
         "date_range": date_range,
     }).to_response()
+
+
+@agents_bp.route("/protocol-decision-latency", methods=["GET"])
+@unified_auth_required
+def protocol_decision_latency():
+    """Collaboration protocol decision latency analysis.
+
+    For resolved protocols, computes the latency from creation to
+    resolution aggregated by protocol type (avg/median/min/max).
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+    except (TypeError, ValueError):
+        days = 30
+
+    from models.agent import CollaborationProtocol
+    user_agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).all()]
+    if not user_agent_ids:
+        return ApiResponse.success({"types": [], "days": days, "total": 0}).to_response()
+
+    since = datetime.utcnow() - timedelta(days=days)
+    protocols = (
+        CollaborationProtocol.query
+        .filter(
+            CollaborationProtocol.initiator_agent_id.in_(user_agent_ids),
+            CollaborationProtocol.created_at >= since,
+            CollaborationProtocol.resolved_at.isnot(None),
+        )
+        .all()
+    )
+
+    by_type = {}
+    for p in protocols:
+        if not p.resolved_at or not p.created_at:
+            continue
+        latency = (p.resolved_at - p.created_at).total_seconds()
+        if latency < 0:
+            continue
+        by_type.setdefault(p.protocol_type, []).append(latency)
+
+    def median(vals):
+        s = sorted(vals)
+        n = len(s)
+        if n == 0:
+            return 0
+        if n % 2 == 1:
+            return s[n // 2]
+        return (s[n // 2 - 1] + s[n // 2]) / 2
+
+    types = []
+    total = 0
+    for ptype, lats in sorted(by_type.items(), key=lambda kv: len(kv[1]), reverse=True):
+        total += len(lats)
+        types.append({
+            "protocol_type": ptype,
+            "count": len(lats),
+            "avg_seconds": round(sum(lats) / len(lats), 1),
+            "median_seconds": round(median(lats), 1),
+            "min_seconds": round(min(lats), 1),
+            "max_seconds": round(max(lats), 1),
+        })
+
+    return ApiResponse.success({"types": types, "days": days, "total": total}).to_response()
