@@ -15397,3 +15397,86 @@ def agent_workload_forecast():
         "horizon": horizon,
         "date_range": date_range,
     }).to_response()
+
+
+@agents_bp.route("/knowledge-propagation-network", methods=["GET"])
+@unified_auth_required
+def knowledge_propagation_network():
+    """Build a cross-Agent knowledge propagation network.
+
+    Nodes are Agents that shared experiences (sources); edges connect
+    frequent contributors weighted by reuse volume, revealing which
+    Agents propagate knowledge most broadly.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 90))))
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        days, limit = 90, 20
+
+    from models.agent import AgentExperience
+    since = datetime.utcnow() - timedelta(days=days)
+
+    shared = (
+        AgentExperience.query
+        .join(Agent, AgentExperience.agent_id == Agent.id)
+        .filter(
+            Agent.owner_id == user.id,
+            AgentExperience.is_shared == True,
+            AgentExperience.created_at >= since,
+        )
+        .with_entities(
+            AgentExperience.agent_id,
+            AgentExperience.domain,
+            AgentExperience.times_reused,
+            AgentExperience.id,
+        )
+        .all()
+    )
+
+    source_contrib = {}
+    for src_id, domain, reused, _eid in shared:
+        c = source_contrib.setdefault(src_id, {"domains": set(), "reuses": 0, "exps": 0})
+        if domain:
+            c["domains"].add(domain)
+        c["reuses"] += reused or 0
+        c["exps"] += 1
+
+    all_agents = Agent.query.filter_by(owner_id=user.id).all()
+    agent_names = {a.id: (a.name or f"Agent#{a.id}") for a in all_agents}
+
+    nodes = []
+    for src_id, c in sorted(source_contrib.items(), key=lambda kv: kv[1]["reuses"], reverse=True)[:limit]:
+        nodes.append({
+            "agent_id": src_id,
+            "agent_name": agent_names.get(src_id, f"Agent#{src_id}"),
+            "shared_experiences": c["exps"],
+            "total_reuses": c["reuses"],
+            "domains": sorted(c["domains"])[:8],
+        })
+
+    edges = []
+    top_ids = [n["agent_id"] for n in nodes]
+    for i in range(len(top_ids)):
+        for j in range(len(top_ids)):
+            if i == j:
+                continue
+            src_reuses = source_contrib.get(top_ids[i], {}).get("reuses", 0)
+            dst_reuses = source_contrib.get(top_ids[j], {}).get("reuses", 0)
+            if src_reuses > 0 and dst_reuses > 0:
+                flow = round(min(src_reuses, dst_reuses) * 0.2)
+                if flow > 0:
+                    edges.append({"source": top_ids[i], "target": top_ids[j], "weight": flow})
+    edges.sort(key=lambda e: e["weight"], reverse=True)
+    edges = edges[:limit]
+
+    total_shared = sum(c["exps"] for c in source_contrib.values())
+    total_reuses = sum(c["reuses"] for c in source_contrib.values())
+    return ApiResponse.success({
+        "nodes": nodes,
+        "edges": edges,
+        "days": days,
+        "total_shared_experiences": total_shared,
+        "total_reuses": total_reuses,
+    }).to_response()
