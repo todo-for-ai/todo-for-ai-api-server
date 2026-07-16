@@ -11,6 +11,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     JSON,
@@ -995,7 +996,10 @@ class AgentChannelMessage(BaseModel):
     sender_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True, comment="Sender User ID (null if agent)")
     content = Column(Text, nullable=False, comment="Message content")
     message_type = Column(String(50), default="text", comment="Message type: text, system, action")
-    metadata = Column(JSON, comment="Extra structured metadata")
+    # NOTE: 'metadata' is a reserved attribute name in SQLAlchemy 2.0 declarative
+    # (shadows the Mapper MetaData). Map a non-reserved Python attribute
+    # 'extra_metadata' to the same DB column 'metadata' to preserve the schema.
+    extra_metadata = Column("metadata", JSON, comment="Extra structured metadata")
 
     channel = relationship("AgentChannel", back_populates="messages")
     sender_agent = relationship("Agent")
@@ -1003,6 +1007,9 @@ class AgentChannelMessage(BaseModel):
 
     def to_dict(self):
         result = super().to_dict()
+        # super() keyed by DB column name 'metadata' which resolves to the reserved
+        # Mapper MetaData; replace with the actual JSON value under the API key.
+        result["metadata"] = self.extra_metadata
         if self.sender_agent:
             result["sender_name"] = self.sender_agent.name
             result["sender_type"] = "agent"

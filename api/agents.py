@@ -8156,7 +8156,7 @@ def send_channel_message(channel_id):
         sender_user_id=user.id if not data.get("agent_id") else None,
         content=content,
         message_type=data.get("message_type", "text"),
-        metadata=data.get("metadata"),
+        extra_metadata=data.get("metadata"),
     )
 
     # Deliver to all channel members via Notification + SSE

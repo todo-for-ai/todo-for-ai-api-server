@@ -7,6 +7,7 @@
 
 from flask import Blueprint, request, jsonify
 from core.auth import unified_auth_required, get_current_user
+from core.github_config import require_auth
 from api.base import ApiResponse, handle_api_error
 from models.user_settings import UserSettings
 from models.user import User
