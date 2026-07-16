@@ -15480,3 +15480,79 @@ def knowledge_propagation_network():
         "total_shared_experiences": total_shared,
         "total_reuses": total_reuses,
     }).to_response()
+
+
+@agents_bp.route("/workflows/step-bottleneck-timeline", methods=["GET"])
+@unified_auth_required
+def workflow_step_bottleneck_timeline():
+    """Per-step daily average duration timeline.
+
+    Tracks how each workflow step's average duration changes over time
+    to spot regressions (slower) or improvements. Duration is computed
+    Python-side (finished - started) for cross-DB compatibility.
+    """
+    user = get_current_user()
+    try:
+        days = max(7, min(90, int(request.args.get("days", 30))))
+        limit = max(1, min(15, int(request.args.get("limit", 8))))
+    except (TypeError, ValueError):
+        days, limit = 30, 8
+
+    from models.agent import WorkflowStepRun, WorkflowRun
+    since = datetime.utcnow() - timedelta(days=days)
+
+    rows = (
+        WorkflowStepRun.query
+        .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
+        .filter(
+            WorkflowRun.owner_id == user.id,
+            WorkflowStepRun.started_at >= since,
+            WorkflowStepRun.started_at.isnot(None),
+            WorkflowStepRun.finished_at.isnot(None),
+        )
+        .with_entities(
+            WorkflowStepRun.step_key,
+            WorkflowStepRun.started_at,
+            WorkflowStepRun.finished_at,
+        )
+        .all()
+    )
+
+    date_range = [(datetime.utcnow() - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d") for i in range(days)]
+    step_data = {}
+    for step_key, started, finished in rows:
+        if not step_key or not started or not finished:
+            continue
+        dur = (finished - started).total_seconds()
+        if dur < 0:
+            continue
+        d_str = finished.strftime("%Y-%m-%d")
+        sd = step_data.setdefault(step_key, {"days": {}, "total": 0})
+        sd["days"].setdefault(d_str, []).append(dur)
+        sd["total"] += 1
+
+    sorted_steps = sorted(step_data.items(), key=lambda kv: kv[1]["total"], reverse=True)[:limit]
+    results = []
+    for step_key, sd in sorted_steps:
+        series = []
+        for d in date_range:
+            durs = sd["days"].get(d, [])
+            series.append(round(sum(durs) / len(durs), 1) if durs else 0.0)
+        nonzero = [v for v in series if v > 0]
+        avg_overall = round(sum(nonzero) / len(nonzero), 1) if nonzero else 0.0
+        last_val = next((v for v in reversed(series) if v > 0), 0.0)
+        first_val = next((v for v in series if v > 0), 0.0)
+        change_pct = round((last_val - first_val) / first_val * 100, 1) if first_val > 0 else 0.0
+        results.append({
+            "step_key": step_key,
+            "series": series,
+            "avg_duration": avg_overall,
+            "sample_count": sd["total"],
+            "change_pct": change_pct,
+        })
+
+    return ApiResponse.success({
+        "steps": results,
+        "days": days,
+        "date_range": date_range,
+    }).to_response()
