@@ -1493,3 +1493,86 @@ def task_comment_sentiment_trend():
         })
 
     return ApiResponse.success({"trend": trend, "days": days}).to_response()
+
+
+@tasks_bp.route("/rework-analysis", methods=["GET"])
+@unified_auth_required
+def task_rework_analysis():
+    """Analyze task rework — tasks reverted from done/review to in_progress/todo.
+
+    Scans TaskHistory for status transitions where old_value is a
+    completed state (done/review) and new_value is an active state
+    (in_progress/todo). The value-combination filter is robust to
+    whether the change was logged as UPDATED or STATUS_CHANGED.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(30, int(request.args.get("limit", 15))))
+    except (TypeError, ValueError):
+        days, limit = 30, 15
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    rework_events = (
+        TaskHistory.query
+        .filter(
+            TaskHistory.changed_at >= since,
+            TaskHistory.old_value.in_(["done", "review"]),
+            TaskHistory.new_value.in_(["in_progress", "todo"]),
+        )
+        .all()
+    )
+
+    task_rework_count = {}
+    for ev in rework_events:
+        task_rework_count[ev.task_id] = task_rework_count.get(ev.task_id, 0) + 1
+
+    if not task_rework_count:
+        return ApiResponse.success({
+            "tasks": [], "by_project": [], "days": days,
+            "total_reworked": 0, "total_rework_events": 0,
+        }).to_response()
+
+    reworked_task_ids = list(task_rework_count.keys())
+    # Scope to the current user's tasks via project ownership (canonical pattern)
+    tasks = (
+        Task.query.join(Project).filter(
+            Task.id.in_(reworked_task_ids), Project.owner_id == user.id
+        ).all()
+    )
+    if not tasks:
+        return ApiResponse.success({
+            "tasks": [], "by_project": [], "days": days,
+            "total_reworked": 0, "total_rework_events": len(rework_events),
+        }).to_response()
+
+    project_ids = {t.project_id for t in tasks}
+    project_names = {p.id: p.name for p in Project.query.filter(Project.id.in_(project_ids)).all()}
+
+    project_rework = {}
+    task_items = []
+    for t in tasks:
+        cnt = task_rework_count.get(t.id, 0)
+        project_rework[t.project_id] = project_rework.get(t.project_id, 0) + cnt
+        task_items.append({
+            "task_id": t.id,
+            "title": (t.title or f"Task#{t.id}")[:60],
+            "project_name": project_names.get(t.project_id, f"Project#{t.project_id}"),
+            "rework_count": cnt,
+        })
+
+    task_items.sort(key=lambda x: x["rework_count"], reverse=True)
+    project_items = sorted(
+        [{"project_name": project_names.get(pid, f"Project#{pid}"), "rework_count": cnt}
+         for pid, cnt in project_rework.items()],
+        key=lambda x: x["rework_count"], reverse=True,
+    )
+
+    return ApiResponse.success({
+        "tasks": task_items[:limit],
+        "by_project": project_items[:10],
+        "days": days,
+        "total_reworked": len(tasks),
+        "total_rework_events": len(rework_events),
+    }).to_response()
