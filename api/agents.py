@@ -15698,3 +15698,87 @@ def agent_specialization_evolution():
         "weeks": weeks,
         "week_labels": week_labels,
     }).to_response()
+
+
+@agents_bp.route("/experiences/decay-alerts", methods=["GET"])
+@unified_auth_required
+def experiences_decay_alerts():
+    """Flag Agents whose experience-base confidence is declining.
+
+    Splits each Agent's valid experiences into two halves by created_at
+    (older vs newer) within the window and compares average confidence.
+    Agents whose newer-half average is meaningfully below the older-half
+    average are returned as decay alerts with a recommended action, so
+    owners can re-train or review recent low-quality experiences.
+    """
+    user = get_current_user()
+    try:
+        days = max(7, min(365, int(request.args.get("days", 30))))
+        min_drop = max(0.02, min(0.5, float(request.args.get("min_drop", 0.1))))
+        limit = max(1, min(30, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days, min_drop, limit = 30, 0.1, 10
+
+    from models.agent import AgentExperience
+    since = datetime.utcnow() - timedelta(days=days)
+    midpoint = datetime.utcnow() - timedelta(days=days / 2)
+
+    rows = (
+        AgentExperience.query
+        .join(Agent, AgentExperience.agent_id == Agent.id)
+        .filter(
+            Agent.owner_id == user.id,
+            AgentExperience.created_at >= since,
+            AgentExperience.is_valid.is_(True),
+            AgentExperience.confidence.isnot(None),
+        )
+        .with_entities(
+            AgentExperience.agent_id,
+            Agent.name,
+            AgentExperience.confidence,
+            AgentExperience.created_at,
+        )
+        .all()
+    )
+
+    buckets = {}
+    for aid, aname, conf, created in rows:
+        if conf is None or created is None:
+            continue
+        info = buckets.setdefault(aid, {"name": aname or f"Agent#{aid}", "older": [], "newer": []})
+        if created < midpoint:
+            info["older"].append(conf)
+        else:
+            info["newer"].append(conf)
+
+    def _avg(xs):
+        return sum(xs) / len(xs) if xs else None
+
+    alerts = []
+    for aid, info in buckets.items():
+        older_avg = _avg(info["older"])
+        newer_avg = _avg(info["newer"])
+        if older_avg is None or newer_avg is None:
+            continue
+        drop = older_avg - newer_avg
+        if drop < min_drop:
+            continue
+        alerts.append({
+            "agent_id": aid,
+            "agent_name": info["name"],
+            "older_avg_confidence": round(older_avg, 3),
+            "newer_avg_confidence": round(newer_avg, 3),
+            "drop": round(drop, 3),
+            "older_count": len(info["older"]),
+            "newer_count": len(info["newer"]),
+            "current_confidence": round(newer_avg, 3),
+            "recommendation": "review_recent_experiences" if drop >= 0.2 else "monitor",
+        })
+
+    alerts.sort(key=lambda a: a["drop"], reverse=True)
+    return ApiResponse.success({
+        "alerts": alerts[:limit],
+        "total_alerts": len(alerts),
+        "days": days,
+        "min_drop": min_drop,
+    }).to_response()
