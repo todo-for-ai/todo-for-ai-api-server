@@ -16076,3 +16076,86 @@ def workflow_structural_complexity():
         "avg_steps": round(sum(r["step_count"] for r in results) / len(results), 1) if results else 0,
         "avg_depth": round(sum(r["max_depth"] for r in results) / len(results), 1) if results else 0,
     }).to_response()
+
+
+@agents_bp.route("/idle-ranking", methods=["GET"])
+@unified_auth_required
+def agent_idle_ranking():
+    """Rank Agents by how long they have been idle.
+
+    Idle duration is measured from the most recent of Agent.last_seen_at
+    and the latest TaskAssignment activity (completed_at /
+    last_heartbeat_at). Each Agent is classified as active (<24h), idle
+    (1-7d), stale (7-30d), dormant (>30d), or never, surfacing
+    stale/dormant Agents for cleanup or reassignment.
+    """
+    user = get_current_user()
+    try:
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        limit = 20
+
+    rows = (
+        TaskAssignment.query
+        .join(Agent, TaskAssignment.agent_id == Agent.id)
+        .filter(Agent.owner_id == user.id)
+        .with_entities(
+            TaskAssignment.agent_id,
+            TaskAssignment.completed_at,
+            TaskAssignment.last_heartbeat_at,
+        )
+        .all()
+    )
+    last_assign = {}
+    for aid, completed_at, heartbeat in rows:
+        cand = max([t for t in (completed_at, heartbeat) if t], default=None)
+        if cand is None:
+            continue
+        cur = last_assign.get(aid)
+        if cur is None or cand > cur:
+            last_assign[aid] = cand
+
+    agents = (
+        Agent.query
+        .filter_by(owner_id=user.id)
+        .with_entities(Agent.id, Agent.name, Agent.status, Agent.last_seen_at)
+        .all()
+    )
+    now = datetime.utcnow()
+    results = []
+    for aid, aname, status, last_seen in agents:
+        candidates = [t for t in (last_seen, last_assign.get(aid)) if t]
+        last_activity = max(candidates) if candidates else None
+        if last_activity is None:
+            idle_hours = None
+            stage = "never"
+        else:
+            idle_hours = (now - last_activity).total_seconds() / 3600
+            if idle_hours < 24:
+                stage = "active"
+            elif idle_hours < 24 * 7:
+                stage = "idle"
+            elif idle_hours < 24 * 30:
+                stage = "stale"
+            else:
+                stage = "dormant"
+        results.append({
+            "agent_id": aid,
+            "agent_name": aname or f"Agent#{aid}",
+            "status": status.value if status else None,
+            "last_seen_at": last_seen.isoformat() if last_seen else None,
+            "last_activity_at": last_activity.isoformat() if last_activity else None,
+            "idle_hours": round(idle_hours, 1) if idle_hours is not None else None,
+            "stage": stage,
+        })
+
+    results.sort(key=lambda r: -(r["idle_hours"] if r["idle_hours"] is not None else float("inf")))
+
+    stage_counts = {}
+    for r in results:
+        stage_counts[r["stage"]] = stage_counts.get(r["stage"], 0) + 1
+    return ApiResponse.success({
+        "agents": results[:limit],
+        "total_agents": len(results),
+        "stage_counts": stage_counts,
+    }).to_response()
