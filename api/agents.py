@@ -15025,7 +15025,7 @@ def agent_run_resource_trend():
 
 
 @agents_bp.route("/skill-matching", methods=["GET"])
-@login_required
+@unified_auth_required
 def agent_skill_matching():
     """Agent skill matching recommendation.
 
@@ -15109,7 +15109,7 @@ def agent_skill_matching():
 
 
 @agents_bp.route("/workflows/step-duration-histogram", methods=["GET"])
-@login_required
+@unified_auth_required
 def workflow_step_duration_histogram():
     """Workflow step duration histogram.
 
@@ -15188,7 +15188,7 @@ def workflow_step_duration_histogram():
 
 
 @agents_bp.route("/task-handoff-stats", methods=["GET"])
-@login_required
+@unified_auth_required
 def agent_task_handoff_stats():
     """Agent task handoff statistics.
 
@@ -15253,7 +15253,7 @@ def agent_task_handoff_stats():
 
 
 @agents_bp.route("/channels/activity-trend", methods=["GET"])
-@login_required
+@unified_auth_required
 def channel_activity_trend():
     """Channel activity trend.
 

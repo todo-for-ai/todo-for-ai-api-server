@@ -1346,7 +1346,7 @@ def task_completion_forecast():
 
 
 @tasks_bp.route("/dependency-chain", methods=["GET"])
-@login_required
+@unified_auth_required
 def task_dependency_chain():
     """Analyze task dependency chains for the current user.
 
@@ -1415,7 +1415,7 @@ def task_dependency_chain():
 
 
 @tasks_bp.route("/comment-sentiment-trend", methods=["GET"])
-@login_required
+@unified_auth_required
 def task_comment_sentiment_trend():
     """Task comment sentiment trend.
 
