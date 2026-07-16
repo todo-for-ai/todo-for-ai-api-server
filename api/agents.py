@@ -15986,3 +15986,93 @@ def capability_supply_demand():
         "agent_total": agent_total,
         "active_task_total": active_task_total,
     }).to_response()
+
+
+@agents_bp.route("/workflows/structural-complexity", methods=["GET"])
+@unified_auth_required
+def workflow_structural_complexity():
+    """Analyze the structural (design-time) complexity of workflows.
+
+    For each active workflow owned by the user, computes DAG metrics from
+    WorkflowStep.depends_on: step count, maximum dependency depth (longest
+    chain, with cycle guard), total edges, average fan-in/fan-out, and
+    counts of root (no dependencies) and leaf (nothing depends on them)
+    steps. Reveals overly deep or tangled workflow designs.
+    """
+    import json
+    user = get_current_user()
+    try:
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        limit = 20
+
+    from models.agent import Workflow, WorkflowStep
+
+    def _as_list(raw):
+        if not raw:
+            return []
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                return []
+        return [str(x) for x in raw] if isinstance(raw, list) else []
+
+    workflows = Workflow.query.filter_by(owner_id=user.id, is_active=True).all()
+
+    results = []
+    for wf in workflows:
+        steps = WorkflowStep.query.filter_by(workflow_id=wf.id).all()
+        if not steps:
+            continue
+        keys = {s.step_key for s in steps}
+        deps = {}
+        for s in steps:
+            d = {k for k in _as_list(s.depends_on) if k in keys and k != s.step_key}
+            deps[s.step_key] = d
+        fan_out = {k: 0 for k in keys}
+        for dset in deps.values():
+            for dep in dset:
+                fan_out[dep] = fan_out.get(dep, 0) + 1
+
+        state = {k: 0 for k in keys}   # 0 unvisited, 1 visiting, 2 done
+        chain = {k: 0 for k in keys}   # longest dependency chain below k (in edges)
+        def depth(k):
+            if state[k] == 2:
+                return chain[k]
+            if state[k] == 1:
+                return 0  # cycle guard: break recursion
+            state[k] = 1
+            best = 0
+            for d in deps.get(k, ()):
+                best = max(best, depth(d) + 1)
+            state[k] = 2
+            chain[k] = best
+            return best
+        for k in keys:
+            depth(k)
+
+        n = len(steps)
+        total_edges = sum(len(d) for d in deps.values())
+        max_depth = (max(chain.values()) + 1) if chain else 1  # nodes
+        results.append({
+            "workflow_id": wf.id,
+            "workflow_name": wf.name,
+            "version": wf.version,
+            "step_count": n,
+            "max_depth": max_depth,
+            "total_edges": total_edges,
+            "avg_fan_in": round(total_edges / n, 2) if n else 0.0,
+            "avg_fan_out": round(total_edges / n, 2) if n else 0.0,
+            "root_count": sum(1 for k in keys if not deps.get(k)),
+            "leaf_count": sum(1 for k in keys if fan_out.get(k, 0) == 0),
+            "parallelism_budget": wf.max_parallel_steps,
+        })
+
+    results.sort(key=lambda r: (r["max_depth"], r["total_edges"]), reverse=True)
+    return ApiResponse.success({
+        "workflows": results[:limit],
+        "total_workflows": len(results),
+        "avg_steps": round(sum(r["step_count"] for r in results) / len(results), 1) if results else 0,
+        "avg_depth": round(sum(r["max_depth"] for r in results) / len(results), 1) if results else 0,
+    }).to_response()
