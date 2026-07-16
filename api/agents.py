@@ -15321,3 +15321,79 @@ def channel_activity_trend():
 
     results.sort(key=lambda c: sum(c["daily_counts"]), reverse=True)
     return ApiResponse.success({"channels": results[:limit], "days": days}).to_response()
+
+
+@agents_bp.route("/workload-forecast", methods=["GET"])
+@unified_auth_required
+def agent_workload_forecast():
+    """Forecast each Agent's near-future task load via linear regression.
+
+    Uses the daily assignment count over the lookback window as the
+    regression signal. Returns per-agent slope (trend direction),
+    forecast for the next few days, and recent average.
+    """
+    user = get_current_user()
+    try:
+        days = max(7, min(90, int(request.args.get("days", 30))))
+        horizon = max(1, min(14, int(request.args.get("horizon", 3))))
+        limit = max(1, min(20, int(request.args.get("limit", 10))))
+    except (TypeError, ValueError):
+        days, horizon, limit = 30, 3, 10
+
+    from models.agent import TaskAssignment
+    since = datetime.utcnow() - timedelta(days=days)
+
+    rows = (
+        TaskAssignment.query
+        .join(Agent, TaskAssignment.agent_id == Agent.id)
+        .filter(Agent.owner_id == user.id, TaskAssignment.assigned_at >= since)
+        .with_entities(
+            TaskAssignment.agent_id,
+            Agent.name,
+            func.date(TaskAssignment.assigned_at).label("d"),
+            func.count(TaskAssignment.id).label("c"),
+        )
+        .group_by(TaskAssignment.agent_id, Agent.name, func.date(TaskAssignment.assigned_at))
+        .all()
+    )
+
+    date_range = [(datetime.utcnow() - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d") for i in range(days)]
+    agent_days = {}
+    for aid, aname, d, c in rows:
+        d_str = d.isoformat() if hasattr(d, "isoformat") else str(d)
+        agent_days.setdefault(aid, {"name": aname or f"Agent#{aid}", "counts": {}})["counts"][d_str] = c
+
+    results = []
+    for aid, info in agent_days.items():
+        series = [info["counts"].get(d, 0) for d in date_range]
+        n = len(series)
+        total = sum(series)
+        if total == 0:
+            continue
+        x_mean = (n - 1) / 2.0
+        y_mean = total / n
+        num = sum((i - x_mean) * (series[i] - y_mean) for i in range(n))
+        den = sum((i - x_mean) ** 2 for i in range(n))
+        slope = num / den if den else 0.0
+        intercept = y_mean - slope * x_mean
+        forecast = [max(0, round(intercept + slope * (n + k))) for k in range(horizon)]
+        recent_avg = round(sum(series[-7:]) / min(7, n), 2)
+        results.append({
+            "agent_id": aid,
+            "agent_name": info["name"],
+            "total": total,
+            "recent_avg": recent_avg,
+            "slope": round(slope, 3),
+            "trend": "up" if slope > 0.1 else ("down" if slope < -0.1 else "flat"),
+            "series": series,
+            "forecast": forecast,
+            "forecast_total": sum(forecast),
+        })
+
+    results.sort(key=lambda r: r["forecast_total"], reverse=True)
+    return ApiResponse.success({
+        "agents": results[:limit],
+        "days": days,
+        "horizon": horizon,
+        "date_range": date_range,
+    }).to_response()
