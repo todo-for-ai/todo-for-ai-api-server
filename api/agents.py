@@ -15782,3 +15782,100 @@ def experiences_decay_alerts():
         "days": days,
         "min_drop": min_drop,
     }).to_response()
+
+
+@agents_bp.route("/cross-project-efficiency", methods=["GET"])
+@unified_auth_required
+def cross_project_efficiency():
+    """Measure realized value of cross-project Agent authorizations.
+
+    For each cross-project authorization into a project owned by the
+    current user, counts completed (DONE) TaskAssignments in the host
+    project within the window. Identifies utilized vs idle authorizations
+    so owners can revoke unused grants and right-size cross-project access.
+    """
+    user = get_current_user()
+    try:
+        days = max(1, min(365, int(request.args.get("days", 30))))
+        limit = max(1, min(50, int(request.args.get("limit", 20))))
+    except (TypeError, ValueError):
+        days, limit = 30, 20
+
+    from models.agent import CrossProjectAgent
+    from models.task import Task
+    from models.project import Project
+
+    since = datetime.utcnow() - timedelta(days=days)
+
+    authorizations = (
+        CrossProjectAgent.query
+        .join(Project, CrossProjectAgent.project_id == Project.id)
+        .filter(Project.owner_id == user.id)
+        .all()
+    )
+
+    if not authorizations:
+        return ApiResponse.success({
+            "authorizations": [],
+            "total_authorizations": 0,
+            "active_count": 0,
+            "utilized_count": 0,
+            "idle_count": 0,
+            "utilization_rate": 0.0,
+            "days": days,
+        }).to_response()
+
+    # completed assignments per (agent_id, project_id) within window
+    rows = (
+        TaskAssignment.query
+        .join(Task, TaskAssignment.task_id == Task.id)
+        .filter(
+            TaskAssignment.state == TaskAssignmentState.DONE,
+            TaskAssignment.completed_at >= since,
+        )
+        .with_entities(
+            TaskAssignment.agent_id,
+            Task.project_id,
+        )
+        .all()
+    )
+    done_map = {}
+    for aid, pid in rows:
+        done_map[(aid, pid)] = done_map.get((aid, pid), 0) + 1
+
+    results = []
+    active_count = 0
+    utilized_count = 0
+    for a in authorizations:
+        if a.is_active:
+            active_count += 1
+        done = done_map.get((a.agent_id, a.project_id), 0)
+        if done > 0:
+            utilized_count += 1
+        agent_name = a.agent.name if a.agent else f"Agent#{a.agent_id}"
+        proj_name = a.project.name if a.project else f"Project#{a.project_id}"
+        results.append({
+            "authorization_id": a.id,
+            "agent_id": a.agent_id,
+            "agent_name": agent_name,
+            "host_project_id": a.project_id,
+            "host_project_name": proj_name,
+            "tasks_completed_in_host": done,
+            "is_active": bool(a.is_active),
+            "expires_at": a.expires_at.isoformat() if a.expires_at else None,
+            "utilized": done > 0,
+        })
+
+    results.sort(key=lambda r: r["tasks_completed_in_host"], reverse=True)
+    total = len(results)
+    idle = total - utilized_count
+    rate = (utilized_count / total) if total else 0.0
+    return ApiResponse.success({
+        "authorizations": results[:limit],
+        "total_authorizations": total,
+        "active_count": active_count,
+        "utilized_count": utilized_count,
+        "idle_count": idle,
+        "utilization_rate": round(rate, 3),
+        "days": days,
+    }).to_response()
