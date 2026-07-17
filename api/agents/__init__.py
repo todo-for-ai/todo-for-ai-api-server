@@ -23,11 +23,13 @@ from . import experiences  # noqa: E402
 from . import health  # noqa: E402
 from . import knowledge  # noqa: E402
 from . import maintenance  # noqa: E402
+from . import messaging  # noqa: E402
 from . import productivity  # noqa: E402
 from . import protocols  # noqa: E402
 from . import reputation  # noqa: E402
 from . import sandboxes  # noqa: E402
 from . import security  # noqa: E402
+from . import task_operations  # noqa: E402
 from . import workflow_runs  # noqa: E402
 from . import workflow_versions  # noqa: E402
 
