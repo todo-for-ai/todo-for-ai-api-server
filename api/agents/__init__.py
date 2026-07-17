@@ -28,6 +28,8 @@ from . import protocols  # noqa: E402
 from . import reputation  # noqa: E402
 from . import sandboxes  # noqa: E402
 from . import security  # noqa: E402
+from . import workflow_runs  # noqa: E402
+from . import workflow_versions  # noqa: E402
 
 # ── Re-exports for backward compatibility ──
 from ._shared import flush_sse_notifications  # noqa: E402
