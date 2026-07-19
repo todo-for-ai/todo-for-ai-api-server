@@ -30,6 +30,7 @@ from . import reputation  # noqa: E402
 from . import sandboxes  # noqa: E402
 from . import security  # noqa: E402
 from . import task_operations  # noqa: E402
+from . import workflow_analytics  # noqa: E402
 from . import workflow_runs  # noqa: E402
 from . import workflow_versions  # noqa: E402
 
