@@ -33,7 +33,303 @@ from ._shared import (
     _client_ip,
     flush_sse_notifications,
     notify_sse,
+    ProjectRole,
+    normalize_match_terms,
+    validate_json_request,
+    ACTIVE_ASSIGNMENT_STATES,
+    expire_stale_assignments_for_task,
+    find_active_assignment,
+    _score_task_with_caps,
 )
+
+
+# Cross-Project Agent Collaboration endpoints
+# ---------------------------------------------------------------------------
+
+@agents_bp.route("/cross-project/authorize", methods=["POST"])
+@unified_auth_required
+def authorize_cross_project_agent():
+    """Authorize an Agent to work in a different project.
+
+    The authorizing user must be an ADMIN or OWNER of the target project.
+    The agent's owner must be a member of the target project or the authorizer
+    must be the agent's owner.
+    """
+    user = get_current_user()
+    data = validate_json_request()
+
+    agent_id = data.get("agent_id")
+    project_id = data.get("project_id")
+    if not agent_id or not project_id:
+        return ApiResponse.error("agent_id and project_id are required").to_response()
+
+    # Verify agent exists and user owns it
+    agent = Agent.query.filter_by(id=agent_id, owner_id=user.id).first()
+    if not agent:
+        return ApiResponse.not_found("Agent not found or not owned by you").to_response()
+
+    # Verify project exists and user has admin access
+    project = Project.query.get(project_id)
+    if not project:
+        return ApiResponse.not_found("Project not found").to_response()
+
+    user_role = ProjectMember.get_role(project_id, user.id)
+    if user_role not in (ProjectRole.OWNER, ProjectRole.ADMIN):
+        return ApiResponse.error("You must be ADMIN or OWNER of the target project").to_response()
+
+    # Check if already authorized
+    existing = CrossProjectAgent.query.filter_by(
+        agent_id=agent_id, project_id=project_id
+    ).first()
+    if existing:
+        existing.is_active = True
+        existing.role_in_project = data.get("role_in_project", existing.role_in_project)
+        if "capabilities_override" in data:
+            existing.capabilities_override = data["capabilities_override"]
+        if "max_concurrent_tasks" in data:
+            existing.max_concurrent_tasks = data["max_concurrent_tasks"]
+        if "expires_at" in data:
+            existing.expires_at = data["expires_at"]
+        db.session.commit()
+        return ApiResponse.success(existing.to_dict(), "Cross-project authorization updated").to_response()
+
+    auth = CrossProjectAgent.create(
+        agent_id=agent_id,
+        project_id=project_id,
+        authorized_by=user.id,
+        role_in_project=data.get("role_in_project", "contributor"),
+        capabilities_override=data.get("capabilities_override"),
+        max_concurrent_tasks=data.get("max_concurrent_tasks", 3),
+        expires_at=data.get("expires_at"),
+    )
+    db.session.commit()
+
+    notify_sse("cross_project_authorized", {
+        "agent_id": agent_id,
+        "project_id": project_id,
+        "role_in_project": auth.role_in_project,
+    })
+    return ApiResponse.success(auth.to_dict(), "Agent authorized for cross-project access").to_response()
+
+
+@agents_bp.route("/cross-project/revoke", methods=["POST"])
+@unified_auth_required
+def revoke_cross_project_agent():
+    """Revoke an Agent's cross-project authorization."""
+    user = get_current_user()
+    data = validate_json_request()
+
+    agent_id = data.get("agent_id")
+    project_id = data.get("project_id")
+    if not agent_id or not project_id:
+        return ApiResponse.error("agent_id and project_id are required").to_response()
+
+    auth = CrossProjectAgent.query.filter_by(
+        agent_id=agent_id, project_id=project_id
+    ).first()
+    if not auth:
+        return ApiResponse.not_found("Cross-project authorization not found").to_response()
+
+    # Verify user is the agent owner or project admin
+    agent = Agent.query.filter_by(id=agent_id, owner_id=user.id).first()
+    if not agent:
+        user_role = ProjectMember.get_role(project_id, user.id)
+        if user_role not in (ProjectRole.OWNER, ProjectRole.ADMIN):
+            return ApiResponse.error("Not authorized to revoke this access").to_response()
+
+    auth.is_active = False
+    db.session.commit()
+    return ApiResponse.success(None, "Cross-project authorization revoked").to_response()
+
+
+@agents_bp.route("/<int:agent_id>/cross-project", methods=["GET"])
+@unified_auth_required
+def list_agent_cross_projects(agent_id):
+    """List all projects an Agent is authorized to work in."""
+    user = get_current_user()
+    agent = Agent.query.filter_by(id=agent_id, owner_id=user.id).first()
+    if not agent:
+        return ApiResponse.not_found("Agent not found").to_response()
+
+    authorizations = CrossProjectAgent.get_active_for_agent(agent_id)
+    return ApiResponse.success(
+        [a.to_dict() for a in authorizations],
+        f"Agent authorized in {len(authorizations)} projects",
+    ).to_response()
+
+
+@agents_bp.route("/projects/<int:project_id>/external-agents", methods=["GET"])
+@unified_auth_required
+def list_project_external_agents(project_id):
+    """List all external Agents authorized to work in this project."""
+    user = get_current_user()
+    project = Project.query.get(project_id)
+    if not project:
+        return ApiResponse.not_found("Project not found").to_response()
+
+    # Verify user has access to the project
+    user_role = ProjectMember.get_role(project_id, user.id)
+    if not user_role and project.owner_id != user.id:
+        return ApiResponse.error("Access denied").to_response()
+
+    authorizations = CrossProjectAgent.get_active_for_project(project_id)
+    return paginate_query(
+        CrossProjectAgent.query.filter(
+            CrossProjectAgent.project_id == project_id,
+            CrossProjectAgent.is_active == True,
+        ).order_by(CrossProjectAgent.created_at.desc()),
+        "agents",
+    )
+
+
+@agents_bp.route("/cross-project/discover-agents", methods=["GET"])
+@unified_auth_required
+def discover_cross_project_agents():
+    """Discover agents across all projects the user has access to.
+
+    Returns agents that could be assigned to tasks, including external
+    agents authorized for the user's projects.
+    """
+    user = get_current_user()
+    args = get_request_args()
+
+    # Get all projects the user has access to
+    user_projects = ProjectMember.query.filter_by(user_id=user.id).with_entities(
+        ProjectMember.project_id
+    ).all()
+    owned_projects = Project.query.filter_by(owner_id=user.id).with_entities(
+        Project.id
+    ).all()
+    project_ids = list(set(
+        [p.project_id for p in user_projects] + [p.id for p in owned_projects]
+    ))
+
+    if not project_ids:
+        return ApiResponse.success([], "No projects found").to_response()
+
+    # Find cross-project agents for these projects
+    query = CrossProjectAgent.query.filter(
+        CrossProjectAgent.project_id.in_(project_ids),
+        CrossProjectAgent.is_active == True,
+    )
+
+    # Optional capability filter
+    capability = args.get("capability")
+    if capability:
+        query = query.join(Agent, CrossProjectAgent.agent_id == Agent.id).filter(
+            Agent.capabilities.contains([capability])
+        )
+
+    authorizations = query.order_by(CrossProjectAgent.created_at.desc()).all()
+
+    # Deduplicate by agent_id
+    seen = set()
+    result = []
+    for auth in authorizations:
+        if auth.agent_id not in seen:
+            seen.add(auth.agent_id)
+            result.append(auth.to_dict())
+
+    return ApiResponse.success(result, f"Found {len(result)} cross-project agents").to_response()
+
+
+@agents_bp.route("/cross-project/capable-agents", methods=["GET"])
+@unified_auth_required
+def find_capable_agents_cross_project():
+    """Find agents across all accessible projects that have specific capabilities.
+
+    Query params: capabilities (comma-separated), project_id (optional filter)
+    """
+    user = get_current_user()
+    args = get_request_args()
+
+    capabilities_str = args.get("capabilities", "")
+    if not capabilities_str:
+        return ApiResponse.error("capabilities parameter is required").to_response()
+
+    capabilities = [c.strip() for c in capabilities_str.split(",") if c.strip()]
+    if not capabilities:
+        return ApiResponse.error("No valid capabilities provided").to_response()
+
+    # Get accessible project IDs
+    user_projects = ProjectMember.query.filter_by(user_id=user.id).with_entities(
+        ProjectMember.project_id
+    ).all()
+    owned_projects = Project.query.filter_by(owner_id=user.id).with_entities(
+        Project.id
+    ).all()
+    project_ids = list(set(
+        [p.project_id for p in user_projects] + [p.id for p in owned_projects]
+    ))
+
+    # Filter by specific project if requested
+    filter_project_id = args.get("project_id", type=int)
+    if filter_project_id:
+        if filter_project_id not in project_ids:
+            return ApiResponse.error("No access to specified project").to_response()
+        project_ids = [filter_project_id]
+
+    # Find agents: own agents + cross-project authorized agents
+    # 1. Own agents with matching capabilities
+    own_agents = Agent.query.filter(
+        Agent.owner_id == user.id,
+        Agent.status == AgentStatus.ACTIVE,
+    ).all()
+
+    # 2. Cross-project authorized agents
+    cross_auths = CrossProjectAgent.query.filter(
+        CrossProjectAgent.project_id.in_(project_ids),
+        CrossProjectAgent.is_active == True,
+    ).all()
+    cross_agent_ids = [a.agent_id for a in cross_auths]
+    cross_agents = Agent.query.filter(
+        Agent.id.in_(cross_agent_ids),
+        Agent.status == AgentStatus.ACTIVE,
+    ).all() if cross_agent_ids else []
+
+    # Combine and deduplicate
+    all_agents = {}
+    for a in own_agents:
+        all_agents[a.id] = {"agent": a, "source": "own", "projects": project_ids}
+    for auth in cross_auths:
+        agent = next((a for a in cross_agents if a.id == auth.agent_id), None)
+        if agent and agent.id not in all_agents:
+            all_agents[agent.id] = {
+                "agent": agent,
+                "source": "cross_project",
+                "projects": [auth.project_id],
+                "role_in_project": auth.role_in_project,
+            }
+
+    # Score each agent for the requested capabilities
+    results = []
+    for agent_id, info in all_agents.items():
+        agent = info["agent"]
+        agent_caps = normalize_match_terms(agent.capabilities or [])
+        req_caps = normalize_match_terms(capabilities)
+        matched = agent_caps.intersection(req_caps)
+
+        if matched:
+            results.append({
+                "agent_id": agent.id,
+                "agent_name": agent.name,
+                "agent_kind": agent.kind.value if agent.kind else None,
+                "matched_capabilities": sorted(matched),
+                "match_score": len(matched) * 10,
+                "source": info["source"],
+                "available_projects": info["projects"],
+                "role_in_project": info.get("role_in_project"),
+                "collaboration_role": agent.collaboration_role or "standalone",
+            })
+
+    # Sort by match score
+    results.sort(key=lambda x: x["match_score"], reverse=True)
+    return ApiResponse.success(results, f"Found {len(results)} capable agents").to_response()
+
+
+# ---------------------------------------------------------------------------
+# Capability Adaptation endpoints
+# ---------------------------------------------------------------------------
 
 @agents_bp.route("/<int:agent_id>/adapt-capabilities", methods=["GET"])
 @unified_auth_required
@@ -261,6 +557,8 @@ def claim_cross_project_task(agent_id, task_id):
         "task": task.to_dict(),
         "cross_project": True,
     }, "Cross-project task claimed").to_response()
+
+
 @agents_bp.route("/cross-project-efficiency", methods=["GET"])
 @unified_auth_required
 def cross_project_efficiency():
@@ -277,10 +575,6 @@ def cross_project_efficiency():
         limit = max(1, min(50, int(request.args.get("limit", 20))))
     except (TypeError, ValueError):
         days, limit = 30, 20
-
-    from models.agent import CrossProjectAgent
-    from models.task import Task
-    from models.project import Project
 
     since = datetime.utcnow() - timedelta(days=days)
 
