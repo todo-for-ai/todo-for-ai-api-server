@@ -879,3 +879,20 @@ def apply_assignment_update(current_user, assignment, task, data, actor_agent=No
     )
 
     return run
+
+
+# ── Dispatch helpers (defined in _dispatch_helpers, re-exported here so
+#    dispatch.py and task operation submodules can import from a single hub) ──
+from ._dispatch_helpers import (  # noqa: E402,F401
+    DISPATCH_MAX_ASSIGNMENTS,
+    DISPATCH_PREVIEW_CANDIDATE_LIMIT,
+    DISPATCH_POLICY_DEFAULTS,
+    normalize_dispatch_policy,
+    get_coordinator_dispatch_policy,
+    resolve_dispatch_options,
+    collect_claimable_tasks,
+    find_available_worker_agents,
+    serialize_dispatch_candidate,
+    create_assignment_with_run,
+    cancel_assignment_for_handoff,
+)

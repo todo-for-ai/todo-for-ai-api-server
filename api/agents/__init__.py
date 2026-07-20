@@ -29,7 +29,12 @@ from . import protocols  # noqa: E402
 from . import reputation  # noqa: E402
 from . import sandboxes  # noqa: E402
 from . import security  # noqa: E402
-from . import task_operations  # noqa: E402
+from . import task_events  # noqa: E402
+from . import task_handoffs  # noqa: E402
+from . import agent_inbox  # noqa: E402
+from . import task_shared_context  # noqa: E402
+from . import run_logs  # noqa: E402
+from . import task_operations  # noqa: E402  (legacy re-export shim, kept for back-compat)
 from . import workflow_analytics  # noqa: E402
 from . import workflow_runs  # noqa: E402
 from . import workflow_versions  # noqa: E402
