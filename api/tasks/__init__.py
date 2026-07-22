@@ -13,3 +13,4 @@ tasks_bp = Blueprint("tasks", __name__)
 # ── Submodule imports (side-effect: registers routes on tasks_bp) ──
 from . import crud  # noqa: E402,F401
 from . import task_analytics  # noqa: E402,F401
+from . import task_completion  # noqa: E402,F401
