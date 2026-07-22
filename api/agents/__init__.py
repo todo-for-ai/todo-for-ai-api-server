@@ -24,6 +24,7 @@ from . import dispatch  # noqa: E402
 from . import experiences  # noqa: E402
 from . import experience_analytics  # noqa: E402
 from . import experience_decay  # noqa: E402
+from . import failure_analysis  # noqa: E402
 from . import health  # noqa: E402
 from . import knowledge  # noqa: E402
 from . import maintenance  # noqa: E402
