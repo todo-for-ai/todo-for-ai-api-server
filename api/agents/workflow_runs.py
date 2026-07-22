@@ -45,7 +45,11 @@ from ._shared import (
     flush_sse_notifications,
     record_task_event,
 )
-from ._core import _workflow_owned_by_user
+
+
+def _workflow_owned_by_user(workflow_id, user):
+    """Return the workflow if it belongs to *user*, else None."""
+    return Workflow.query.filter_by(id=workflow_id, owner_id=user.id).first()
 from ._workflow_helpers import (
     _RUNTIME_OVERRIDABLE_KEYS,
     _apply_runtime_overrides,

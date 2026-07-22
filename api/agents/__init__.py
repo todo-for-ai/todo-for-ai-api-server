@@ -38,6 +38,9 @@ from . import task_operations  # noqa: E402  (legacy re-export shim, kept for ba
 from . import workflow_analytics  # noqa: E402
 from . import workflow_runs  # noqa: E402
 from . import workflow_versions  # noqa: E402
+from . import task_templates  # noqa: E402
+from . import workflow_routes  # noqa: E402
+from . import project_members  # noqa: E402
 
 # ── Re-exports for backward compatibility ──
 from ._shared import flush_sse_notifications  # noqa: E402
