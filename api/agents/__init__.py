@@ -14,6 +14,8 @@ agents_bp = Blueprint("agents", __name__)
 # ── Submodule imports (side-effect: registers routes on agents_bp) ──
 from . import _core  # noqa: E402  (must come after agents_bp definition)
 from . import analytics  # noqa: E402
+from . import analytics_capability  # noqa: E402
+from . import analytics_collaboration  # noqa: E402
 from . import channels  # noqa: E402
 from . import conflicts  # noqa: E402
 from . import cross_project  # noqa: E402
@@ -41,6 +43,7 @@ from . import workflow_versions  # noqa: E402
 from . import task_templates  # noqa: E402
 from . import workflow_routes  # noqa: E402
 from . import project_members  # noqa: E402
+from . import analytics_workflow  # noqa: E402
 
 # ── Re-exports for backward compatibility ──
 from ._shared import flush_sse_notifications  # noqa: E402
