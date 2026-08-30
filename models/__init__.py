@@ -26,6 +26,7 @@ from .task_evidence import TaskEvidenceRecord
 from .project_repo import ProjectRepoBinding
 from .github_app import GitHubAppConfig
 from .budget import Budget
+from .goal import Goal, GoalStatus, Epic, EpicStatus
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -161,6 +162,10 @@ __all__ = [
     'ProjectRepoBinding',
     'GitHubAppConfig',
     'Budget',
+    'Goal',
+    'GoalStatus',
+    'Epic',
+    'EpicStatus',
     'ActionType',
     'Attachment',
     'ApiToken',

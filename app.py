@@ -223,6 +223,7 @@ def register_blueprints(app):
     from api.github_proxy import github_proxy_bp
     from api.project_repo import project_repo_bp
     from api.github_app import github_app_bp
+    from api.goals import goals_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -277,6 +278,7 @@ def register_blueprints(app):
     app.register_blueprint(github_proxy_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(project_repo_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(github_app_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(goals_bp, url_prefix='/todo-for-ai/api/v1')
 
 
 

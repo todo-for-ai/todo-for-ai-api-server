@@ -83,6 +83,7 @@ class Task(BaseModel):
 
     # 子任务 / 依赖
     parent_task_id = Column(BigInteger, ForeignKey('tasks.id'), nullable=True, index=True, comment='父任务ID（子任务指向父任务）')
+    epic_id = Column(Integer, ForeignKey('epics.id'), nullable=True, index=True, comment='所属 Epic（P2.1 目标层任务图）')
 
     # 关系
     project = relationship('Project', back_populates='tasks')
