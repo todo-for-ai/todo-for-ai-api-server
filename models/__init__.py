@@ -23,6 +23,7 @@ from .task_label import TaskLabel, BUILTIN_TASK_LABELS
 from .context_rule import ContextRule
 from .task_history import TaskHistory, ActionType
 from .task_evidence import TaskEvidenceRecord
+from .project_repo import ProjectRepoBinding
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -155,6 +156,7 @@ __all__ = [
     'ContextRule',
     'TaskHistory',
     'TaskEvidenceRecord',
+    'ProjectRepoBinding',
     'ActionType',
     'Attachment',
     'ApiToken',
