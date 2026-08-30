@@ -293,6 +293,8 @@ def pull_tasks():
                     'priority': task.priority.value if task.priority else None,
                     'tags': task.tags or [],
                     **content_payload,
+                    # 平台权威字段放在展开之后，不被任务内容覆盖
+                    'dod': task.dod or [],
                 },
             }
         )

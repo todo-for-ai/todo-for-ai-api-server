@@ -421,3 +421,77 @@ class TestDodViaTaskApi:
         assert resp.status_code == 200, resp.get_json()
         db_session.expire(task)
         assert task.dod == [{"type": "lint", "value": "ruff check ."}]
+
+
+class TestRuntimeFullLoop:
+    """runtime 视角全链路：pull 下发 dod → 拒绝无证据提交 → 带证据提交成功。"""
+
+    def test_full_loop_pull_reject_then_success(self, client, db_session, runtime_ctx, project_factory, task_factory):
+        from models import AgentTaskAttempt, AgentTaskAttemptState, AgentTaskLease, TaskStatus
+
+        ctx = runtime_ctx()
+        project = project_factory(owner_id=ctx["user"].id, organization_id=ctx["org"].id)
+        # pull 协议按 task.owner_id == agent.workspace_id 匹配任务
+        task = task_factory(
+            project_id=project.id,
+            owner_id=ctx["org"].id,
+            title="Full loop dod task",
+            is_ai_task=True,
+            dod=[{"type": "test", "value": "pytest -q"}],
+        )
+
+        # 1) runtime pull：payload 必须下发 dod，并生成 attempt/lease
+        resp = client.post(
+            f"{BASE_URL}/agent/tasks/pull",
+            json={"max_tasks": 1},
+            headers=ctx["headers"],
+        )
+        assert resp.status_code == 200
+        tasks = resp.get_json()["data"]["tasks"]
+        assert tasks, "expected at least one pulled task"
+        pulled = next(t for t in tasks if t["task_id"] == task.id)
+        assert pulled["payload"]["dod"] == [{"type": "test", "value": "pytest -q"}]
+        attempt_id = pulled["attempt_id"]
+        lease_id = pulled["lease_id"]
+
+        # 2) 无证据提交被验证门拒绝
+        resp = client.post(
+            f"{BASE_URL}/agent/tasks/{task.id}/commit",
+            json={"attempt_id": attempt_id, "lease_id": lease_id, "status": "succeeded"},
+            headers={**ctx["headers"], "Idempotency-Key": attempt_id},
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["error_details"]["code"] == "DOD_EVIDENCE_MISSING"
+
+        # 3) 带通过证据重新提交 → 任务完成，证据入库
+        resp = client.post(
+            f"{BASE_URL}/agent/tasks/{task.id}/commit",
+            json={
+                "attempt_id": attempt_id,
+                "lease_id": lease_id,
+                "status": "succeeded",
+                "evidence": [
+                    {"evidence_type": "test", "status": "passed",
+                     "summary": "1 passed", "detail": {"command": "pytest -q", "exit_code": 0}},
+                ],
+            },
+            headers={**ctx["headers"], "Idempotency-Key": f"{attempt_id}-with-evidence"},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        assert resp.get_json()["data"]["evidence_count"] == 1
+
+        db_session.expire(task)
+        assert task.status.value == "done"
+
+        # 4) 用户侧证据端点可见
+        from flask_jwt_extended import create_access_token
+        with client.application.app_context():
+            token = create_access_token(identity=str(ctx["user"].id))
+        resp = client.get(
+            f"{BASE_URL}/tasks/{task.id}/evidence",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()["data"]
+        assert data["dod"] == [{"type": "test", "value": "pytest -q"}]
+        assert len(data["evidence"]) == 1
