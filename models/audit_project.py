@@ -1,14 +1,14 @@
 """
-Audit log and project membership models.
-"""
+审计日志与项目角色（统一版）
 
-import enum
+历史上本文件还定义了 ProjectMember（RBAC 版）与 ProjectRole。2026-08-31
+合并收敛后，project_members 表的唯一映射位于 models/project_member.py，
+ProjectRole 为其角色枚举的兼容别名，此处仅保留 AuditLog。
+"""
 
 from sqlalchemy import (
     BigInteger,
     Column,
-    DateTime,
-    Enum,
     ForeignKey,
     Integer,
     JSON,
@@ -17,6 +17,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from .base import BaseModel, db
+
+# 兼容再导出：api/agents 包历史使用 ProjectRole（owner/admin/maintainer/member/viewer）
+from .project_member import ProjectMemberRole as ProjectRole  # noqa: F401
+from .project_member import ProjectMember as _CanonicalProjectMember  # noqa: F401
 
 
 class AuditLog(BaseModel):
@@ -69,75 +73,3 @@ class AuditLog(BaseModel):
         )
         db.session.add(entry)
         return entry
-
-
-class ProjectRole(enum.Enum):
-    """Project-level role for RBAC."""
-
-    OWNER = "owner"
-    ADMIN = "admin"
-    MEMBER = "member"
-    VIEWER = "viewer"
-
-
-class ProjectMember(BaseModel):
-    """Project membership with role-based access control.
-
-    Controls who can view / edit / manage tasks and agents within a project.
-    The project owner is always a member with the OWNER role (created automatically).
-    """
-
-    __tablename__ = "project_members"
-
-    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True, comment="Project ID")
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True, comment="User ID")
-    role = Column(Enum(ProjectRole), default=ProjectRole.MEMBER, nullable=False, index=True, comment="Role within the project")
-    invited_by = Column(Integer, ForeignKey("users.id"), nullable=True, comment="User who sent the invitation")
-    accepted_at = Column(DateTime, comment="When the invitee accepted the invitation")
-
-    project = relationship("Project")
-    user = relationship("User", foreign_keys=[user_id])
-    inviter = relationship("User", foreign_keys=[invited_by])
-
-    __table_args__ = (
-        # One membership per user per project
-        {"sqlite_autoincrement": True},
-    )
-
-    def to_dict(self):
-        result = super().to_dict()
-        result["role"] = self.role.value if self.role else None
-        if self.user:
-            result["user_email"] = self.user.email
-            result["user_name"] = self.user.name or self.user.username or self.user.email
-        return result
-
-    @classmethod
-    def get_role(cls, project_id, user_id):
-        """Return the user's role in the project, or None if not a member."""
-        m = cls.query.filter_by(project_id=project_id, user_id=user_id).first()
-        return m.role if m else None
-
-    @classmethod
-    def can(cls, project_id, user_id, action):
-        """Check if a user can perform an action in a project.
-
-        Action hierarchy:
-          - view: VIEWER+
-          - edit: MEMBER+
-          - manage: ADMIN+
-          - admin: OWNER only
-        """
-        role = cls.get_role(project_id, user_id)
-        if role is None:
-            return False
-        if action == "view":
-            return role in (ProjectRole.OWNER, ProjectRole.ADMIN, ProjectRole.MEMBER, ProjectRole.VIEWER)
-        if action == "edit":
-            return role in (ProjectRole.OWNER, ProjectRole.ADMIN, ProjectRole.MEMBER)
-        if action == "manage":
-            return role in (ProjectRole.OWNER, ProjectRole.ADMIN)
-        if action == "admin":
-            return role == ProjectRole.OWNER
-        return False
-

@@ -22,6 +22,7 @@ from .task import Task, TaskStatus, TaskPriority
 from .task_label import TaskLabel, BUILTIN_TASK_LABELS
 from .context_rule import ContextRule
 from .task_history import TaskHistory, ActionType
+from .task_evidence import TaskEvidenceRecord
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -69,6 +70,64 @@ from .agent_runtime_monitor import (
     AgentRuntimeConfig,
 )
 
+# ── 协作平台模型（原 models/agent.py 大文件拆分的子模块）──
+from .agent_core import (
+    AgentKind,
+    AgentRunStatus,
+    TaskAssignment,
+    TaskAssignmentState,
+    RunLog,
+    LEASED_EXECUTION_STATES,
+    HUMAN_BLOCKING_ASSIGNMENT_STATES,
+    ACTIVE_ASSIGNMENT_STATES,
+    AGENT_OFFLINE_AFTER_SECONDS,
+    has_live_agent_assignment,
+    mark_stale_agents_offline,
+)
+from .audit_project import AuditLog
+from .task_collab import TaskTemplate, TaskEvent, Notification, SharedContext
+from .workflow import (
+    Workflow,
+    WorkflowStatus,
+    StepStatus,
+    WorkflowStep,
+    WorkflowRun,
+    WorkflowStepRun,
+    WorkflowTrigger,
+    WorkflowVersion,
+)
+from .channels import (
+    AgentChannel,
+    AgentChannelMember,
+    AgentChannelMessage,
+    CollaborationTemplate,
+    KnowledgeEntry,
+)
+from .protocols import (
+    CollaborationProtocol,
+    ProtocolMessage,
+    ProtocolType,
+    ProtocolStatus,
+)
+from .experience_reputation import AgentExperience, AgentReputation, CrossProjectAgent
+from .sandbox import (
+    AgentSandbox,
+    SandboxExecution,
+    SandboxViolation,
+    SandboxLevel,
+    SandboxViolationType,
+    SandboxExecutionStatus,
+)
+from .conflicts import (
+    AgentConflict,
+    OrchestrationRun,
+    ConflictType,
+    ConflictSeverity,
+    ConflictStatus,
+    ConflictResolutionStrategy,
+)
+from .project_member import ProjectRole  # noqa: F401  (兼容别名，见 project_member.py)
+
 __all__ = [
     'db',
     'User',
@@ -95,6 +154,7 @@ __all__ = [
     'BUILTIN_TASK_LABELS',
     'ContextRule',
     'TaskHistory',
+    'TaskEvidenceRecord',
     'ActionType',
     'Attachment',
     'ApiToken',
@@ -156,4 +216,54 @@ __all__ = [
     'AgentHeartbeat',
     'AgentMetrics',
     'AgentRuntimeConfig',
+    # Agent 协作平台
+    'AgentKind',
+    'AgentRunStatus',
+    'TaskAssignment',
+    'TaskAssignmentState',
+    'RunLog',
+    'LEASED_EXECUTION_STATES',
+    'HUMAN_BLOCKING_ASSIGNMENT_STATES',
+    'ACTIVE_ASSIGNMENT_STATES',
+    'AGENT_OFFLINE_AFTER_SECONDS',
+    'has_live_agent_assignment',
+    'mark_stale_agents_offline',
+    'AuditLog',
+    'ProjectRole',
+    'TaskTemplate',
+    'TaskEvent',
+    'Notification',
+    'SharedContext',
+    'Workflow',
+    'WorkflowStatus',
+    'StepStatus',
+    'WorkflowStep',
+    'WorkflowRun',
+    'WorkflowStepRun',
+    'WorkflowTrigger',
+    'WorkflowVersion',
+    'AgentChannel',
+    'AgentChannelMember',
+    'AgentChannelMessage',
+    'CollaborationTemplate',
+    'KnowledgeEntry',
+    'CollaborationProtocol',
+    'ProtocolMessage',
+    'ProtocolType',
+    'ProtocolStatus',
+    'AgentExperience',
+    'AgentReputation',
+    'CrossProjectAgent',
+    'AgentSandbox',
+    'SandboxExecution',
+    'SandboxViolation',
+    'SandboxLevel',
+    'SandboxViolationType',
+    'SandboxExecutionStatus',
+    'AgentConflict',
+    'OrchestrationRun',
+    'ConflictType',
+    'ConflictSeverity',
+    'ConflictStatus',
+    'ConflictResolutionStrategy',
 ]

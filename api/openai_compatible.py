@@ -70,7 +70,10 @@ def openai_auth_required(f):
         try:
             from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
             verify_jwt_in_request()
-            user_id = get_jwt_identity()
+            try:
+                user_id = int(get_jwt_identity())
+            except (TypeError, ValueError):
+                user_id = None
             if user_id:
                 from models import User
                 user = User.query.get(user_id)

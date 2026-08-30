@@ -148,7 +148,7 @@ class GitHubService:
         try:
             # 生成access token
             access_token = create_access_token(
-                identity=user.id,
+                identity=str(user.id),
                 additional_claims={
                     'username': user.username,
                     'email': user.email,
@@ -349,8 +349,11 @@ def require_auth(f):
     @jwt_required()
     def decorated_function(*args, **kwargs):
         try:
-            current_user_id = get_jwt_identity()
-            current_user = User.query.get(current_user_id)
+            try:
+                current_user_id = int(get_jwt_identity())
+            except (TypeError, ValueError):
+                current_user_id = None
+            current_user = User.query.get(current_user_id) if current_user_id is not None else None
 
             if not current_user:
                 return jsonify({'error': 'user_not_found'}), 401

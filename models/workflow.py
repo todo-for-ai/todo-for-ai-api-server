@@ -64,7 +64,14 @@ class Workflow(BaseModel):
     max_parallel_steps = Column(Integer, default=0, comment="Max steps running concurrently (0 = unlimited)")
 
     owner = relationship("User")
-    steps = relationship("WorkflowStep", back_populates="workflow", cascade="all, delete-orphan")
+    # WorkflowStep 同时有 workflow_id 与 sub_workflow_id 两条指向 workflows 的外键，
+    # 需显式指定 steps 关系走 workflow_id
+    steps = relationship(
+        "WorkflowStep",
+        foreign_keys="WorkflowStep.workflow_id",
+        back_populates="workflow",
+        cascade="all, delete-orphan",
+    )
 
     def to_dict(self, include_steps=False):
         result = super().to_dict()
@@ -105,7 +112,7 @@ class WorkflowStep(BaseModel):
     retry_count = Column(Integer, default=0, comment="Number of automatic retries on failure")
     on_failure = Column(String(20), default="abort", comment="What to do on failure: abort|skip|continue")
 
-    workflow = relationship("Workflow", back_populates="steps")
+    workflow = relationship("Workflow", foreign_keys=[workflow_id], back_populates="steps")
     agent = relationship("Agent")
     task_template = relationship("TaskTemplate")
     sub_workflow = relationship("Workflow", foreign_keys=[sub_workflow_id])

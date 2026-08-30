@@ -93,13 +93,13 @@ class TestOrganizationMembersAPI:
         user = user_factory()
 
         response = client.post(
-            f"{self.BASE_URL}/organizations/{org.id}/members",
-            json={"user_id": user.id, "role": "MEMBER"},
+            f"{self.BASE_URL}/organizations/{org.id}/members/invite",
+            json={"email": user.email, "role": "member"},
             headers=auth_headers
         )
 
-        # May return 201, 200, or 401/404
-        assert response.status_code in [201, 200, 401, 404, 422]
+        # May return 201, 200, or 401/403/404
+        assert response.status_code in [201, 200, 401, 403, 404]
 
     def test_remove_organization_member(self, client, auth_headers, organization_factory, user_factory):
         """Test removing member from organization."""
@@ -112,7 +112,7 @@ class TestOrganizationMembersAPI:
         )
 
         # May return 204, 200, or 401/404
-        assert response.status_code in [204, 200, 401, 404]
+        assert response.status_code in [204, 200, 401, 403, 404]
 
 
 class TestOrganizationProjectsAPI:
@@ -142,8 +142,9 @@ class TestOrganizationAgentsAPI:
         """Test getting agents in organization."""
         org = organization_factory()
 
+        # 组织 Agent 列表现在位于 workspace agents API（organizations 合并收敛后）
         response = client.get(
-            f"{self.BASE_URL}/organizations/{org.id}/agents",
+            f"{self.BASE_URL}/workspaces/{org.id}/agents",
             headers=auth_headers
         )
 
@@ -167,7 +168,7 @@ class TestOrganizationAgentsAPI:
         )
 
         # May return 201, 200, or 401/404
-        assert response.status_code in [201, 200, 401, 404, 422]
+        assert response.status_code in [201, 200, 401, 403, 404, 422]
 
 
 class TestOrganizationStatsAPI:

@@ -460,8 +460,11 @@ def verify_token():
 def refresh():
     """刷新访问令牌"""
     try:
-        current_user_id = get_jwt_identity()
-        user = User.query.get(current_user_id)
+        try:
+            current_user_id = int(get_jwt_identity())
+        except (TypeError, ValueError):
+            current_user_id = None
+        user = User.query.get(current_user_id) if current_user_id is not None else None
         
         if not user or not user.is_active():
             return ApiResponse.error("User not found or inactive", 404).to_response()

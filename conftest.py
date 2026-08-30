@@ -25,6 +25,20 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import pytest
 
+# 本机 Python 若链接 LibreSSL（macOS 自带 3.9 常见）则没有 hashlib.scrypt，
+# 而 Werkzeug 3.x 的 generate_password_hash 默认用 scrypt。仅测试环境降级为 pbkdf2。
+import hashlib as _hashlib
+
+if not hasattr(_hashlib, "scrypt"):
+    import werkzeug.security as _wsec
+
+    _orig_generate_password_hash = _wsec.generate_password_hash
+
+    def _generate_password_hash_compat(password, method="pbkdf2:sha256", salt_length=16):
+        return _orig_generate_password_hash(password, method=method, salt_length=salt_length)
+
+    _wsec.generate_password_hash = _generate_password_hash_compat
+
 
 @pytest.fixture(scope="session")
 def app():
@@ -89,7 +103,7 @@ def auth_headers(client, db_session):
     db_session.commit()
 
     # Generate token directly using flask_jwt_extended
-    access_token = create_access_token(identity=user.id)
+    access_token = create_access_token(identity=str(user.id))
 
     return {"Authorization": f"Bearer {access_token}"}
 

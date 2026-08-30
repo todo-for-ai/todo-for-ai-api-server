@@ -157,7 +157,7 @@ class KnowledgeEntry(BaseModel):
     domain = Column(String(100), comment="Knowledge domain (e.g. 'python', 'frontend', 'devops')")
     tags = Column(JSON, default=list, comment="List of tags for categorization")
     entry_type = Column(String(50), default="insight", comment="Type: insight, pattern, solution, reference, rule")
-    source_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, comment="Task that generated this knowledge")
+    source_task_id = Column(BigInteger, ForeignKey("tasks.id"), nullable=True, comment="Task that generated this knowledge")
     source_type = Column(String(50), default="manual", comment="Source: manual, auto_extracted, imported, shared")
     confidence = Column(Float, default=1.0, comment="Confidence score 0.0-1.0")
     access_count = Column(Integer, default=0, comment="How many times this entry has been accessed")

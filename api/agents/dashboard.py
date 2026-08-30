@@ -2,6 +2,8 @@
 Dashboard metrics and agent monitoring endpoints.
 """
 
+from __future__ import annotations  # Py3.9 兼容 PEP 604 类型注解
+
 from datetime import datetime, timedelta
 
 from flask import request

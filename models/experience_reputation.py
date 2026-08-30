@@ -6,6 +6,7 @@ import enum
 from datetime import datetime, timedelta
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -46,7 +47,7 @@ class AgentExperience(BaseModel):
     key_learnings = Column(Text, comment="Concise takeaways for future similar tasks")
     confidence = Column(Float, default=0.7, comment="Confidence in this experience (0.0-1.0)")
     applicability_score = Column(Float, default=0.5, comment="How broadly applicable this experience is (0.0-1.0)")
-    source_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, comment="Task that generated this experience")
+    source_task_id = Column(BigInteger, ForeignKey("tasks.id"), nullable=True, comment="Task that generated this experience")
     source_step_key = Column(String(100), comment="Workflow step key that generated this experience")
     source_workflow_run_id = Column(Integer, comment="Workflow run that generated this experience")
     is_shared = Column(Boolean, default=False, comment="Whether this experience is shared with other agents")

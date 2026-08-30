@@ -79,11 +79,15 @@ def setup_jwt_refresh(app):
             # 检查是否需要刷新
             if should_refresh_token(jwt_data):
                 # 获取用户身份
-                user_identity = get_jwt_identity()
+                raw_identity = get_jwt_identity()
+                try:
+                    user_identity = int(raw_identity)
+                except (TypeError, ValueError):
+                    user_identity = raw_identity
                 
                 # 创建新的access token
                 new_token = create_access_token(
-                    identity=user_identity,
+                    identity=str(user_identity) if user_identity is not None else None,
                     additional_claims={
                         'username': jwt_data.get('username'),
                         'email': jwt_data.get('email'),

@@ -5,6 +5,7 @@ Collaboration protocol models: CollaborationProtocol, ProtocolMessage and enums.
 import enum
 
 from sqlalchemy import (
+    BigInteger,
     Column,
     DateTime,
     Enum,
@@ -57,7 +58,7 @@ class CollaborationProtocol(BaseModel):
     initiator_agent_id = Column(Integer, ForeignKey("agents.id"), nullable=False, comment="Agent who initiated")
     channel_id = Column(Integer, ForeignKey("agent_channels.id"), nullable=True, comment="Associated channel")
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=True, comment="Project scope")
-    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, comment="Related task")
+    task_id = Column(BigInteger, ForeignKey("tasks.id"), nullable=True, comment="Related task")
     # Protocol config
     config = Column(JSON, comment="Protocol-specific config (e.g. quorum, timeout, auction rules)")
     # Results

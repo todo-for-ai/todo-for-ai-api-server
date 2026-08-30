@@ -77,6 +77,10 @@ class Task(BaseModel):
     feedback_content = Column(Text, comment='任务反馈内容')
     feedback_at = Column(DateTime, comment='反馈时间')
 
+    # 验证门（DoD）：任务完成标准与自主度埋点
+    dod = Column(JSON, comment='完成标准 (JSON数组, 如 [{"type":"test","value":"pytest"}]); 空表示无机器验证要求')
+    human_intervention_count = Column(Integer, default=0, nullable=False, comment='人工干预次数（自主完成率 ACR 埋点）')
+
     # 子任务 / 依赖
     parent_task_id = Column(BigInteger, ForeignKey('tasks.id'), nullable=True, index=True, comment='父任务ID（子任务指向父任务）')
 
@@ -118,6 +122,8 @@ class Task(BaseModel):
         result['mentions'] = self.mentions or []
         result['blocking_task_ids'] = self.blocking_task_ids or []
         result['blocked_by_task_ids'] = self.blocked_by_task_ids or []
+        result['dod'] = self.dod or []
+        result['human_intervention_count'] = self.human_intervention_count or 0
         # 格式化时间字段
         if self.due_date:
             result['due_date'] = self.due_date.isoformat()

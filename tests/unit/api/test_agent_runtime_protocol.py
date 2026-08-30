@@ -16,7 +16,7 @@ def owner_auth_context(app, user_factory):
     """Create a human owner user and JWT headers."""
     user = user_factory()
     with app.app_context():
-        access_token = create_access_token(identity=user.id)
+        access_token = create_access_token(identity=str(user.id))
     return {
         "user": user,
         "headers": {"Authorization": f"Bearer {access_token}"},

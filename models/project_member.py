@@ -10,11 +10,16 @@ from .base import BaseModel
 
 
 class ProjectMemberRole(enum.Enum):
-    """项目成员角色"""
+    """项目成员角色（ADMIN 为原 agent_core.ProjectRole 的对齐值）"""
     OWNER = 'owner'
+    ADMIN = 'admin'
     MAINTAINER = 'maintainer'
     MEMBER = 'member'
     VIEWER = 'viewer'
+
+
+# 兼容别名：api/agents 包历史使用 ProjectRole（owner/admin/member/viewer）
+ProjectRole = ProjectMemberRole
 
 
 class ProjectMemberStatus(enum.Enum):
@@ -60,3 +65,47 @@ class ProjectMember(BaseModel):
         if include_user and self.user:
             result['user'] = self.user.to_public_dict()
         return result
+
+    @classmethod
+    def get_role(cls, project_id, user_id):
+        """Return the user's role in the project, or None if not a member."""
+        m = cls.query.filter_by(project_id=project_id, user_id=user_id).first()
+        return m.role if m else None
+
+    @classmethod
+    def can(cls, project_id, user_id, action):
+        """Check if a user can perform an action in the project.
+
+        Action hierarchy:
+          - view: VIEWER+
+          - edit: MEMBER+
+          - manage: ADMIN/MAINTAINER+
+          - admin: OWNER only
+        """
+        role = cls.get_role(project_id, user_id)
+        if role is None:
+            return False
+        if action == "view":
+            return role in (
+                ProjectMemberRole.OWNER,
+                ProjectMemberRole.ADMIN,
+                ProjectMemberRole.MAINTAINER,
+                ProjectMemberRole.MEMBER,
+                ProjectMemberRole.VIEWER,
+            )
+        if action == "edit":
+            return role in (
+                ProjectMemberRole.OWNER,
+                ProjectMemberRole.ADMIN,
+                ProjectMemberRole.MAINTAINER,
+                ProjectMemberRole.MEMBER,
+            )
+        if action == "manage":
+            return role in (
+                ProjectMemberRole.OWNER,
+                ProjectMemberRole.ADMIN,
+                ProjectMemberRole.MAINTAINER,
+            )
+        if action == "admin":
+            return role == ProjectMemberRole.OWNER
+        return False

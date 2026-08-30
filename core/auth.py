@@ -80,6 +80,16 @@ def is_authenticated():
     return get_current_token() is not None
 
 
+def coerce_user_identity(value):
+    """JWT identity 兼容转换：新令牌为字符串，历史令牌可能为 int。"""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def unified_auth_required(f):
     """
     统一认证装饰器 - 同时支持JWT和API Token认证
@@ -118,7 +128,7 @@ def unified_auth_required(f):
         user_id = None
         try:
             verify_jwt_in_request()
-            user_id = get_jwt_identity()
+            user_id = coerce_user_identity(get_jwt_identity())
         except Exception:
             # JWT验证失败，继续尝试其他认证方式
             user_id = None
@@ -173,7 +183,7 @@ def optional_unified_auth(f):
         user_id = None
         try:
             verify_jwt_in_request(optional=True)
-            user_id = get_jwt_identity()
+            user_id = coerce_user_identity(get_jwt_identity())
         except Exception:
             # JWT验证失败，继续
             user_id = None
