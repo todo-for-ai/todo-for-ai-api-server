@@ -100,6 +100,25 @@ def emit_task_event(task, event_type, payload, actor):
         if exists:
             continue
 
+        # 预算门（P2.6）：agent/workspace 维度超限则跳过该触发并走审批队列
+        from services.budget_service import check_budgets, raise_budget_exceeded
+        violations = check_budgets(
+            workspace_id=int(workspace_id),
+            agent_id=int(trigger.agent_id),
+            project_id=int(task.project_id) if task.project_id else None,
+        )
+        if violations:
+            try:
+                raise_budget_exceeded(
+                    workspace_id=int(workspace_id),
+                    violations=violations,
+                    context={'agent_id': int(trigger.agent_id), 'task_id': int(task.id),
+                             'event': f'task.{event_name}'},
+                )
+            except Exception:
+                db.session.rollback()
+            continue
+
         run = AgentRun(
             run_id=generate_id('run'),
             workspace_id=workspace_id,

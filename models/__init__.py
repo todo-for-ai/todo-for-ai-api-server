@@ -25,6 +25,7 @@ from .task_history import TaskHistory, ActionType
 from .task_evidence import TaskEvidenceRecord
 from .project_repo import ProjectRepoBinding
 from .github_app import GitHubAppConfig
+from .budget import Budget
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -159,6 +160,7 @@ __all__ = [
     'TaskEvidenceRecord',
     'ProjectRepoBinding',
     'GitHubAppConfig',
+    'Budget',
     'ActionType',
     'Attachment',
     'ApiToken',

@@ -20,6 +20,7 @@ from models import (
 )
 from .base import ApiResponse, validate_json_request
 from .agent_common import generate_id, now_utc, write_agent_audit, agent_session_required
+from services.budget_service import check_budgets, raise_budget_exceeded
 
 
 agent_runtime_pull_bp = Blueprint('agent_runtime_pull', __name__)
@@ -200,10 +201,42 @@ def pull_tasks():
         except Exception:
             return ApiResponse.error('max_tasks must be integer', 400).to_response()
 
+    # ── 预算门（P2.6）：agent/workspace 维度超限则停止派发并走审批队列 ──
+    budget_block = None
+    next_task = _fetch_next_task(agent)
+    if next_task:
+        violations = check_budgets(
+            workspace_id=int(agent.workspace_id),
+            agent_id=int(agent.id),
+            project_id=int(next_task.project_id) if next_task.project_id else None,
+        )
+        if violations:
+            raise_budget_exceeded(
+                workspace_id=int(agent.workspace_id),
+                violations=violations,
+                context={'agent_id': int(agent.id), 'task_id': int(next_task.id)},
+            )
+            budget_block = {
+                'blocked': True,
+                'violations': violations,
+                'task_id': int(next_task.id),
+            }
+
+    if budget_block:
+        return ApiResponse.success(
+            {
+                'agent_profile': _build_agent_profile(agent),
+                'tasks': [],
+                'budget_block': budget_block,
+            },
+            'Task dispatch blocked by budget',
+        ).to_response()
+
     items = []
     now = now_utc()
-    for _ in range(max_tasks):
-        task = _fetch_next_task(agent)
+    for round_index in range(max_tasks):
+        # 第一轮复用预算门已取的任务，后续轮重新拉取
+        task = next_task if round_index == 0 else _fetch_next_task(agent)
         if not task:
             break
 
