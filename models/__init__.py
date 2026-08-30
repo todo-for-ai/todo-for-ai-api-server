@@ -24,6 +24,7 @@ from .context_rule import ContextRule
 from .task_history import TaskHistory, ActionType
 from .task_evidence import TaskEvidenceRecord
 from .project_repo import ProjectRepoBinding
+from .github_app import GitHubAppConfig
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -157,6 +158,7 @@ __all__ = [
     'TaskHistory',
     'TaskEvidenceRecord',
     'ProjectRepoBinding',
+    'GitHubAppConfig',
     'ActionType',
     'Attachment',
     'ApiToken',

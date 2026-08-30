@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 import requests
 
-from core.secret_encryption import get_secret_encryption
+from services.github_app import decrypt_str
 
 GITHUB_API_BASE = 'https://api.github.com'
 DEFAULT_TIMEOUT = 15
@@ -140,9 +140,8 @@ class GitHubClient:
 def resolve_token(binding) -> Optional[str]:
     """解析仓库访问 token：绑定级（加密存储）优先，回退部署级 GITHUB_TOKEN。"""
     if binding is not None and binding.token_encrypted:
-        try:
-            return get_secret_encryption().decrypt(binding.token_encrypted)
-        except Exception:
-            # 解密失败（密钥轮换/缺失）时回退环境 token，避免整个闭环不可用
-            pass
+        decrypted = decrypt_str(binding.token_encrypted)
+        if decrypted:
+            return decrypted
+        # 解密失败（密钥轮换/缺失）时回退环境 token，避免整个闭环不可用
     return os.environ.get('GITHUB_TOKEN') or None

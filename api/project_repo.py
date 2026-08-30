@@ -14,6 +14,7 @@ import uuid
 from models import AgentTaskEvent, AuditLog, db, Project, Task, TaskEvidenceRecord, ProjectRepoBinding
 from core.auth import unified_auth_required, get_current_user
 from core.secret_encryption import get_secret_encryption
+from services.github_app import encrypt_str as _encrypt_secret, decrypt_str as _decrypt_secret
 from .base import ApiResponse, validate_json_request
 from services.github_client import (
     GitHubClient,
@@ -275,7 +276,7 @@ def bind_project_repo(project_id: int):
         binding.autonomy_level = autonomy_level
         if 'token' in data:
             binding.token_encrypted = (
-                get_secret_encryption().encrypt(data['token']) if data['token'] else None
+                _encrypt_secret(data['token']) if data['token'] else None
             )
         db.session.commit()
         return ApiResponse.success(data=binding.to_dict(), message='Repo binding saved').to_response()
