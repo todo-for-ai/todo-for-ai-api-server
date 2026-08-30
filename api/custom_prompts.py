@@ -6,6 +6,7 @@ from flask import Blueprint, request
 from models import db, CustomPrompt, PromptType
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 from core.auth import unified_auth_required, get_current_user
+from core.cache_invalidation import invalidate_user_caches
 
 custom_prompts_bp = Blueprint('custom_prompts', __name__)
 
@@ -127,6 +128,7 @@ def create_custom_prompt():
         )
         
         db.session.commit()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(
             prompt.to_dict(),
@@ -210,6 +212,7 @@ def update_custom_prompt(prompt_id):
         )
         
         db.session.commit()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(
             prompt.to_dict(),
@@ -239,6 +242,7 @@ def delete_custom_prompt(prompt_id):
         prompt_type = prompt.prompt_type.value
         db.session.delete(prompt)
         db.session.commit()
+        invalidate_user_caches(current_user.id)
         
         return ApiResponse.success(
             None,
@@ -313,6 +317,7 @@ def reorder_task_button_prompts():
         # 执行重排序
         CustomPrompt.reorder_task_buttons(current_user.id, prompt_orders)
         db.session.commit()
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.success(None, "Task button prompts reordered successfully").to_response()
 
@@ -387,6 +392,7 @@ def initialize_user_defaults():
 
         # 初始化默认提示词
         CustomPrompt.initialize_user_defaults(current_user.id, language)
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.success(None, "Default prompts initialized successfully").to_response()
 
@@ -416,6 +422,7 @@ def reset_to_defaults():
 
         # 初始化默认提示词
         CustomPrompt.initialize_user_defaults(current_user.id, language)
+        invalidate_user_caches(current_user.id)
 
         return ApiResponse.success(None, "Prompts reset to defaults successfully").to_response()
 
@@ -465,6 +472,19 @@ def import_custom_prompts():
         imported_count = 0
         skipped_count = 0
 
+        # 预加载当前用户已有名称，避免循环中 N 次查重查询
+        existing_rows = db.session.query(
+            CustomPrompt.prompt_type,
+            CustomPrompt.name
+        ).filter(
+            CustomPrompt.user_id == current_user.id
+        ).all()
+        existing_names = {
+            (row.prompt_type, row.name)
+            for row in existing_rows
+        }
+        pending_names = set()
+
         for prompt_data in prompts_data:
             try:
                 # 验证必需字段
@@ -479,14 +499,8 @@ def import_custom_prompts():
                     skipped_count += 1
                     continue
 
-                # 检查名称是否重复
-                existing = CustomPrompt.query.filter(
-                    CustomPrompt.user_id == current_user.id,
-                    CustomPrompt.prompt_type == prompt_type,
-                    CustomPrompt.name == prompt_data['name']
-                ).first()
-
-                if existing:
+                key = (prompt_type, prompt_data['name'])
+                if key in existing_names or key in pending_names:
                     skipped_count += 1
                     continue
 
@@ -500,6 +514,7 @@ def import_custom_prompts():
                     order_index=prompt_data.get('order_index', 0)
                 )
 
+                pending_names.add(key)
                 imported_count += 1
 
             except Exception:
@@ -507,6 +522,7 @@ def import_custom_prompts():
                 continue
 
         db.session.commit()
+        invalidate_user_caches(current_user.id)
 
         result = {
             'imported_count': imported_count,

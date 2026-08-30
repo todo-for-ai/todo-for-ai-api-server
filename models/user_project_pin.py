@@ -111,11 +111,18 @@ class UserProjectPin(BaseModel):
             user_id: 用户ID
             pin_orders: 列表，包含 {'project_id': int, 'pin_order': int} 的字典
         """
+        project_ids = [item['project_id'] for item in pin_orders if 'project_id' in item]
+        if not project_ids:
+            return
+
+        pins = cls.query.filter(
+            cls.user_id == user_id,
+            cls.is_active.is_(True),
+            cls.project_id.in_(project_ids)
+        ).all()
+        pin_map = {pin.project_id: pin for pin in pins}
+
         for item in pin_orders:
-            pin = cls.query.filter_by(
-                user_id=user_id, 
-                project_id=item['project_id'],
-                is_active=True
-            ).first()
+            pin = pin_map.get(item.get('project_id'))
             if pin:
                 pin.pin_order = item['pin_order']

@@ -231,8 +231,9 @@ def delete_token(token_id):
         if not api_token:
             return ApiResponse.error('Token not found', 404).to_response()
         
-        # 软删除（设置为非活跃状态）
-        api_token.deactivate()
+        # 物理删除
+        db.session.delete(api_token)
+        db.session.commit()
         
         return ApiResponse.success(None, 'Token deleted successfully').to_response()
         

@@ -5,19 +5,22 @@
 from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from datetime import datetime, date
-from .base import BaseModel
 from . import db
 
 
-class UserActivity(BaseModel):
-    """用户活跃度模型"""
+class UserActivity(db.Model):
+    """用户活跃度模型 - 使用联合主键，不继承BaseModel"""
 
     __tablename__ = 'user_activities'
 
     # 联合主键：用户ID + 日期
     user_id = Column(Integer, ForeignKey('users.id'), primary_key=True, comment='用户ID')
     activity_date = Column(Date, primary_key=True, comment='活跃日期 (YYYY-MM-DD)')
-    
+
+    # 基础时间字段（原来从BaseModel继承）
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, comment='创建时间')
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, comment='更新时间')
+
     # 活跃度统计
     task_created_count = Column(Integer, default=0, comment='当天创建任务数量')
     task_updated_count = Column(Integer, default=0, comment='当天更新任务数量')
@@ -25,17 +28,17 @@ class UserActivity(BaseModel):
     task_completed_count = Column(Integer, default=0, comment='当天完成任务数量')
     total_activity_count = Column(Integer, default=0, comment='当天总活跃次数')
     activity_level = Column(Integer, default=0, comment='活跃等级(0-4，用于热力图颜色)')
-    
+
     # 时间信息
     first_activity_at = Column(DateTime, comment='当天首次活跃时间')
     last_activity_at = Column(DateTime, comment='当天最后活跃时间')
-    
+
     # 关系
     user = relationship('User', backref='activities')
-    
+
     def __repr__(self):
         return f'<UserActivity {self.user_id}:{self.activity_date} ({self.total_activity_count})>'
-    
+
     def to_dict(self):
         """转换为字典"""
         result = {
@@ -50,7 +53,7 @@ class UserActivity(BaseModel):
             'last_activity_at': self.last_activity_at.isoformat() if self.last_activity_at else None,
         }
         return result
-    
+
     @classmethod
     def record_activity(cls, user_id, activity_type='general'):
         """
@@ -119,7 +122,7 @@ class UserActivity(BaseModel):
             (activity.task_status_changed_count or 0) +
             (activity.task_completed_count or 0)
         )
-        
+
         # 自动计算并更新activity_level（性能优化：避免后续重复计算）
         activity.activity_level = cls._get_activity_level(activity.total_activity_count)
 
@@ -129,24 +132,24 @@ class UserActivity(BaseModel):
         except Exception as e:
             db.session.rollback()
             raise e
-    
+
     @classmethod
     def get_user_activity_heatmap(cls, user_id, days=365):
         """
         获取用户活跃度热力图数据（优化版）
-        
+
         Args:
             user_id: 用户ID
             days: 获取最近多少天的数据，默认365天
-            
+
         Returns:
             list: 活跃度数据列表，每个元素包含日期和活跃次数
         """
         from datetime import timedelta
-        
+
         end_date = date.today()
         start_date = end_date - timedelta(days=days-1)
-        
+
         # 优化1: 只选择需要的字段，减少数据传输，包括预计算的activity_level
         activities = cls.query.with_entities(
             cls.activity_date,
@@ -163,7 +166,7 @@ class UserActivity(BaseModel):
             cls.activity_date >= start_date,
             cls.activity_date <= end_date
         ).order_by(cls.activity_date.asc()).all()
-        
+
         # 优化2: 使用字典快速查找，避免O(n)循环
         activity_dict = {}
         for activity in activities:
@@ -177,11 +180,11 @@ class UserActivity(BaseModel):
                 'first_at': activity[7],
                 'last_at': activity[8]
             }
-        
+
         # 优化3: 预分配列表，避免动态扩容
         result = []
         current_date = start_date
-        
+
         while current_date <= end_date:
             activity = activity_dict.get(current_date)
             if activity:
@@ -210,17 +213,17 @@ class UserActivity(BaseModel):
                     'last_activity_at': None
                 })
             current_date += timedelta(days=1)
-        
+
         return result
-    
+
     @classmethod
     def _get_activity_level(cls, count):
         """
         根据活跃次数获取活跃等级（用于热力图颜色）
-        
+
         Args:
             count: 活跃次数
-            
+
         Returns:
             int: 活跃等级 (0-4)
         """
@@ -234,24 +237,24 @@ class UserActivity(BaseModel):
             return 3
         else:
             return 4
-    
+
     @classmethod
     def get_user_activity_stats(cls, user_id, days=30):
         """
         获取用户活跃度统计
-        
+
         Args:
             user_id: 用户ID
             days: 统计最近多少天，默认30天
-            
+
         Returns:
             dict: 统计数据
         """
         from datetime import timedelta
-        
+
         end_date = date.today()
         start_date = end_date - timedelta(days=days-1)
-        
+
         # 查询统计数据
         stats = db.session.query(
             func.sum(cls.task_created_count).label('total_created'),
@@ -265,7 +268,7 @@ class UserActivity(BaseModel):
             cls.activity_date >= start_date,
             cls.activity_date <= end_date
         ).first()
-        
+
         return {
             'total_created': stats.total_created or 0,
             'total_updated': stats.total_updated or 0,

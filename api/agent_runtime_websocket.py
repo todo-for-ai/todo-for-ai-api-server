@@ -1,0 +1,130 @@
+"""
+Agent Runtime WebSocket Namespace
+
+Handles real-time communication with Agent Runtime:
+- Connection authentication
+- Heartbeat/health streaming
+- Task push notifications
+- Config updates
+- Remote commands
+"""
+
+from datetime import datetime
+from flask import request, session as socketio_session
+from flask_socketio import Namespace, emit, join_room, disconnect
+from models import Agent, AgentSession, db
+
+
+class AgentRuntimeNamespace(Namespace):
+    """Agent Runtime WebSocket Namespace"""
+    
+    def __init__(self, namespace='/agent/ws'):
+        super().__init__(namespace)
+    
+    def on_connect(self, auth=None):
+        """Handle client connection with authentication"""
+        if not auth:
+            auth = request.args
+        
+        agent_key = auth.get('agent_key') if isinstance(auth, dict) else None
+        token = auth.get('token') if isinstance(auth, dict) else None
+        
+        agent = None
+        if agent_key:
+            from models import AgentKey
+            key = AgentKey.verify_key(agent_key)
+            if key:
+                agent = Agent.query.get(key.agent_id)
+        elif token:
+            session = AgentSession.verify_session_token(token)
+            if session:
+                agent = Agent.query.get(session.agent_id)
+        
+        if not agent:
+            emit('auth_error', {'error': 'Invalid credentials'})
+            disconnect()
+            return False
+        
+        socketio_session['agent_id'] = agent.id
+        socketio_session['workspace_id'] = agent.workspace_id
+        
+        join_room(f'agent:{agent.id}')
+        join_room(f'workspace:{agent.workspace_id}')
+        
+        emit('auth_success', {
+            'agent_id': agent.id,
+            'workspace_id': agent.workspace_id,
+            'connected_at': datetime.utcnow().isoformat()
+        })
+        return True
+    
+    def on_disconnect(self):
+        """Handle client disconnect"""
+        agent_id = socketio_session.get('agent_id')
+        if agent_id:
+            pass  # Could log disconnect here
+    
+    def on_heartbeat(self, data):
+        """Handle heartbeat from agent"""
+        agent_id = socketio_session.get('agent_id')
+        if not agent_id:
+            return
+        
+        agent = Agent.query.get(agent_id)
+        if agent:
+            agent.last_seen_at = datetime.utcnow()
+            db.session.commit()
+        
+        emit('heartbeat_ack', {
+            'timestamp': datetime.utcnow().isoformat(),
+            'server_time': datetime.utcnow().timestamp()
+        })
+    
+    def on_task_ack(self, data):
+        """Handle task acknowledgment from agent"""
+        agent_id = socketio_session.get('agent_id')
+        workspace_id = socketio_session.get('workspace_id')
+        if not agent_id:
+            return
+        
+        task_id = data.get('task_id')
+        attempt_id = data.get('attempt_id')
+        
+        emit('task_assigned', {
+            'task_id': task_id,
+            'agent_id': agent_id,
+            'attempt_id': attempt_id,
+            'assigned_at': datetime.utcnow().isoformat()
+        }, room=f'workspace:{workspace_id}')
+    
+    def on_metrics(self, data):
+        """Handle metrics streaming from agent"""
+        agent_id = socketio_session.get('agent_id')
+        workspace_id = socketio_session.get('workspace_id')
+        if not agent_id:
+            return
+        
+        # For now just acknowledge; persistence can be added later
+        emit('metrics_ack', {'received': True})
+
+
+def push_task_to_agent(agent_id, task_data):
+    """Push a task to a connected agent via WebSocket"""
+    from flask_socketio import emit as broadcast_emit
+    broadcast_emit('task_assign', task_data, room=f'agent:{agent_id}', namespace='/agent/ws')
+
+
+def broadcast_config_update(workspace_id, config_data):
+    """Broadcast config update to all agents in workspace"""
+    from flask_socketio import emit as broadcast_emit
+    broadcast_emit('config_update', config_data, room=f'workspace:{workspace_id}', namespace='/agent/ws')
+
+
+def send_command_to_agent(agent_id, command, args=None):
+    """Send a remote command to a specific agent"""
+    from flask_socketio import emit as broadcast_emit
+    broadcast_emit('command', {
+        'command': command,
+        'args': args or {},
+        'sent_at': datetime.utcnow().isoformat()
+    }, room=f'agent:{agent_id}', namespace='/agent/ws')

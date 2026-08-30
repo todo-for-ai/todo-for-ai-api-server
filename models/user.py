@@ -6,7 +6,7 @@ import enum
 from datetime import datetime
 from sqlalchemy import Column, String, Text, Enum, Boolean, DateTime, JSON
 from sqlalchemy.orm import relationship
-from .base import BaseModel
+from .base import BaseModel, db
 
 
 class UserRole(enum.Enum):
@@ -108,6 +108,30 @@ class User(BaseModel):
         'CustomPrompt',
         back_populates='user',
         cascade='all, delete-orphan',
+        lazy='dynamic'
+    )
+    owned_organizations = relationship(
+        'Organization',
+        back_populates='owner',
+        foreign_keys='Organization.owner_id',
+        lazy='dynamic'
+    )
+    organization_memberships = relationship(
+        'OrganizationMember',
+        back_populates='user',
+        foreign_keys='OrganizationMember.user_id',
+        lazy='dynamic'
+    )
+    project_memberships = relationship(
+        'ProjectMember',
+        back_populates='user',
+        foreign_keys='ProjectMember.user_id',
+        lazy='dynamic'
+    )
+    task_labels = relationship(
+        'TaskLabel',
+        back_populates='owner',
+        foreign_keys='TaskLabel.owner_id',
         lazy='dynamic'
     )
     
@@ -214,8 +238,123 @@ class User(BaseModel):
         return self.status == UserStatus.ACTIVE
     
     def can_access_project(self, project):
-        """检查是否可以访问项目 - 所有用户（包括管理员）只能访问自己的项目"""
-        return project.owner_id == self.id
+        """检查是否可以访问项目（owner或项目成员）"""
+        if not project:
+            return False
+        if project.owner_id == self.id:
+            return True
+
+        from .project_member import ProjectMember, ProjectMemberStatus
+        member = ProjectMember.query.filter_by(
+            project_id=project.id,
+            user_id=self.id,
+            status=ProjectMemberStatus.ACTIVE
+        ).first()
+        return member is not None
+
+    def get_project_role(self, project):
+        """获取用户在项目中的角色"""
+        if not project:
+            return None
+        if project.owner_id == self.id:
+            return 'owner'
+
+        from .project_member import ProjectMember, ProjectMemberStatus
+        member = ProjectMember.query.filter_by(
+            project_id=project.id,
+            user_id=self.id,
+            status=ProjectMemberStatus.ACTIVE
+        ).first()
+        return member.role.value if member and member.role else None
+
+    def can_manage_project(self, project):
+        """是否可管理项目（owner/maintainer）"""
+        role = self.get_project_role(project)
+        return role in {'owner', 'maintainer'}
+
+    def can_access_organization(self, organization):
+        """检查是否可以访问组织（owner或组织成员）"""
+        if not organization:
+            return False
+        if organization.owner_id == self.id:
+            return True
+
+        from .organization import OrganizationMember, OrganizationMemberStatus
+        member = OrganizationMember.query.filter_by(
+            organization_id=organization.id,
+            user_id=self.id,
+            status=OrganizationMemberStatus.ACTIVE
+        ).first()
+        return member is not None
+
+    def get_organization_roles(self, organization):
+        """获取用户在组织中的全部角色键列表"""
+        if not organization:
+            return []
+        if organization.owner_id == self.id:
+            return ['owner']
+
+        from .organization import (
+            OrganizationMember,
+            OrganizationMemberStatus,
+            OrganizationMemberRole,
+            OrganizationRoleDefinition,
+        )
+
+        member = OrganizationMember.query.filter_by(
+            organization_id=organization.id,
+            user_id=self.id,
+            status=OrganizationMemberStatus.ACTIVE
+        ).first()
+
+        if not member:
+            return []
+
+        rows = (
+            db.session.query(OrganizationRoleDefinition.key)
+            .join(OrganizationMemberRole, OrganizationMemberRole.role_id == OrganizationRoleDefinition.id)
+            .filter(
+                OrganizationMemberRole.member_id == member.id,
+                OrganizationRoleDefinition.is_active.is_(True),
+            )
+            .all()
+        )
+        role_keys = [str(row.key).strip().lower() for row in rows if row.key]
+
+        # 去重并保持稳定顺序
+        seen = set()
+        deduped = []
+        for key in role_keys:
+            if key not in seen:
+                deduped.append(key)
+                seen.add(key)
+        if deduped:
+            return deduped
+
+        # 兼容旧数据：若尚未迁移到 organization_member_roles，则回退到成员旧 role 字段
+        legacy_role = None
+        if member and member.role:
+            legacy_role = (
+                member.role.value
+                if hasattr(member.role, 'value')
+                else str(member.role)
+            )
+        legacy_key = str(legacy_role or '').strip().lower()
+        return [legacy_key] if legacy_key else []
+
+    def get_organization_role(self, organization):
+        """获取用户在组织中的角色"""
+        role_keys = self.get_organization_roles(organization)
+        priority = ['owner', 'admin', 'member', 'viewer']
+        for key in priority:
+            if key in role_keys:
+                return key
+        return role_keys[0] if role_keys else None
+
+    def can_manage_organization(self, organization):
+        """是否可管理组织（owner/admin）"""
+        role_keys = set(self.get_organization_roles(organization))
+        return 'owner' in role_keys or 'admin' in role_keys
     
     def can_access_task(self, task):
         """检查是否可以访问任务 - 所有用户（包括管理员）只能访问自己项目的任务"""

@@ -10,9 +10,11 @@ Todo for AI - Flask 应用入口
 """
 
 import os
+import threading
 from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_migrate import Migrate
+from flask_socketio import SocketIO
 
 # 导入模型和配置
 from models import db
@@ -20,6 +22,9 @@ from core.config import config
 from core.middleware import setup_all_middleware
 from core.github_config import github_service
 from core.google_config import google_service
+from core.redis_client import get_redis_client
+
+socketio = SocketIO(cors_allowed_origins="*", async_mode='threading')
 
 
 def create_app(config_name=None):
@@ -28,8 +33,17 @@ def create_app(config_name=None):
         config_name = os.environ.get('FLASK_ENV', 'development')
     
     app = Flask(__name__)
+    # 兼容 /path 与 /path/，避免前端请求尾斜杠时出现误判 404
+    app.url_map.strict_slashes = False
     app.config.from_object(config[config_name])
-    
+
+    # 初始化 SocketIO
+    socketio.init_app(app)
+    from api.agent_runtime_websocket import AgentRuntimeNamespace
+    from api.user_websocket import UserNamespace
+    socketio.on_namespace(AgentRuntimeNamespace())
+    socketio.on_namespace(UserNamespace())
+
     # 初始化配置
     config[config_name].init_app(app)
     
@@ -100,10 +114,20 @@ def register_blueprints(app):
         except Exception as e:
             db_status = f'error: {str(e)}'
 
+        try:
+            redis_client = get_redis_client()
+            if redis_client:
+                redis_status = 'connected'
+            else:
+                redis_status = 'disabled_or_unavailable'
+        except Exception as e:
+            redis_status = f'error: {str(e)}'
+
         return ApiResponse.success(
             data={
                 'status': 'healthy',
-                'database': db_status
+                'database': db_status,
+                'redis': redis_status
             },
             message='Service is healthy'
         ).to_response()
@@ -121,12 +145,22 @@ def register_blueprints(app):
         except Exception as e:
             db_status = f'error: {str(e)}'
 
+        try:
+            redis_client = get_redis_client()
+            if redis_client:
+                redis_status = 'connected'
+            else:
+                redis_status = 'disabled_or_unavailable'
+        except Exception as e:
+            redis_status = f'error: {str(e)}'
+
         return ApiResponse.success(
             data={
                 'status': 'healthy',
                 'service': 'Todo for AI API',
                 'version': '1.0.0',
                 'database': db_status,
+                'redis': redis_status,
                 'environment': app.config.get('ENV', 'development')
             },
             message='API service is healthy'
@@ -138,30 +172,107 @@ def register_blueprints(app):
     from api.tasks import tasks_bp
     from api.context_rules import context_rules_bp
     from api.tokens import tokens_bp
-    from api.mcp import mcp_bp
+    mcp_bp = None
+    try:
+        from api.mcp import mcp_bp
+    except Exception as e:
+        app.logger.warning(f"MCP blueprint disabled: {e}")
     from api.docs import docs_bp
     from api.pins import pins_bp
     from api.dashboard import dashboard_bp
+    from api.users import users_bp
     from api.user_settings import user_settings_bp
+    from api.system_settings import system_settings_bp
     from api.api_tokens import api_tokens_bp
     from api.custom_prompts import custom_prompts_bp
     from api.agents import agents_bp
     from api.sse import sse_bp
+    from api.organizations import organizations_bp
+    from api.task_labels import task_labels_bp
+    from api.agent_workspace_agents import agent_workspace_agents_bp
+    from api.agent_workspace_keys import agent_workspace_keys_bp
+    from api.agent_workspace_soul import agent_workspace_soul_bp
+    from api.agent_workspace_secrets import agent_workspace_secrets_bp
+    from api.agent_runtime_auth import agent_runtime_auth_bp
+    from api.agent_runtime_pull import agent_runtime_pull_bp
+    from api.agent_runtime_commit import agent_runtime_commit_bp
+    from api.agent_runtime_grants import agent_runtime_grants_bp
+    from api.agent_runtime_interactions import agent_runtime_interactions_bp
+    from api.agent_runtime_mgmt import agent_runtime_mgmt_bp
+    from api.agent_runtime_monitor import agent_runtime_monitor_bp
+    from api.agent_runtime_notifications import agent_runtime_notifications_bp
+    from api.agent_interaction_governance import agent_interaction_governance_bp
+    from api.agent_approval_queue import approval_queue_bp
+    from api.agent_automation import agent_automation_bp
+    from api.channels import channels_bp
+    from api.organization_agent_members import organization_agent_members_bp
+    from api.task_logs import task_logs_bp
+    from api.agent_workspace_insights import agent_workspace_insights_bp
+    from api.notifications import notifications_bp
+    from api.agent_role_templates import agent_role_templates_bp
+    from api.agent_teams import agent_teams_bp
+    from api.agent_team_orchestration import agent_team_orchestration_bp
+    from api.agent_analytics import agent_analytics_bp
+    from api.ai_task_assistant import ai_task_assistant_bp
+    from api.ai_task_split import ai_task_split_bp
+    from api.admin_ai_config import admin_ai_config_bp
+    from api.openai_compatible import openai_bp
+    from api.agent_audit import audit_bp
+    from api.agent_governance_rules import gov_rules_bp
+    from api.agent_performance import perf_bp
+    from api.github_proxy import github_proxy_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
     app.register_blueprint(tasks_bp, url_prefix='/todo-for-ai/api/v1/tasks')
     app.register_blueprint(context_rules_bp, url_prefix='/todo-for-ai/api/v1/context-rules')
     app.register_blueprint(tokens_bp, url_prefix='/todo-for-ai/api/v1/tokens')
-    app.register_blueprint(mcp_bp, url_prefix='/todo-for-ai/api/v1/mcp')
+    if mcp_bp is not None:
+        app.register_blueprint(mcp_bp, url_prefix='/todo-for-ai/api/v1/mcp')
     app.register_blueprint(docs_bp, url_prefix='/todo-for-ai/api/v1/docs')
     app.register_blueprint(pins_bp, url_prefix='/todo-for-ai/api/v1/pins')
     app.register_blueprint(dashboard_bp, url_prefix='/todo-for-ai/api/v1/dashboard')
+    app.register_blueprint(users_bp, url_prefix='/todo-for-ai/api/v1/users')
     app.register_blueprint(user_settings_bp, url_prefix='/todo-for-ai/api/v1/user-settings')
+    app.register_blueprint(system_settings_bp, url_prefix='/todo-for-ai/api/v1/system-settings')
     app.register_blueprint(api_tokens_bp, url_prefix='/todo-for-ai/api/v1/api-tokens')
     app.register_blueprint(custom_prompts_bp, url_prefix='/todo-for-ai/api/v1/custom-prompts')
     app.register_blueprint(agents_bp, url_prefix='/todo-for-ai/api/v1/agents')
     app.register_blueprint(sse_bp, url_prefix='/todo-for-ai/api/v1/sse')
+    app.register_blueprint(organizations_bp, url_prefix='/todo-for-ai/api/v1/organizations')
+    app.register_blueprint(task_labels_bp, url_prefix='/todo-for-ai/api/v1/task-labels')
+    app.register_blueprint(agent_workspace_agents_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_keys_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_soul_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_secrets_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_auth_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_pull_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_commit_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_grants_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_interactions_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_mgmt_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_monitor_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_notifications_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_interaction_governance_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(approval_queue_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_automation_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(channels_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(organization_agent_members_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(task_logs_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_workspace_insights_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(notifications_bp, url_prefix='/todo-for-ai/api/v1/notifications')
+    app.register_blueprint(agent_role_templates_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_teams_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_team_orchestration_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_analytics_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(ai_task_assistant_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(ai_task_split_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(admin_ai_config_bp, url_prefix='/todo-for-ai/api/v1/admin/ai-config')
+    app.register_blueprint(openai_bp, url_prefix='/v1')
+    app.register_blueprint(audit_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(gov_rules_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(perf_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(github_proxy_bp, url_prefix='/todo-for-ai/api/v1')
 
 
 
@@ -184,12 +295,67 @@ def register_commands(app):
         print('Database reset.')
 
 
-# 创建应用实例
-app = create_app()
+def _prewarm_dashboard_cache_on_startup(flask_app):
+    """启动后异步预热 dashboard 缓存，降低首个用户请求冷启动耗时"""
+    with flask_app.app_context():
+        try:
+            from models import User, UserStatus
+            from api.dashboard import (
+                _build_dashboard_stats,
+                _dashboard_cache_set,
+                DASHBOARD_STATS_CACHE_TTL_SECONDS,
+                DASHBOARD_STATS_STALE_TTL_SECONDS,
+            )
 
-# 在应用启动时创建数据库表
-with app.app_context():
-    db.create_all()
+            prewarm_users = int(os.environ.get('DASHBOARD_PREWARM_USERS', '3'))
+            active_users = User.query.filter(
+                User.status == UserStatus.ACTIVE
+            ).order_by(
+                User.last_active_at.desc(),
+                User.id.desc()
+            ).limit(
+                prewarm_users
+            ).all()
+
+            for user in active_users:
+                cache_key = f"user:{user.id}:stats:v2"
+                data = _build_dashboard_stats(user.id)
+                _dashboard_cache_set(
+                    cache_key,
+                    data,
+                    DASHBOARD_STATS_CACHE_TTL_SECONDS,
+                    DASHBOARD_STATS_STALE_TTL_SECONDS
+                )
+            flask_app.logger.info(f"Dashboard cache prewarm finished for {len(active_users)} users")
+        except Exception as e:
+            flask_app.logger.warning(f"Dashboard cache prewarm failed: {e}")
+
+
+def start_dashboard_cache_prewarm(flask_app):
+    """根据开关启动 dashboard 预热线程"""
+    enabled = os.environ.get('DASHBOARD_PREWARM_ON_STARTUP', 'true').lower() == 'true'
+    if not enabled:
+        return
+    blocking = os.environ.get('DASHBOARD_PREWARM_BLOCKING', 'false').lower() == 'true'
+    if blocking:
+        _prewarm_dashboard_cache_on_startup(flask_app)
+        return
+    thread = threading.Thread(
+        target=_prewarm_dashboard_cache_on_startup,
+        args=(flask_app,),
+        daemon=True
+    )
+    thread.start()
+
+
+# 创建应用实例 (只在非测试模式下自动创建)
+if os.environ.get('FLASK_ENV') != 'testing':
+    app = create_app()
+
+    # 在应用启动时创建数据库表
+    with app.app_context():
+        db.create_all()
+        start_dashboard_cache_prewarm(app)
     print('✅ 数据库表已创建/更新')
 
 # Start the built-in orchestrator scheduler if enabled (ORCHESTRATOR_ENABLED=true)
@@ -211,4 +377,4 @@ if __name__ == '__main__':
     print(f"🗄️ 数据库: {app.config['SQLALCHEMY_DATABASE_URI']}")
     print(f"🔧 环境: {app.config.get('ENV', 'development')}")
     
-    app.run(host=host, port=port, debug=app.config['DEBUG'])
+    socketio.run(app, host=host, port=port, debug=app.config['DEBUG'], use_reloader=False, allow_unsafe_werkzeug=True)

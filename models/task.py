@@ -66,6 +66,11 @@ class Task(BaseModel):
     tags = Column(JSON, comment='任务标签 (JSON数组)')
     required_capabilities = Column(JSON, comment='Agent 能力要求 (JSON数组, 如 ["code_review","testing"])')
     related_files = Column(JSON, comment='任务相关的文件列表 (JSON数组)')
+    assignees = Column(JSON, comment='任务指派对象列表 (JSON数组)')
+    mentions = Column(JSON, comment='任务提及对象列表 (JSON数组)')
+    blocking_task_ids = Column(JSON, default=list, comment='被此任务阻塞的任务ID列表')
+    blocked_by_task_ids = Column(JSON, default=list, comment='阻塞此任务的任务ID列表')
+    revision = Column(Integer, nullable=False, default=1, comment='任务乐观锁版本号')
     is_ai_task = Column(Boolean, default=True, comment='是否是分配给AI的任务')
     creator_type = Column(String(20), default='human', comment='创建者类型: human, ai')
     creator_identifier = Column(String(100), comment='创建者标识符 (AI的标识或用户ID)')
@@ -92,6 +97,12 @@ class Task(BaseModel):
         cascade='all, delete-orphan',
         lazy='dynamic'
     )
+    logs = relationship(
+        'TaskLog',
+        back_populates='task',
+        cascade='all, delete-orphan',
+        lazy='dynamic'
+    )
     
     def __repr__(self):
         return f'<Task {self.id}: {self.title[:50]}>'
@@ -103,13 +114,16 @@ class Task(BaseModel):
         result['priority'] = self.priority.value if self.priority else None
         result['tags'] = self.tags or []
         result['required_capabilities'] = self.required_capabilities or []
-        
+        result['assignees'] = self.assignees or []
+        result['mentions'] = self.mentions or []
+        result['blocking_task_ids'] = self.blocking_task_ids or []
+        result['blocked_by_task_ids'] = self.blocked_by_task_ids or []
         # 格式化时间字段
         if self.due_date:
             result['due_date'] = self.due_date.isoformat()
         if self.completed_at:
             result['completed_at'] = self.completed_at.isoformat()
-        
+
         # 包含项目信息
         if include_project and self.project:
             result['project'] = {
@@ -117,7 +131,7 @@ class Task(BaseModel):
                 'name': self.project.name,
                 'color': self.project.color
             }
-        
+
         # 包含统计信息
         if include_stats:
             result['stats'] = {
@@ -131,7 +145,54 @@ class Task(BaseModel):
         result['subtask_count'] = self.subtasks.count()
         result['subtask_done_count'] = self.subtasks.filter_by(status=TaskStatus.DONE).count()
 
+        # Resolve agent info for AI-created tasks
+        if self.creator_type == 'ai' and self.creator_identifier:
+            agent_info = self._resolve_creator_agent()
+            if agent_info:
+                result['creator_agent'] = agent_info
+
         return result
+
+    def _resolve_creator_agent(self):
+        """Try to resolve the Agent record that created this task.
+
+        Looks up by integer agent_id (if creator_identifier is numeric) or by
+        name match. Returns a small dict with id/name or None.
+        """
+        from models import db as _db
+        try:
+            from models import Agent
+        except Exception:
+            return None
+
+        identifier = (self.creator_identifier or '').strip()
+        if not identifier:
+            return None
+
+        agent = None
+
+        # Try as integer agent id first
+        try:
+            agent_id = int(identifier)
+            agent = _db.session.get(Agent, agent_id)
+        except (ValueError, TypeError):
+            pass
+
+        # Fall back to name match
+        if not agent:
+            agent = (
+                Agent.query
+                .filter(Agent.name == identifier)
+                .first()
+            )
+
+        if not agent:
+            return None
+
+        return {
+            'id': agent.id,
+            'name': agent.display_name or agent.name,
+        }
     
     @property
     def is_completed(self):

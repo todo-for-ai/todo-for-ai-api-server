@@ -27,16 +27,17 @@ def load_env_files():
         else:
             print(f"⚠️  指定的环境变量文件不存在: {env_file_path}")
 
-    # 检查是否在Docker环境中（通过检查特定环境变量）
-    if os.environ.get('DOCKER_ENV') == 'true' or os.environ.get('DATABASE_URL'):
+    # Docker 环境：优先使用注入环境变量，不从项目根目录加载 .env
+    if os.environ.get('DOCKER_ENV') == 'true':
         print("🐳 Docker环境检测到，使用环境变量配置")
         return "environment_variables"
 
     # 本地启动：读取根目录.env
     root_env = os.path.join(project_root, '.env')
     if os.path.exists(root_env):
-        print(f"📄 本地启动 - 加载环境变量: {root_env}")
-        load_dotenv(root_env)
+        print(f"📄 本地启动 - 加载环境变量(覆盖旧值): {root_env}")
+        # 本地开发常见场景是 shell 中遗留了旧 DATABASE_URL，这里强制以项目 .env 为准
+        load_dotenv(root_env, override=True)
         return root_env
     else:
         print("⚠️  未找到环境变量文件，使用默认配置")
@@ -87,6 +88,17 @@ class Config:
     JWT_ACCESS_TOKEN_EXPIRES = 86400  # 1 day (24 hours)
     JWT_REFRESH_TOKEN_EXPIRES = 2592000  # 30 days (1 month)
 
+    # Redis 配置（默认本地启动无密码）
+    REDIS_ENABLED = os.environ.get('REDIS_ENABLED', 'true').lower() == 'true'
+    REDIS_HOST = os.environ.get('REDIS_HOST', '127.0.0.1')
+    REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
+    REDIS_DB = int(os.environ.get('REDIS_DB', 0))
+    REDIS_PASSWORD = os.environ.get('REDIS_PASSWORD') or None
+    REDIS_URL = os.environ.get('REDIS_URL') or (
+        f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+        if REDIS_PASSWORD is None else
+        f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+    )
 
     
 
@@ -115,15 +127,19 @@ class Config:
 class DevelopmentConfig(Config):
     """开发环境配置"""
     DEBUG = True
-    SQLALCHEMY_ECHO = True  # 打印 SQL 语句
+    SQLALCHEMY_ECHO = False  # 关闭 SQL 打印，避免日志膨胀
 
 
 class TestingConfig(Config):
     """测试环境配置"""
     TESTING = True
     SQLALCHEMY_DATABASE_URI = os.environ.get('TEST_DATABASE_URL') or \
-        'mysql+pymysql://root:password@localhost:3306/todo_for_ai_test'
+        'sqlite:///:memory:'
     WTF_CSRF_ENABLED = False
+    # Override engine options for SQLite compatibility
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'pool_pre_ping': True,
+    }
 
 
 class ProductionConfig(Config):

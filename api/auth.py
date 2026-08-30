@@ -6,15 +6,140 @@
 
 import os
 import secrets
+from datetime import datetime
+from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 from flask import Blueprint, request, jsonify, redirect, url_for, session
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from models import db, User
+from models import (
+    db,
+    User,
+    Organization,
+    OrganizationMember,
+    OrganizationMemberStatus,
+    OrganizationMemberRole,
+    OrganizationRoleDefinition,
+)
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
 from core.github_config import github_service, require_auth, get_current_user
 from core.google_config import google_service
 
 # 创建蓝图
 auth_bp = Blueprint('auth', __name__)
+
+def _normalize_local_loopback_url(url: str) -> str:
+    """在本地开发场景下统一回环地址，减少 localhost 解析抖动。"""
+    if not url:
+        return url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+
+    # 仅处理本地 localhost，避免影响生产域名与外部地址
+    if parsed.hostname != 'localhost':
+        return url
+
+    netloc = parsed.netloc
+    if '@' in netloc:
+        userinfo, hostport = netloc.rsplit('@', 1)
+        hostport = hostport.replace('localhost', '127.0.0.1', 1)
+        netloc = f'{userinfo}@{hostport}'
+    else:
+        netloc = netloc.replace('localhost', '127.0.0.1', 1)
+
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _normalize_return_to(return_to: str, frontend_base: str) -> str:
+    """规范化登录后回跳地址，优先保留用户当前前端域名。"""
+    frontend_base = _normalize_local_loopback_url(frontend_base)
+
+    if not return_to:
+        return f'{frontend_base}/todo-for-ai/pages/dashboard'
+
+    # 相对路径 -> 当前前端域名
+    if return_to.startswith('/'):
+        return f'{frontend_base}{return_to}'
+
+    # 显式URL：仅当它指向后端地址时，替换到前端地址
+    if return_to.startswith('http://') or return_to.startswith('https://'):
+        return_to = _normalize_local_loopback_url(return_to)
+        if 'localhost:50110' in return_to:
+            return return_to.replace('http://localhost:50110', frontend_base)
+        if '127.0.0.1:50110' in return_to:
+            return return_to.replace('http://127.0.0.1:50110', frontend_base)
+        if '/todo-for-ai/api/v1' in return_to:
+            return return_to.replace('/todo-for-ai/api/v1', '/todo-for-ai/pages')
+        return return_to
+
+    return f'{frontend_base}/todo-for-ai/pages/dashboard'
+
+
+def _append_query_params(url: str, params: dict) -> str:
+    """Append params to URL while preserving existing query parameters."""
+    parsed = urlparse(url)
+    existing = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    existing.update(params)
+    query = urlencode(existing)
+    return urlunparse(parsed._replace(query=query))
+
+
+def _collect_accessible_org_ids(user_id: int) -> set:
+    """收集用户可访问组织（owner 或 active member）。"""
+    owner_ids = {
+        row.id for row in db.session.query(Organization.id).filter(Organization.owner_id == user_id).all()
+    }
+    member_ids = {
+        row.organization_id
+        for row in db.session.query(OrganizationMember.organization_id).filter(
+            OrganizationMember.user_id == user_id,
+            OrganizationMember.status == OrganizationMemberStatus.ACTIVE,
+        ).all()
+    }
+    return owner_ids | member_ids
+
+
+def _collect_user_org_role_keys(organization: Organization, user_id: int) -> list:
+    """获取用户在组织中的角色键（兼容 owner + 旧 role 字段）。"""
+    if organization.owner_id == user_id:
+        return ['owner']
+
+    member = OrganizationMember.query.filter(
+        OrganizationMember.organization_id == organization.id,
+        OrganizationMember.user_id == user_id,
+        OrganizationMember.status == OrganizationMemberStatus.ACTIVE,
+    ).first()
+    if not member:
+        return []
+
+    role_rows = (
+        db.session.query(OrganizationRoleDefinition.key)
+        .join(OrganizationMemberRole, OrganizationMemberRole.role_id == OrganizationRoleDefinition.id)
+        .filter(
+            OrganizationMemberRole.member_id == member.id,
+            OrganizationRoleDefinition.is_active.is_(True),
+        )
+        .all()
+    )
+
+    role_keys = []
+    seen = set()
+    for row in role_rows:
+        key = str(row.key or '').strip().lower()
+        if key and key not in seen:
+            role_keys.append(key)
+            seen.add(key)
+
+    if role_keys:
+        return role_keys
+
+    # 兼容尚未迁移到 organization_member_roles 的旧数据
+    if member.role:
+        legacy_role = member.role.value if hasattr(member.role, 'value') else str(member.role)
+        legacy_role = str(legacy_role or '').strip().lower()
+        if legacy_role:
+            return [legacy_role]
+    return []
 
 
 @auth_bp.route('/login', methods=['GET'])
@@ -36,26 +161,14 @@ def github_login():
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/callback'
-            frontend_base = 'http://localhost:50111'
+            frontend_base = request.headers.get('Origin') or 'http://localhost:50111'
 
         redirect_uri = request.args.get('redirect_uri', default_redirect_uri)
 
         # 存储原始重定向URL，确保重定向到前端dashboard
         return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
 
-        # 如果是相对路径，转换为前端完整URL
-        if return_to.startswith('/'):
-            return_to = f'{frontend_base}{return_to}'
-        # 如果是后端URL，替换为前端URL
-        elif 'localhost:50110' in return_to or 'todo4ai.org' in return_to:
-            # 统一替换为当前环境的前端地址
-            if return_to.startswith('http://localhost:50110'):
-                return_to = return_to.replace('http://localhost:50110', frontend_base)
-            elif return_to.startswith('https://todo4ai.org/todo-for-ai/api'):
-                return_to = return_to.replace('https://todo4ai.org/todo-for-ai/api/v1', frontend_base + '/todo-for-ai/pages')
-        # 如果没有指定，默认到dashboard
-        elif not (frontend_base in return_to):
-            return_to = f'{frontend_base}/todo-for-ai/pages/dashboard'
+        return_to = _normalize_return_to(return_to, frontend_base)
 
         session['redirect_after_login'] = return_to
         session['auth_provider'] = 'github'
@@ -80,32 +193,71 @@ def google_login():
         else:
             # 开发环境使用localhost
             default_redirect_uri = 'http://localhost:50110/todo-for-ai/api/v1/auth/google/callback'
-            frontend_base = 'http://localhost:50111'
+            frontend_base = request.headers.get('Origin') or 'http://localhost:50111'
 
         redirect_uri = request.args.get('redirect_uri', default_redirect_uri)
 
         # 存储原始重定向URL，确保重定向到前端dashboard
         return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
 
-        # 如果是相对路径，转换为前端完整URL
-        if return_to.startswith('/'):
-            return_to = f'{frontend_base}{return_to}'
-        # 如果是后端URL，替换为前端URL
-        elif 'localhost:50110' in return_to or 'todo4ai.org' in return_to:
-            # 统一替换为当前环境的前端地址
-            if return_to.startswith('http://localhost:50110'):
-                return_to = return_to.replace('http://localhost:50110', frontend_base)
-            elif return_to.startswith('https://todo4ai.org/todo-for-ai/api'):
-                return_to = return_to.replace('https://todo4ai.org/todo-for-ai/api/v1', frontend_base + '/todo-for-ai/pages')
-        # 如果没有指定，默认到dashboard
-        elif not (frontend_base in return_to):
-            return_to = f'{frontend_base}/todo-for-ai/pages/dashboard'
+        return_to = _normalize_return_to(return_to, frontend_base)
 
         session['redirect_after_login'] = return_to
         session['auth_provider'] = 'google'
 
         # 重定向到Google登录页面
         return google_service.oauth.google.authorize_redirect(redirect_uri)
+
+    except Exception as e:
+        return handle_api_error(e)
+
+
+@auth_bp.route('/login/guest', methods=['GET'])
+def guest_login():
+    """游客模式登录：创建/复用本地游客账号并签发JWT"""
+    try:
+        # 根据环境确定前端地址
+        is_docker = os.environ.get('DOCKER_ENV') == 'true'
+        frontend_base = 'https://todo4ai.org' if is_docker else (request.headers.get('Origin') or 'http://127.0.0.1:50111')
+
+        # return_to 兼容相对路径与错误域名
+        return_to = request.args.get('return_to', '/todo-for-ai/pages/dashboard')
+        return_to = _normalize_return_to(return_to, frontend_base)
+
+        guest_email = os.environ.get('GUEST_EMAIL', 'guest@todo4ai.local')
+        user = User.query.filter_by(email=guest_email).first()
+
+        # 首次登录时创建游客账户
+        if not user:
+            guest_id = f"guest-{secrets.token_hex(8)}"
+            user = User(
+                email=guest_email,
+                email_verified=False,
+                username='guest',
+                name='Guest User',
+                nickname='Guest',
+                provider='guest',
+                provider_user_id=guest_id,
+                last_login=datetime.utcnow(),
+                last_active_at=datetime.utcnow(),
+            )
+            db.session.add(user)
+            db.session.commit()
+        else:
+            user.last_login = datetime.utcnow()
+            user.last_active_at = datetime.utcnow()
+            user.save()
+
+        tokens = github_service.generate_tokens(user)
+        if not tokens:
+            return ApiResponse.error("Failed to generate guest tokens", 500).to_response()
+
+        params = {
+            'access_token': tokens['access_token'],
+            'refresh_token': tokens['refresh_token'],
+            'token_type': tokens['token_type']
+        }
+        return redirect(_append_query_params(return_to, params))
 
     except Exception as e:
         return handle_api_error(e)
@@ -144,18 +296,16 @@ def github_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
+        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
-        import urllib.parse
         params = {
             'access_token': tokens['access_token'],
             'refresh_token': tokens['refresh_token'],
             'token_type': tokens['token_type']
         }
-        query_string = urllib.parse.urlencode(params)
-        return redirect(f"{redirect_url}?{query_string}")
+        return redirect(_append_query_params(redirect_url, params))
 
     except Exception as e:
         return handle_api_error(e)
@@ -188,18 +338,16 @@ def google_callback():
 
         # 获取重定向URL，默认到dashboard - 根据环境动态设置
         is_docker = os.environ.get('DOCKER_ENV') == 'true'
-        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://localhost:50111/todo-for-ai/pages/dashboard'
+        default_dashboard = 'https://todo4ai.org/todo-for-ai/pages/dashboard' if is_docker else 'http://127.0.0.1:50111/todo-for-ai/pages/dashboard'
         redirect_url = session.pop('redirect_after_login', default_dashboard)
 
         # 重定向到前端，并在URL中包含令牌（包括access_token和refresh_token）
-        import urllib.parse
         params = {
             'access_token': tokens['access_token'],
             'refresh_token': tokens['refresh_token'],
             'token_type': tokens['token_type']
         }
-        query_string = urllib.parse.urlencode(params)
-        return redirect(f"{redirect_url}?{query_string}")
+        return redirect(_append_query_params(redirect_url, params))
 
     except Exception as e:
         return handle_api_error(e)
@@ -218,7 +366,7 @@ def logout():
         current_user.save()
 
         # 简单的登出响应（不再使用Auth0）
-        return_to = request.json.get('return_to', 'http://localhost:50111/todo-for-ai/pages')
+        return_to = request.json.get('return_to', 'http://127.0.0.1:50111/todo-for-ai/pages')
 
         return ApiResponse.success({
             'message': 'Logout successful',
@@ -265,9 +413,14 @@ def update_current_user():
         
         # 处理偏好设置
         if 'preferences' in data:
-            if not current_user.preferences:
-                current_user.preferences = {}
-            current_user.preferences.update(data['preferences'])
+            incoming_preferences = data.get('preferences') or {}
+            if not isinstance(incoming_preferences, dict):
+                return ApiResponse.error("preferences must be an object", 400).to_response()
+
+            # JSON字段需要重新赋值，避免原地update导致ORM变更检测失效
+            merged_preferences = dict(current_user.preferences or {})
+            merged_preferences.update(incoming_preferences)
+            current_user.preferences = merged_preferences
         
         current_user.save()
         
@@ -390,16 +543,57 @@ def get_user(user_id):
     """获取指定用户信息"""
     try:
         current_user = get_current_user()
-        
-        # 只有管理员或用户本人可以查看详细信息
-        if not current_user.is_admin() and current_user.id != user_id:
-            return ApiResponse.error("Access denied", 403).to_response()
-        
+
         user = User.query.get(user_id)
         if not user:
             return ApiResponse.error("User not found", 404).to_response()
-        
-        return ApiResponse.success(user.to_dict(), "User information retrieved successfully").to_response()
+
+        # 管理员或用户本人：完整视图
+        if current_user.is_admin() or current_user.id == user_id:
+            payload = user.to_dict()
+            payload['is_self'] = current_user.id == user_id
+            payload['view_mode'] = 'self' if current_user.id == user_id else 'admin'
+            payload['shared_organization_count'] = 0
+            payload['shared_organizations'] = []
+            return ApiResponse.success(payload, "User information retrieved successfully").to_response()
+
+        # 其他用户：仅允许查看共享组织内成员的公开档案
+        viewer_org_ids = _collect_accessible_org_ids(current_user.id)
+        target_org_ids = _collect_accessible_org_ids(user_id)
+        shared_org_ids = viewer_org_ids.intersection(target_org_ids)
+        if not shared_org_ids:
+            return ApiResponse.error("Access denied", 403).to_response()
+
+        shared_orgs = (
+            Organization.query
+            .filter(Organization.id.in_(shared_org_ids))
+            .order_by(Organization.name.asc())
+            .all()
+        )
+
+        shared_organizations = []
+        for org in shared_orgs:
+            shared_organizations.append({
+                'id': org.id,
+                'name': org.name,
+                'slug': org.slug,
+                'status': org.status.value if org.status else None,
+                'target_roles': _collect_user_org_role_keys(org, user_id),
+                'viewer_roles': _collect_user_org_role_keys(org, current_user.id),
+            })
+
+        payload = user.to_public_dict()
+        payload['name'] = user.name
+        payload['timezone'] = user.timezone
+        payload['locale'] = user.locale
+        payload['last_active_at'] = user.last_active_at.isoformat() if user.last_active_at else None
+        payload['updated_at'] = user.updated_at.isoformat() if user.updated_at else None
+        payload['is_self'] = False
+        payload['view_mode'] = 'public'
+        payload['shared_organization_count'] = len(shared_organizations)
+        payload['shared_organizations'] = shared_organizations
+
+        return ApiResponse.success(payload, "User public profile retrieved successfully").to_response()
         
     except Exception as e:
         return handle_api_error(e)

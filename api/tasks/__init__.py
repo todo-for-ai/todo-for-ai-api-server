@@ -1,16 +1,19 @@
-"""
-Tasks API blueprint package.
-
-CRUD routes live in ``crud`` and analytics routes in ``task_analytics``;
-each imports ``tasks_bp`` from this package and registers its own routes
-as an import side-effect.
-"""
+"""Tasks API package."""
 
 from flask import Blueprint
 
-tasks_bp = Blueprint("tasks", __name__)
+from .constants import tasks_list_fallback_cache
 
-# ── Submodule imports (side-effect: registers routes on tasks_bp) ──
-from . import crud  # noqa: E402,F401
-from . import task_analytics  # noqa: E402,F401
-from . import task_completion  # noqa: E402,F401
+tasks_bp = Blueprint('tasks', __name__)
+
+# Ensure route decorators register on blueprint import.
+from . import routes_tasks  # noqa: E402,F401
+from . import routes_attachments  # noqa: E402,F401
+from . import routes_batch  # noqa: E402,F401
+from . import routes_chat  # noqa: E402,F401
+from . import routes_delegation  # noqa: E402,F401
+from . import routes_review  # noqa: E402,F401
+from . import routes_agent_chat  # noqa: E402,F401
+from . import routes_help_request  # noqa: E402,F401
+
+__all__ = ['tasks_bp', 'tasks_list_fallback_cache']

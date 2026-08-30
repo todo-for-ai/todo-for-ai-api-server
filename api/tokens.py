@@ -207,7 +207,7 @@ def reveal_token(token_id):
 @tokens_bp.route('/<int:token_id>', methods=['DELETE'])
 @unified_auth_required
 def delete_token(token_id):
-    """删除（停用）Token"""
+    """删除Token"""
     try:
         user_id = g.current_user.id
 
@@ -222,11 +222,12 @@ def delete_token(token_id):
                 'error': 'Token not found'
             }), 404
 
-        # 软删除（设置为非活跃状态）
-        api_token.deactivate()
+        # 物理删除
+        db.session.delete(api_token)
+        db.session.commit()
 
         return jsonify({
-            'message': 'Token deactivated successfully'
+            'message': 'Token deleted successfully'
         })
 
     except Exception as e:
