@@ -262,3 +262,88 @@ class TestGitHubClientUnit:
 
         b = ProjectRepoBinding(repo_owner="acme", repo_name="widget")
         assert b.repo_full_name == "acme/widget"
+
+
+class TestTaskPullRequestMerge:
+    """人工审批动作：合并 PR（P1.5 MVP）。"""
+
+    def _setup_pr_task(self, client, db_session, owner_auth, owned_project, project_factory, task_factory):
+        from models import TaskEvidenceRecord
+
+        client.put(
+            f"{BASE_URL}/projects/{owned_project.id}/repo",
+            json={"repo_owner": "acme", "repo_name": "widget"},
+            headers=owner_auth["headers"],
+        )
+        task = task_factory(
+            project_id=owned_project.id,
+            owner_id=owner_auth["user"].id,
+            title="Merge approval task",
+            is_ai_task=True,
+        )
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="pr", status="unknown",
+            summary="PR #9", detail={"pr_number": 9}, created_by="test",
+        ))
+        db_session.commit()
+        db_session.expire(task)
+        return task
+
+    def test_merge_success_completes_task_and_audits(
+        self, client, db_session, owner_auth, owned_project, project_factory, task_factory
+    ):
+        from models import AuditLog, Task
+
+        task = self._setup_pr_task(client, db_session, owner_auth, owned_project, project_factory, task_factory)
+
+        fake_client = MagicMock()
+        fake_client.merge_pull_request.return_value = {"sha": "mergedsha1", "merged": True}
+        fake_client.get_pull_request.return_value = _pr_data(number=9, state="closed", merged=True)
+
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.post(
+                f"{BASE_URL}/tasks/{task.id}/pull-request/merge",
+                json={"merge_method": "squash"},
+                headers=owner_auth["headers"],
+            )
+
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["merged"] is True
+        assert data["task_status"] == "done"
+
+        db_session.expire(task)
+        assert task.status.value == "done"
+        audit = AuditLog.query.filter_by(action="task.pr_merged", resource_id=task.id).first()
+        assert audit is not None
+        assert audit.detail["merge_method"] == "squash"
+
+    def test_merge_requires_manage_permission(
+        self, client, db_session, owner_auth, user_factory, owned_project, project_factory, task_factory
+    ):
+        from models import TaskEvidenceRecord
+
+        project = project_factory(owner_id=user_factory().id)
+        task = task_factory(project_id=project.id, title="Not mine")
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="pr", status="unknown", detail={"pr_number": 3}, created_by="test",
+        ))
+        db_session.commit()
+
+        resp = client.post(
+            f"{BASE_URL}/tasks/{task.id}/pull-request/merge",
+            json={},
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 403
+
+    def test_merge_invalid_method_rejected(
+        self, client, db_session, owner_auth, owned_project, project_factory, task_factory
+    ):
+        task = self._setup_pr_task(client, db_session, owner_auth, owned_project, project_factory, task_factory)
+        resp = client.post(
+            f"{BASE_URL}/tasks/{task.id}/pull-request/merge",
+            json={"merge_method": "force-push"},
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 400

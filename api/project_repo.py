@@ -9,7 +9,7 @@
 
 from flask import Blueprint
 
-from models import db, Project, Task, TaskEvidenceRecord, ProjectRepoBinding
+from models import AuditLog, db, Project, Task, TaskEvidenceRecord, ProjectRepoBinding
 from core.auth import unified_auth_required, get_current_user
 from core.secret_encryption import get_secret_encryption
 from .base import ApiResponse, validate_json_request
@@ -313,3 +313,87 @@ def get_task_pull_request(task_id: int):
     except Exception as e:
         db.session.rollback()
         return ApiResponse.error(f"Failed to sync pull request: {e}", 500).to_response()
+
+
+@project_repo_bp.route('/tasks/<int:task_id>/pull-request/merge', methods=['POST'])
+@unified_auth_required
+def merge_task_pull_request(task_id: int):
+    """人工审批动作：合并任务关联的 PR（合并后任务自动完成）。
+
+    仅项目管理权限（can_manage_project）可调用；合并行为写入 AuditLog。
+    body: {merge_method?: 'merge'|'squash'|'rebase'}
+    """
+    try:
+        task, binding, err = _ensure_task_access(task_id, manage=True)
+        if err:
+            return err
+        if not binding:
+            return ApiResponse.error(
+                "Project has no repo bound", 404, error_details={"code": "NO_REPO_BOUND"},
+            ).to_response()
+
+        pr_evidence = (
+            TaskEvidenceRecord.query
+            .filter_by(task_id=task.id, evidence_type='pr')
+            .order_by(TaskEvidenceRecord.id.desc())
+            .first()
+        )
+        pr_number = (pr_evidence.detail or {}).get('pr_number') if pr_evidence else None
+        if not pr_number:
+            return ApiResponse.error(
+                "No pull request associated with this task", 404,
+                error_details={"code": "NO_PR"},
+            ).to_response()
+
+        data = validate_json_request(optional_fields=['merge_method'])
+        if isinstance(data, tuple):
+            return data
+        merge_method = (data.get('merge_method') or 'merge').strip().lower()
+        if merge_method not in ('merge', 'squash', 'rebase'):
+            return ApiResponse.error("merge_method must be merge|squash|rebase", 400).to_response()
+
+        current_user = get_current_user()
+        client = GitHubClient(resolve_token(binding))
+        merge_result = client.merge_pull_request(binding.repo_owner, binding.repo_name, pr_number, merge_method)
+        pr_data = client.get_pull_request(binding.repo_owner, binding.repo_name, pr_number)
+        _upsert_pr_evidence(task, binding, pr_data, created_by=f'user:{current_user.id}')
+
+        from datetime import datetime
+        from models import TaskStatus
+        if task.status and task.status.value != 'done':
+            task.status = TaskStatus.DONE
+            task.completed_at = datetime.utcnow()
+            task.completion_rate = 100
+
+        AuditLog.record(
+            action='task.pr_merged',
+            resource_type='task',
+            resource_id=task.id,
+            actor_type='human',
+            actor_user_id=current_user.id,
+            project_id=task.project_id,
+            detail={
+                'repo': binding.repo_full_name,
+                'pr_number': pr_number,
+                'merge_method': merge_method,
+                'merge_commit_sha': merge_result.get('sha'),
+            },
+        )
+
+        db.session.commit()
+
+        return ApiResponse.success(data={
+            'merged': True,
+            'task_status': task.status.value if task.status else None,
+            'pr': {
+                'number': pr_number,
+                'url': pr_data.get('html_url'),
+                'merge_commit_sha': merge_result.get('sha'),
+            },
+        }, message='Pull request merged').to_response()
+    except GitHubClientError as e:
+        db.session.rollback()
+        return ApiResponse.error(str(e), e.status_code if e.status_code < 500 else 502).to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to merge pull request: {e}", 500).to_response()
