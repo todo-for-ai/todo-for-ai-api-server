@@ -11,7 +11,7 @@ class AgentTaskEvent(BaseModel):
 
     task_id = Column(BigInteger, ForeignKey('tasks.id'), nullable=False, index=True, comment='任务ID')
     attempt_id = Column(String(64), nullable=False, index=True, comment='Attempt ID')
-    agent_id = Column(Integer, ForeignKey('agents.id'), nullable=False, index=True, comment='Agent ID')
+    agent_id = Column(Integer, ForeignKey('agents.id'), nullable=True, index=True, comment='Agent ID（平台/系统发起的审批事件可为空）')
     workspace_id = Column(Integer, ForeignKey('organizations.id'), nullable=False, index=True, comment='工作区ID')
 
     event_type = Column(String(32), nullable=False, index=True, comment='事件类型')

@@ -9,7 +9,9 @@
 
 from flask import Blueprint
 
-from models import AuditLog, db, Project, Task, TaskEvidenceRecord, ProjectRepoBinding
+import uuid
+
+from models import AgentTaskEvent, AuditLog, db, Project, Task, TaskEvidenceRecord, ProjectRepoBinding
 from core.auth import unified_auth_required, get_current_user
 from core.secret_encryption import get_secret_encryption
 from .base import ApiResponse, validate_json_request
@@ -20,6 +22,126 @@ from services.github_client import (
 )
 
 project_repo_bp = Blueprint('project_repo', __name__)
+
+INTERACTION_REQUEST_EVENT_TYPE = 'interaction_request'
+INTERACTION_APPROVAL_EVENT_TYPE = 'interaction_approval'
+
+# 自主等级
+AUTONOMY_L0_APPROVE_ALL = 0
+AUTONOMY_L1_AUTO_PR = 1
+AUTONOMY_L2_AUTO_MERGE = 2
+
+# 需要证据通过的 DoD 类型（pr/manual 由人工/平台核验）
+EXECUTABLE_EVIDENCE_TYPES = ('test', 'build', 'lint', 'command')
+
+
+def _new_interaction_id():
+    return f"prx-{uuid.uuid4().hex[:12]}"
+
+
+def _emit_pr_interaction_event(
+    task: Task,
+    *,
+    interaction_id: str,
+    interaction_type: str,
+    status: str,
+    decision: str = None,
+    reviewer=None,
+    pr_number: int = None,
+    repo_full_name: str = None,
+    extra: dict = None,
+):
+    """把 PR 创建/合并审批写入 AgentTaskEvent 交互流（与 agent_approval_queue 兼容）。
+
+    请求事件 event_type=interaction_request；决策事件 event_type=interaction_approval。
+    项目不属于任何组织（workspace 缺失）时返回 None，调用方回退权限门行为。
+    """
+    from datetime import datetime
+
+    project = task.project
+    workspace_id = project.organization_id if project else None
+    if not workspace_id:
+        return None
+
+    agent_id = (
+        db.session.query(TaskEvidenceRecord.agent_id)
+        .filter_by(task_id=task.id)
+        .order_by(TaskEvidenceRecord.id.desc())
+        .first()
+    )
+    agent_id = agent_id[0] if agent_id else None
+
+    event_time = datetime.utcnow()
+    payload = {
+        'interaction_id': interaction_id,
+        'interaction_type': interaction_type,
+        'task_id': int(task.id),
+        'status': status,
+        'pr_number': pr_number,
+        'repo_full_name': repo_full_name,
+        'governance': {'requires_approval': True, 'risk_tier': 'high'},
+        'metadata': extra or {},
+        'requested_at': event_time.isoformat(),
+    }
+    if decision is not None:
+        payload.update({
+            'decision': decision,
+            'reviewer_user_id': int(reviewer.id) if reviewer else None,
+            'reviewer_email': reviewer.email if reviewer else None,
+            'decided_at': event_time.isoformat(),
+        })
+
+    row = AgentTaskEvent(
+        task_id=int(task.id),
+        attempt_id='',
+        agent_id=agent_id,
+        workspace_id=int(workspace_id),
+        event_type=(
+            INTERACTION_REQUEST_EVENT_TYPE
+            if decision is None and status in ('pending_approval', 'requested')
+            else INTERACTION_APPROVAL_EVENT_TYPE
+        ),
+        seq=1,
+        event_timestamp=event_time,
+        payload=payload,
+        message=f"{interaction_type} {interaction_id} status={status}" + (f" decision={decision}" if decision else ""),
+        created_by=f'user:{reviewer.id}' if reviewer else 'system:autonomy',
+    )
+    db.session.add(row)
+    return row
+
+
+def _executable_evidence_status(task: Task):
+    """返回可执行证据的覆盖与通过情况：({type: status}, all_passed)。
+
+    仅统计任务 DoD 声明的可执行类型；未声明时按已提交证据判断。
+    """
+    from models import TaskEvidenceRecord
+
+    rows = (
+        TaskEvidenceRecord.query
+        .filter_by(task_id=task.id)
+        .order_by(TaskEvidenceRecord.id.desc())
+        .limit(100)
+        .all()
+    )
+    latest = {}
+    for row in rows:
+        if row.evidence_type in EXECUTABLE_EVIDENCE_TYPES and row.evidence_type not in latest:
+            latest[row.evidence_type] = row.status
+
+    required = {
+        str(c.get('type') or '').strip().lower()
+        for c in (task.dod or [])
+        if isinstance(c, dict) and str(c.get('type') or '').strip().lower() in EXECUTABLE_EVIDENCE_TYPES
+    }
+    if required:
+        relevant = {t: latest.get(t, 'unknown') for t in required}
+    else:
+        relevant = latest
+
+    all_passed = bool(relevant) and all(s == 'passed' for s in relevant.values())
+    return relevant, all_passed
 
 
 def _get_binding(project_id: int):
@@ -124,7 +246,7 @@ def bind_project_repo(project_id: int):
 
         data = validate_json_request(
             required_fields=['repo_owner', 'repo_name'],
-            optional_fields=['default_branch', 'token', 'provider'],
+            optional_fields=['default_branch', 'token', 'provider', 'autonomy_level'],
         )
         if isinstance(data, tuple):
             return data
@@ -132,6 +254,14 @@ def bind_project_repo(project_id: int):
         provider = (data.get('provider') or 'github').strip().lower()
         if provider != 'github':
             return ApiResponse.error("Only 'github' provider is supported", 400).to_response()
+
+        autonomy_level = data.get('autonomy_level', 0)
+        try:
+            autonomy_level = int(autonomy_level)
+        except (TypeError, ValueError):
+            return ApiResponse.error("autonomy_level must be 0, 1 or 2", 400).to_response()
+        if autonomy_level not in (0, 1, 2):
+            return ApiResponse.error("autonomy_level must be 0, 1 or 2", 400).to_response()
 
         binding = _get_binding(project_id)
         if not binding:
@@ -142,6 +272,7 @@ def bind_project_repo(project_id: int):
         binding.repo_owner = data['repo_owner'].strip()
         binding.repo_name = data['repo_name'].strip()
         binding.default_branch = (data.get('default_branch') or 'main').strip() or 'main'
+        binding.autonomy_level = autonomy_level
         if 'token' in data:
             binding.token_encrypted = (
                 get_secret_encryption().encrypt(data['token']) if data['token'] else None
@@ -207,6 +338,42 @@ def create_task_pull_request(task_id: int):
         if head_branch == base_branch:
             return ApiResponse.error("head_branch must differ from base_branch", 400).to_response()
 
+        autonomy_level = int(binding.autonomy_level or 0)
+
+        # L0：PR 创建需人工审批 —— 入 interaction 审批队列，不触达 GitHub
+        if autonomy_level == AUTONOMY_L0_APPROVE_ALL:
+            interaction_id = _new_interaction_id()
+            event_row = _emit_pr_interaction_event(
+                task,
+                interaction_id=interaction_id,
+                interaction_type='pr_create',
+                status='pending_approval',
+                pr_number=None,
+                repo_full_name=binding.repo_full_name,
+                extra={
+                    'head_branch': head_branch,
+                    'base_branch': base_branch,
+                    'requested_by_user_id': get_current_user().id,
+                    'title': (data.get('title') or f"[Task #{task.id}] {task.title}").strip(),
+                },
+            )
+            db.session.commit()
+            if event_row is None:
+                # 项目不在组织内：无 workspace 审批流，回退权限门（manage 用户手动操作）
+                return ApiResponse.success(data={
+                    'pr_created': False,
+                    'reason': 'approval_required',
+                    'interaction_id': interaction_id,
+                    'note': 'project has no workspace; approve via manage-permission endpoint',
+                }, message='PR creation queued for approval').to_response()
+            return ApiResponse.success(data={
+                'pr_created': False,
+                'reason': 'approval_required',
+                'interaction_id': interaction_id,
+                'head_branch': head_branch,
+                'base_branch': base_branch,
+            }, message='PR creation queued for approval').to_response()
+
         client = GitHubClient(resolve_token(binding))
         branch_created = False
         if data.get('create_branch_if_missing', True):
@@ -234,6 +401,12 @@ def create_task_pull_request(task_id: int):
             _upsert_pr_evidence(task, binding, pr_data, created_by=f'user:{get_current_user().id}')
         db.session.commit()
 
+        # L2：验证证据全通过时创建后立即自动合并
+        auto_merged = None
+        if pr_created and autonomy_level >= AUTONOMY_L2_AUTO_MERGE:
+            auto_merged = _maybe_autonomous_merge(task, binding, get_current_user())
+            db.session.commit()
+
         return ApiResponse.success(data={
             'pr_created': pr_created,
             'reason': reason,
@@ -241,6 +414,7 @@ def create_task_pull_request(task_id: int):
             'branch_created': branch_created,
             'head_branch': head_branch,
             'base_branch': base_branch,
+            'auto_merged': auto_merged,
             'pr': {
                 'number': pr_data.get('number'),
                 'url': pr_data.get('html_url'),
@@ -293,10 +467,17 @@ def get_task_pull_request(task_id: int):
             task.completed_at = datetime.utcnow()
             task.completion_rate = 100
 
+        auto_merged = None
+        if not merged and pr_data.get('state') == 'open':
+            auto_merged = _maybe_autonomous_merge(task, binding)
+            if auto_merged and auto_merged.get('merged'):
+                merged = True
+
         db.session.commit()
 
         return ApiResponse.success(data={
             'task_status': task.status.value if task.status else None,
+            'auto_merged': auto_merged,
             'pr': {
                 'number': pr_data.get('number'),
                 'url': pr_data.get('html_url'),
@@ -313,6 +494,245 @@ def get_task_pull_request(task_id: int):
     except Exception as e:
         db.session.rollback()
         return ApiResponse.error(f"Failed to sync pull request: {e}", 500).to_response()
+
+
+def _execute_merge(task: Task, binding: ProjectRepoBinding, pr_number: int,
+                   merge_method: str, actor=None) -> dict:
+    """执行 GitHub 合并 + 证据刷新 + 任务完成 + 审计。actor=None 表示 L2 系统自主执行。"""
+    client = GitHubClient(resolve_token(binding))
+    merge_result = client.merge_pull_request(binding.repo_owner, binding.repo_name, pr_number, merge_method)
+    pr_data = client.get_pull_request(binding.repo_owner, binding.repo_name, pr_number)
+    _upsert_pr_evidence(
+        task, binding, pr_data,
+        created_by=f'user:{actor.id}' if actor is not None else 'system:autonomy',
+    )
+
+    from datetime import datetime
+    from models import TaskStatus
+    if task.status and task.status.value != 'done':
+        task.status = TaskStatus.DONE
+        task.completed_at = datetime.utcnow()
+        task.completion_rate = 100
+
+    AuditLog.record(
+        action='task.pr_merged',
+        resource_type='task',
+        resource_id=task.id,
+        actor_type='human' if actor is not None else 'system:autonomy',
+        actor_user_id=actor.id if actor is not None else None,
+        project_id=task.project_id,
+        detail={
+            'repo': binding.repo_full_name,
+            'pr_number': pr_number,
+            'merge_method': merge_method,
+            'merge_commit_sha': merge_result.get('sha'),
+            'autonomy_level': int(binding.autonomy_level or 0),
+        },
+    )
+    return merge_result
+
+
+def _maybe_autonomous_merge(task: Task, binding: ProjectRepoBinding, actor=None):
+    """L2 自主等级：验证证据全通过时自动合并任务关联的 open PR。
+
+    返回 {merged, reason, pr_number?, evidence_summary?} 或 None（不适用）。
+    """
+    if int(binding.autonomy_level or 0) < AUTONOMY_L2_AUTO_MERGE:
+        return None
+
+    pr_evidence = (
+        TaskEvidenceRecord.query
+        .filter_by(task_id=task.id, evidence_type='pr')
+        .order_by(TaskEvidenceRecord.id.desc())
+        .first()
+    )
+    pr_number = (pr_evidence.detail or {}).get('pr_number') if pr_evidence else None
+    if not pr_number:
+        return None
+
+    relevant, all_passed = _executable_evidence_status(task)
+    if not all_passed:
+        return {'merged': False, 'reason': 'evidence_not_all_passed', 'evidence': relevant}
+
+    interaction_id = _new_interaction_id()
+    _emit_pr_interaction_event(
+        task,
+        interaction_id=interaction_id,
+        interaction_type='pr_merge',
+        status='auto_approved',
+        decision='approved',
+        reviewer=None,
+        pr_number=int(pr_number),
+        repo_full_name=binding.repo_full_name,
+        extra={'autonomy_level': int(binding.autonomy_level or 0), 'evidence': relevant},
+    )
+
+    try:
+        merge_result = _execute_merge(task, binding, int(pr_number), 'merge', actor=None)
+    except GitHubClientError as e:
+        db.session.rollback()
+        return {'merged': False, 'reason': 'merge_failed', 'error': str(e)}
+
+    return {'merged': True, 'interaction_id': interaction_id, 'pr_number': int(pr_number), 'sha': merge_result.get('sha')}
+
+
+@project_repo_bp.route('/tasks/<int:task_id>/pull-request/approve', methods=['POST'])
+@unified_auth_required
+def approve_task_pull_request(task_id: int):
+    """审批队列批准回调：处理 pr_create / pr_merge 审批请求。
+
+    body: {interaction_id, decision: approved|rejected, reason?, merge_method?}
+    - pr_create + approved：按请求参数执行 PR 创建（复用创建端点逻辑的 GitHub 部分）
+    - pr_merge  + approved：执行合并（复用 _execute_merge）
+    - rejected：记录拒绝，不执行任何 GitHub 动作
+    决策写入 interaction_approval 事件（审批队列可见），同时写 AuditLog。
+    """
+    try:
+        task, binding, err = _ensure_task_access(task_id, manage=True)
+        if err:
+            return err
+        if not binding:
+            return ApiResponse.error(
+                "Project has no repo bound", 404, error_details={"code": "NO_REPO_BOUND"},
+            ).to_response()
+
+        data = validate_json_request(
+            required_fields=['interaction_id', 'decision'],
+            optional_fields=['reason', 'merge_method'],
+        )
+        if isinstance(data, tuple):
+            return data
+
+        interaction_id = str(data['interaction_id']).strip()
+        decision = str(data['decision']).strip().lower()
+        if decision not in ('approved', 'rejected'):
+            return ApiResponse.error("decision must be approved or rejected", 400).to_response()
+        reason = (data.get('reason') or '').strip() or None
+        merge_method = (data.get('merge_method') or 'merge').strip().lower()
+        if merge_method not in ('merge', 'squash', 'rebase'):
+            return ApiResponse.error("merge_method must be merge|squash|rebase", 400).to_response()
+
+        current_user = get_current_user()
+
+        # 定位审批请求事件
+        request_row = (
+            AgentTaskEvent.query
+            .filter(
+                AgentTaskEvent.task_id == task.id,
+                AgentTaskEvent.event_type == INTERACTION_REQUEST_EVENT_TYPE,
+            )
+            .order_by(AgentTaskEvent.id.desc())
+            .limit(200)
+            .all()
+        )
+        request_payload = None
+        for row in request_row:
+            if (row.payload or {}).get('interaction_id') == interaction_id:
+                request_payload = row.payload
+                break
+        if not request_payload:
+            return ApiResponse.error(
+                "Interaction request not found", 404, error_details={"code": "NO_INTERACTION"},
+            ).to_response()
+        if (request_payload.get('status') or '').startswith('approved'):
+            return ApiResponse.error("Interaction already approved", 409).to_response()
+
+        interaction_type = request_payload.get('interaction_type')
+        pr_number = request_payload.get('pr_number')
+        extra_meta = {'reason': reason, 'reviewed_by': current_user.id}
+        action_result = None
+
+        if decision == 'rejected':
+            _emit_pr_interaction_event(
+                task,
+                interaction_id=interaction_id,
+                interaction_type=interaction_type,
+                status='rejected',
+                decision='rejected',
+                reviewer=current_user,
+                pr_number=pr_number,
+                repo_full_name=binding.repo_full_name,
+                extra=extra_meta,
+            )
+            AuditLog.record(
+                action='task.pr_approval_rejected',
+                resource_type='task', resource_id=task.id,
+                actor_type='human', actor_user_id=current_user.id,
+                project_id=task.project_id,
+                detail={'interaction_id': interaction_id, 'interaction_type': interaction_type, 'reason': reason},
+            )
+            db.session.commit()
+            return ApiResponse.success(data={
+                'interaction_id': interaction_id, 'decision': 'rejected', 'executed': False,
+            }, message='Interaction rejected').to_response()
+
+        # approved：按类型执行
+        if interaction_type == 'pr_create':
+            spec = request_payload.get('metadata') or {}
+            head_branch = spec.get('head_branch')
+            base_branch = spec.get('base_branch') or binding.default_branch
+            if not head_branch:
+                return ApiResponse.error("request missing head_branch", 400).to_response()
+            client = GitHubClient(resolve_token(binding))
+            try:
+                pr_data = client.create_pull_request(
+                    binding.repo_owner, binding.repo_name, head_branch, base_branch,
+                    spec.get('title') or f"[Task #{task.id}] {task.title}",
+                    f"Approved via interaction {interaction_id}.",
+                )
+                pr_number = pr_data.get('number')
+                _upsert_pr_evidence(task, binding, pr_data, created_by=f'user:{current_user.id}')
+                action_result = {'pr_created': True, 'pr_number': pr_number, 'url': pr_data.get('html_url')}
+            except GitHubClientError as e:
+                if e.status_code == 422:
+                    action_result = {'pr_created': False, 'reason': 'no_commits_yet'}
+                else:
+                    raise
+        elif interaction_type == 'pr_merge':
+            if not pr_number:
+                return ApiResponse.error("request missing pr_number", 400).to_response()
+            merge_result = _execute_merge(task, binding, int(pr_number), merge_method, actor=current_user)
+            action_result = {
+                'merged': True,
+                'pr_number': int(pr_number),
+                'merge_commit_sha': merge_result.get('sha'),
+            }
+        else:
+            return ApiResponse.error(f"unsupported interaction_type: {interaction_type}", 400).to_response()
+
+        _emit_pr_interaction_event(
+            task,
+            interaction_id=interaction_id,
+            interaction_type=interaction_type,
+            status='approved',
+            decision='approved',
+            reviewer=current_user,
+            pr_number=pr_number,
+            repo_full_name=binding.repo_full_name,
+            extra=extra_meta,
+        )
+        AuditLog.record(
+            action='task.pr_approval_approved',
+            resource_type='task', resource_id=task.id,
+            actor_type='human', actor_user_id=current_user.id,
+            project_id=task.project_id,
+            detail={'interaction_id': interaction_id, 'interaction_type': interaction_type, **action_result},
+        )
+        db.session.commit()
+
+        return ApiResponse.success(data={
+            'interaction_id': interaction_id,
+            'decision': 'approved',
+            'executed': True,
+            'interaction_type': interaction_type,
+            **action_result,
+        }, message='Interaction approved and executed').to_response()
+    except GitHubClientError as e:
+        db.session.rollback()
+        return ApiResponse.error(str(e), e.status_code if e.status_code < 500 else 502).to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to approve interaction: {e}", 500).to_response()
 
 
 @project_repo_bp.route('/tasks/<int:task_id>/pull-request/merge', methods=['POST'])
@@ -353,32 +773,7 @@ def merge_task_pull_request(task_id: int):
             return ApiResponse.error("merge_method must be merge|squash|rebase", 400).to_response()
 
         current_user = get_current_user()
-        client = GitHubClient(resolve_token(binding))
-        merge_result = client.merge_pull_request(binding.repo_owner, binding.repo_name, pr_number, merge_method)
-        pr_data = client.get_pull_request(binding.repo_owner, binding.repo_name, pr_number)
-        _upsert_pr_evidence(task, binding, pr_data, created_by=f'user:{current_user.id}')
-
-        from datetime import datetime
-        from models import TaskStatus
-        if task.status and task.status.value != 'done':
-            task.status = TaskStatus.DONE
-            task.completed_at = datetime.utcnow()
-            task.completion_rate = 100
-
-        AuditLog.record(
-            action='task.pr_merged',
-            resource_type='task',
-            resource_id=task.id,
-            actor_type='human',
-            actor_user_id=current_user.id,
-            project_id=task.project_id,
-            detail={
-                'repo': binding.repo_full_name,
-                'pr_number': pr_number,
-                'merge_method': merge_method,
-                'merge_commit_sha': merge_result.get('sha'),
-            },
-        )
+        merge_result = _execute_merge(task, binding, int(pr_number), merge_method, actor=current_user)
 
         db.session.commit()
 
@@ -387,7 +782,6 @@ def merge_task_pull_request(task_id: int):
             'task_status': task.status.value if task.status else None,
             'pr': {
                 'number': pr_number,
-                'url': pr_data.get('html_url'),
                 'merge_commit_sha': merge_result.get('sha'),
             },
         }, message='Pull request merged').to_response()

@@ -115,10 +115,10 @@ class TestProjectRepoBinding:
 
 
 class TestTaskPullRequest:
-    def _bind(self, client, owner_auth, owned_project):
+    def _bind(self, client, owner_auth, owned_project, autonomy_level=1):
         resp = client.put(
             f"{BASE_URL}/projects/{owned_project.id}/repo",
-            json={"repo_owner": "acme", "repo_name": "widget"},
+            json={"repo_owner": "acme", "repo_name": "widget", "autonomy_level": autonomy_level},
             headers=owner_auth["headers"],
         )
         assert resp.status_code == 200
@@ -272,7 +272,7 @@ class TestTaskPullRequestMerge:
 
         client.put(
             f"{BASE_URL}/projects/{owned_project.id}/repo",
-            json={"repo_owner": "acme", "repo_name": "widget"},
+            json={"repo_owner": "acme", "repo_name": "widget", "autonomy_level": 1},
             headers=owner_auth["headers"],
         )
         task = task_factory(
@@ -347,3 +347,228 @@ class TestTaskPullRequestMerge:
             headers=owner_auth["headers"],
         )
         assert resp.status_code == 400
+
+
+class TestAutonomyLevels:
+    """自主等级 L0-L2：渐进审批（Phase 2 事件化审批队列）。"""
+
+    @pytest.fixture
+    def owned_org_project(self, db_session, owner_auth, project_factory):
+        """带组织的项目（workspace 审批事件要求 organization_id）。"""
+        from models import Project
+        project = project_factory(owner_id=owner_auth["user"].id)
+        project.organization_id = 9999  # 事件 workspace_id 引用（测试库无 FK 校验语义，直填值）
+        db_session.add(project)
+        db_session.commit()
+        return project
+
+    def _bind(self, client, owner_auth, project, level):
+        resp = client.put(
+            f"{BASE_URL}/projects/{project.id}/repo",
+            json={"repo_owner": "acme", "repo_name": "widget", "autonomy_level": level},
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 200
+
+    def test_bind_rejects_invalid_level(self, client, owner_auth, owned_org_project):
+        resp = client.put(
+            f"{BASE_URL}/projects/{owned_org_project.id}/repo",
+            json={"repo_owner": "a", "repo_name": "b", "autonomy_level": 5},
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 400
+
+    def test_autonomy_level_roundtrip(self, client, owner_auth, owned_org_project):
+        self._bind(client, owner_auth, owned_org_project, 2)
+        resp = client.get(f"{BASE_URL}/projects/{owned_org_project.id}/repo", headers=owner_auth["headers"])
+        assert resp.status_code == 200
+
+    def test_l0_pr_create_queued_for_approval(self, client, db_session, owner_auth, owned_org_project, task_factory):
+        """L0：PR 创建不入 GitHub，入 interaction 审批队列。"""
+        from models import AgentTaskEvent
+
+        self._bind(client, owner_auth, owned_org_project, 0)
+        task = task_factory(project_id=owned_org_project.id, owner_id=owner_auth["user"].id, title="L0 task")
+
+        fake_client = MagicMock()
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.post(
+                f"{BASE_URL}/tasks/{task.id}/pull-request",
+                json={"head_branch": "agent/x"},
+                headers=owner_auth["headers"],
+            )
+
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["pr_created"] is False
+        assert data["reason"] == "approval_required"
+        assert data["interaction_id"]
+        fake_client.create_pull_request.assert_not_called()
+
+        event = AgentTaskEvent.query.filter_by(task_id=task.id, event_type="interaction_request").first()
+        assert event is not None
+        assert event.payload["interaction_type"] == "pr_create"
+        assert event.payload["governance"]["requires_approval"] is True
+
+    def test_l0_approve_executes_pr_creation(self, client, db_session, owner_auth, owned_org_project, task_factory):
+        from models import AgentTaskEvent
+
+        self._bind(client, owner_auth, owned_org_project, 0)
+        task = task_factory(project_id=owned_org_project.id, owner_id=owner_auth["user"].id, title="L0 approve")
+        client.post(
+            f"{BASE_URL}/tasks/{task.id}/pull-request",
+            json={"head_branch": "agent/x"},
+            headers=owner_auth["headers"],
+        )
+        interaction = AgentTaskEvent.query.filter_by(
+            task_id=task.id, event_type="interaction_request"
+        ).first()
+        interaction_id = interaction.payload["interaction_id"]
+
+        fake_client = MagicMock()
+        fake_client.create_pull_request.return_value = _pr_data(number=42)
+
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.post(
+                f"{BASE_URL}/tasks/{task.id}/pull-request/approve",
+                json={"interaction_id": interaction_id, "decision": "approved"},
+                headers=owner_auth["headers"],
+            )
+
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["executed"] is True and data["pr_number"] == 42
+
+        approval = AgentTaskEvent.query.filter_by(
+            task_id=task.id, event_type="interaction_approval"
+        ).first()
+        assert approval is not None
+        assert approval.payload["decision"] == "approved"
+
+    def test_l0_reject_records_without_github(self, client, db_session, owner_auth, owned_org_project, task_factory):
+        from models import AgentTaskEvent
+
+        self._bind(client, owner_auth, owned_org_project, 0)
+        task = task_factory(project_id=owned_org_project.id, owner_id=owner_auth["user"].id, title="L0 reject")
+        client.post(
+            f"{BASE_URL}/tasks/{task.id}/pull-request",
+            json={"head_branch": "agent/x"},
+            headers=owner_auth["headers"],
+        )
+        interaction = AgentTaskEvent.query.filter_by(
+            task_id=task.id, event_type="interaction_request"
+        ).first()
+        interaction_id = interaction.payload["interaction_id"]
+
+        fake_client = MagicMock()
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.post(
+                f"{BASE_URL}/tasks/{task.id}/pull-request/approve",
+                json={"interaction_id": interaction_id, "decision": "rejected", "reason": "not ready"},
+                headers=owner_auth["headers"],
+            )
+
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["executed"] is False
+        fake_client.create_pull_request.assert_not_called()
+
+    def test_l2_auto_merge_when_evidence_all_passed(
+        self, client, db_session, owner_auth, owned_org_project, project_factory, task_factory
+    ):
+        from models import Task, TaskEvidenceRecord
+
+        self._bind(client, owner_auth, owned_org_project, 2)
+        task = task_factory(
+            project_id=owned_org_project.id,
+            owner_id=owner_auth["user"].id,
+            title="L2 auto merge",
+            is_ai_task=True,
+            dod=[{"type": "test", "value": "pytest -q"}],
+        )
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="pr", status="unknown", detail={"pr_number": 7}, created_by="test",
+        ))
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="test", status="passed", summary="all green", created_by="agent:1",
+        ))
+        db_session.commit()
+        db_session.expire(task)
+
+        fake_client = MagicMock()
+        fake_client.get_pull_request.return_value = _pr_data(number=7, state="open", merged=False)
+        fake_client.merge_pull_request.return_value = {"sha": "autoshal", "merged": True}
+
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.get(f"{BASE_URL}/tasks/{task.id}/pull-request", headers=owner_auth["headers"])
+
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["auto_merged"]["merged"] is True
+        assert data["task_status"] == "done"
+
+        db_session.expire(task)
+        assert task.status.value == "done"
+        fake_client.merge_pull_request.assert_called_once()
+
+    def test_l2_no_auto_merge_when_evidence_missing(
+        self, client, db_session, owner_auth, owned_org_project, project_factory, task_factory
+    ):
+        from models import TaskEvidenceRecord
+
+        self._bind(client, owner_auth, owned_org_project, 2)
+        task = task_factory(
+            project_id=owned_org_project.id,
+            owner_id=owner_auth["user"].id,
+            title="L2 missing evidence",
+            is_ai_task=True,
+            dod=[{"type": "test", "value": "pytest -q"}],
+        )
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="pr", status="unknown", detail={"pr_number": 8}, created_by="test",
+        ))
+        db_session.commit()
+
+        fake_client = MagicMock()
+        fake_client.get_pull_request.return_value = _pr_data(number=8, state="open", merged=False)
+
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.get(f"{BASE_URL}/tasks/{task.id}/pull-request", headers=owner_auth["headers"])
+
+        assert resp.status_code == 200
+        data = resp.get_json()["data"]
+        assert data["auto_merged"]["merged"] is False
+        assert data["auto_merged"]["reason"] == "evidence_not_all_passed"
+        assert data["task_status"] != "done"
+        fake_client.merge_pull_request.assert_not_called()
+
+    def test_l1_sync_does_not_auto_merge(
+        self, client, db_session, owner_auth, owned_org_project, project_factory, task_factory
+    ):
+        from models import TaskEvidenceRecord
+
+        self._bind(client, owner_auth, owned_org_project, 1)
+        task = task_factory(
+            project_id=owned_org_project.id,
+            owner_id=owner_auth["user"].id,
+            title="L1 manual merge",
+            is_ai_task=True,
+            dod=[{"type": "test", "value": "pytest -q"}],
+        )
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="pr", status="unknown", detail={"pr_number": 9}, created_by="test",
+        ))
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="test", status="passed", created_by="agent:1",
+        ))
+        db_session.commit()
+
+        fake_client = MagicMock()
+        fake_client.get_pull_request.return_value = _pr_data(number=9, state="open", merged=False)
+
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.get(f"{BASE_URL}/tasks/{task.id}/pull-request", headers=owner_auth["headers"])
+
+        data = resp.get_json()["data"]
+        assert data["auto_merged"] is None
+        assert data["task_status"] != "done"
+        fake_client.merge_pull_request.assert_not_called()

@@ -18,6 +18,7 @@ class ProjectRepoBinding(BaseModel):
     repo_owner = Column(String(255), nullable=False, comment='仓库归属（用户名/组织）')
     repo_name = Column(String(255), nullable=False, comment='仓库名')
     default_branch = Column(String(255), nullable=False, default='main', comment='默认分支（PR 的 base）')
+    autonomy_level = Column(Integer, nullable=False, default=0, comment='自主等级: 0=全审批, 1=自动PR人工合并, 2=证据全通过自动合并')
     # 绑定级 token（加密存储）；为空时回退到部署级 GITHUB_TOKEN 环境变量
     token_encrypted = Column(String(2000), comment='仓库访问 token（加密）')
 
@@ -27,6 +28,10 @@ class ProjectRepoBinding(BaseModel):
     @property
     def repo_full_name(self):
         return f'{self.repo_owner}/{self.repo_name}'
+
+    @property
+    def autonomy_label(self):
+        return f'L{self.autonomy_level or 0}'
 
     def to_dict(self):
         result = super().to_dict(exclude=['token_encrypted'])
