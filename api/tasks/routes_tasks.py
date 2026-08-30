@@ -17,6 +17,7 @@ from models import (
     ActionType,
     UserActivity,
     TaskEventOutbox,
+    TaskEvidenceRecord,
 )
 from ..base import ApiResponse, paginate_query, paginate_query_fast, validate_json_request, get_request_args
 from core.auth import unified_auth_required, get_current_user
@@ -497,6 +498,9 @@ def update_task(task_id):
                 if old_status != new_status:
                     changes.append(('status', old_status.value, new_status.value))
                     task.status = new_status
+                    # ACR 埋点：人工干预 AI 任务的计数（Agent 提交走 runtime 协议，不经过此端点）
+                    if task.is_ai_task:
+                        task.human_intervention_count = (task.human_intervention_count or 0) + 1
                     
                     # 如果状态变为完成，设置完成时间
                     if new_status == TaskStatus.DONE and old_status != TaskStatus.DONE:
@@ -795,3 +799,37 @@ def get_task_history(task_id):
 
     except Exception as e:
         return ApiResponse.error(f"Failed to retrieve task history: {str(e)}", 500).to_response()
+
+
+@tasks_bp.route('/<int:task_id>/evidence', methods=['GET'])
+@unified_auth_required
+def list_task_evidence(task_id):
+    """获取任务的验证证据（DoD Evidence）与完成标准"""
+    try:
+        current_user = get_current_user()
+
+        task = Task.query.get(task_id)
+        if not task:
+            return ApiResponse.error("Task not found", 404, error_details={"code": "TASK_NOT_FOUND"}).to_response()
+
+        if not current_user.can_access_project(task.project):
+            return ApiResponse.error("Access denied", 403, error_details={"code": "PERMISSION_DENIED"}).to_response()
+
+        items = (
+            TaskEvidenceRecord.query
+            .filter_by(task_id=task_id)
+            .order_by(TaskEvidenceRecord.id.desc())
+            .limit(100)
+            .all()
+        )
+
+        return ApiResponse.success(
+            {
+                'dod': task.dod or [],
+                'evidence': [item.to_dict() for item in items],
+            },
+            'Task evidence retrieved successfully'
+        ).to_response()
+
+    except Exception as e:
+        return ApiResponse.error(f"Failed to retrieve task evidence: {str(e)}", 500).to_response()

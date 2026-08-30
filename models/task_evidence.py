@@ -9,14 +9,11 @@ from sqlalchemy import Column, String, Integer, ForeignKey, BigInteger, DateTime
 from .base import BaseModel
 
 
-class TaskEvidence:
-    """证据类型与结论的合法取值（列存字符串，便于跨库迁移）"""
+class TaskEvidenceRecord(BaseModel):
+    """任务验证证据（列存字符串，便于跨库迁移）"""
 
     TYPES = ('test', 'build', 'lint', 'command', 'pr', 'manual')
     STATUSES = ('passed', 'failed', 'unknown')
-
-
-class TaskEvidenceRecord(BaseModel):
     """任务验证证据"""
 
     __tablename__ = 'task_evidences'

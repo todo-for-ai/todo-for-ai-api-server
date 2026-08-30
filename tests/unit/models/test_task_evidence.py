@@ -66,14 +66,14 @@ class TestTaskEvidenceRecord:
         assert stored.detail["exit_code"] == 0
 
     def test_evidence_types_and_statuses_contract(self):
-        from models.task_evidence import TaskEvidence
+        from models import TaskEvidenceRecord
 
-        assert "test" in TaskEvidence.TYPES
-        assert "build" in TaskEvidence.TYPES
-        assert "lint" in TaskEvidence.TYPES
-        assert "command" in TaskEvidence.TYPES
-        assert "pr" in TaskEvidence.TYPES
-        assert {"passed", "failed", "unknown"} == set(TaskEvidence.STATUSES)
+        assert "test" in TaskEvidenceRecord.TYPES
+        assert "build" in TaskEvidenceRecord.TYPES
+        assert "lint" in TaskEvidenceRecord.TYPES
+        assert "command" in TaskEvidenceRecord.TYPES
+        assert "pr" in TaskEvidenceRecord.TYPES
+        assert {"passed", "failed", "unknown"} == set(TaskEvidenceRecord.STATUSES)
 
     def test_evidence_repr(self, db_session, project_factory, task_factory):
         from models import TaskEvidenceRecord
