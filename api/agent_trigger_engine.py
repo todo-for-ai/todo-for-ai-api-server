@@ -3,6 +3,7 @@ Agent 触发引擎（任务事件侧）
 """
 
 import hashlib
+from typing import Optional
 from datetime import datetime
 from models import (
     db,
@@ -16,7 +17,112 @@ from models import (
 from .agent_common import generate_id
 
 
-def _is_trigger_match(trigger, task, event_type, payload):
+def _is_repo_event_match(trigger, event_name: str, repo_full_name: Optional[str],
+                         task_project_id: Optional[int]) -> bool:
+    """repo_event 触发匹配：事件名 + 仓库/项目过滤。"""
+    event_types = [str(item).strip().lower() for item in (trigger.task_event_types or [])]
+    if event_name not in event_types:
+        return False
+
+    repo_filter = trigger.task_filter or {}
+    repo_names = [str(item).strip().lower() for item in (repo_filter.get('repo_full_names') or [])]
+    if repo_names and (repo_full_name or '').lower() not in repo_names:
+        return False
+
+    project_ids = repo_filter.get('project_ids') or []
+    if project_ids and task_project_id and int(task_project_id) not in [
+        int(pid) for pid in project_ids if str(pid).isdigit()
+    ]:
+        return False
+    return True
+
+
+def emit_repo_event(task, event_name: str, payload=None, repo_full_name=None, actor='github:webhook'):
+    """代码仓库事件（P2.5 事件面扩容）驱动 AgentRun。
+
+    event_name 形如 'pull_request.opened' / 'pull_request.closed' /
+    'pull_request.merged' / 'pull_request.synchronize'。
+    写 TaskEventOutbox 后匹配 workspace 内 repo_event 触发器（含预算门）。
+    返回创建的 AgentRun run_id 列表。
+    """
+    workspace_id = task.project.organization_id if task.project else None
+
+    outbox = TaskEventOutbox(
+        event_id=generate_id('rev'),
+        event_type=f'repo.{event_name}',
+        task_id=task.id,
+        project_id=task.project_id,
+        workspace_id=workspace_id,
+        payload=payload or {},
+        occurred_at=datetime.utcnow(),
+        created_by=actor,
+    )
+    db.session.add(outbox)
+
+    if not workspace_id:
+        db.session.commit()
+        return []
+
+    from services.budget_service import check_budgets, raise_budget_exceeded
+
+    triggers = AgentTrigger.query.filter_by(
+        workspace_id=workspace_id,
+        trigger_type=AgentTriggerType.REPO_EVENT.value,
+        enabled=True,
+    ).all()
+
+    created_runs = []
+    for trigger in triggers:
+        if not _is_repo_event_match(trigger, event_name, repo_full_name, task.project_id):
+            continue
+
+        idem_key = _build_idempotency_key(trigger, event_name, task.id, payload or {})
+        if AgentRun.query.filter_by(idempotency_key=idem_key).first():
+            continue
+
+        # 预算门：与 task 事件路径一致
+        violations = check_budgets(
+            workspace_id=int(workspace_id),
+            agent_id=int(trigger.agent_id),
+            project_id=int(task.project_id) if task.project_id else None,
+        )
+        if violations:
+            try:
+                raise_budget_exceeded(
+                    workspace_id=int(workspace_id),
+                    violations=violations,
+                    context={'agent_id': int(trigger.agent_id), 'task_id': int(task.id),
+                             'event': f'repo.{event_name}'},
+                )
+            except Exception:
+                db.session.rollback()
+            continue
+
+        run = AgentRun(
+            run_id=generate_id('run'),
+            workspace_id=workspace_id,
+            agent_id=trigger.agent_id,
+            trigger_id=trigger.id,
+            trigger_reason=f'repo.{event_name}',
+            input_payload={
+                'task_id': task.id,
+                'project_id': task.project_id,
+                'event': f'repo.{event_name}',
+                'repo_full_name': repo_full_name,
+                'payload': payload or {},
+            },
+            state=AgentRunState.QUEUED.value,
+            scheduled_at=datetime.utcnow(),
+            attempt_count=0,
+            idempotency_key=idem_key,
+            created_by=actor,
+        )
+        db.session.add(run)
+        created_runs.append(run.run_id)
+        trigger.last_triggered_at = datetime.utcnow()
+
+    db.session.commit()
+    return created_runs
     event_types = [str(item).strip().lower() for item in (trigger.task_event_types or [])]
     if event_type not in event_types:
         return False

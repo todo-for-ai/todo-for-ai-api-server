@@ -64,6 +64,27 @@ def _handle_pull_request_event(action: str, pr: dict, repo: dict):
     state = pr.get('state')
     status = 'passed' if merged else ('failed' if action == 'closed' and state == 'closed' else 'unknown')
 
+    # P2.5 事件面扩容：PR 事件接入触发引擎，驱动 repo_event 触发器的 AgentRun
+    try:
+        from api.agent_trigger_engine import emit_repo_event
+        emit_repo_event(
+            task,
+            f'pull_request.{action}',
+            payload={
+                'pr_number': pr_number,
+                'merged': merged,
+                'state': state,
+                'title': pr.get('title'),
+                'head_branch': (pr.get('head') or {}).get('ref'),
+                'base_branch': (pr.get('base') or {}).get('ref'),
+            },
+            repo_full_name=repo_full_name,
+        )
+    except Exception as e:
+        # 事件分派失败不影响证据/状态同步主流程
+        import structlog
+        structlog.get_logger().warning("github_app.repo_event_dispatch_failed", error=str(e))
+
     # 复用 project_repo 的证据写入（直接构造 pr_data 形状）
     from api.project_repo import _upsert_pr_evidence
     from models import ProjectRepoBinding, db

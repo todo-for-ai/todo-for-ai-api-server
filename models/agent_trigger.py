@@ -10,6 +10,7 @@ from .base import BaseModel
 
 class AgentTriggerType(enum.Enum):
     TASK_EVENT = 'task_event'
+    REPO_EVENT = 'repo_event'
     CRON = 'cron'
 
 
