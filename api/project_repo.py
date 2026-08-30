@@ -10,6 +10,7 @@
 from flask import Blueprint, request
 
 import uuid
+from typing import Optional
 
 from models import (
     AgentTaskEvent,
@@ -31,6 +32,7 @@ from services.github_client import (
     GitHubClientError,
     resolve_token,
 )
+from services.review_gate import check_agent_review_gate, resolve_reviewer_agent_id
 
 project_repo_bp = Blueprint('project_repo', __name__)
 
@@ -257,7 +259,8 @@ def bind_project_repo(project_id: int):
 
         data = validate_json_request(
             required_fields=['repo_owner', 'repo_name'],
-            optional_fields=['default_branch', 'token', 'provider', 'autonomy_level'],
+            optional_fields=['default_branch', 'token', 'provider', 'autonomy_level',
+                             'require_agent_review', 'reviewer_agent_id'],
         )
         if isinstance(data, tuple):
             return data
@@ -284,6 +287,10 @@ def bind_project_repo(project_id: int):
         binding.repo_name = data['repo_name'].strip()
         binding.default_branch = (data.get('default_branch') or 'main').strip() or 'main'
         binding.autonomy_level = autonomy_level
+        binding.require_agent_review = bool(data.get('require_agent_review', False))
+        binding.reviewer_agent_id = (
+            int(data['reviewer_agent_id']) if data.get('reviewer_agent_id') else None
+        )
         if 'token' in data:
             binding.token_encrypted = (
                 _encrypt_secret(data['token']) if data['token'] else None
@@ -507,9 +514,49 @@ def get_task_pull_request(task_id: int):
         return ApiResponse.error(f"Failed to sync pull request: {e}", 500).to_response()
 
 
+def _agent_review_gate_for(task: Task, binding: ProjectRepoBinding, pr_number: int,
+                           author_agent_id: Optional[int] = None):
+    """合并前的 Agent 评审者关卡。通过返回 None；未通过返回哨兵 dict。"""
+    gate = check_agent_review_gate(task, binding, pr_number, author_agent_id=author_agent_id)
+    if not gate["passed"]:
+        AuditLog.record(
+            action='task.pr_merge_blocked',
+            resource_type='task',
+            resource_id=task.id,
+            actor_type='system',
+            project_id=task.project_id,
+            detail={'gate': gate, 'pr_number': pr_number},
+        )
+        db.session.commit()
+        return {
+            "_gate_blocked": True,
+            "response": ApiResponse.error(
+                f"Merge blocked by reviewer gate: {gate['reason']}",
+                409,
+                error_details={"code": gate["reason"].upper(), "gate": gate},
+            ).to_response(),
+        }
+    return None
+
+
 def _execute_merge(task: Task, binding: ProjectRepoBinding, pr_number: int,
                    merge_method: str, actor=None) -> dict:
     """执行 GitHub 合并 + 证据刷新 + 任务完成 + 审计。actor=None 表示 L2 系统自主执行。"""
+    # P2.4 评审者关卡：binding 启用 require_agent_review 时，合并必须有通过评审
+    author_agent_id = None
+    author_evidence = (
+        TaskEvidenceRecord.query
+        .filter(TaskEvidenceRecord.task_id == task.id)
+        .order_by(TaskEvidenceRecord.id.desc())
+        .first()
+    )
+    if author_evidence is not None:
+        author_agent_id = author_evidence.agent_id
+
+    gate = _agent_review_gate_for(task, binding, pr_number, author_agent_id=author_agent_id)
+    if gate is not None:
+        return gate
+
     client = GitHubClient(resolve_token(binding))
     merge_result = client.merge_pull_request(binding.repo_owner, binding.repo_name, pr_number, merge_method)
     pr_data = client.get_pull_request(binding.repo_owner, binding.repo_name, pr_number)
@@ -830,6 +877,85 @@ def list_pending_pr_approvals():
         return ApiResponse.error(f"Failed to list pending PR approvals: {e}", 500).to_response()
 
 
+@project_repo_bp.route('/tasks/<int:task_id>/pull-request/review', methods=['POST'])
+@unified_auth_required
+def review_task_pull_request(task_id: int):
+    """Agent 评审者关卡证据提交。
+
+    body: {decision: approved|rejected, reviewer_agent_id, summary?, pr_number?}
+    - pr_number 缺省取任务关联 PR
+    - 写 TaskEvidenceRecord(type='review', status=passed/failed)
+    - reviewer_agent_id 必须等于绑定的评审者或编排 role_assignments['reviewer']
+    """
+    try:
+        task, binding, err = _ensure_task_access(task_id, manage=False)
+        if err:
+            return err
+        if not binding:
+            return ApiResponse.error(
+                "Project has no repo bound", 404, error_details={"code": "NO_REPO_BOUND"},
+            ).to_response()
+
+        data = validate_json_request(
+            required_fields=['decision', 'reviewer_agent_id'],
+            optional_fields=['summary', 'pr_number'],
+        )
+        if isinstance(data, tuple):
+            return data
+
+        decision = str(data['decision']).strip().lower()
+        if decision not in ('approved', 'rejected'):
+            return ApiResponse.error("decision must be approved or rejected", 400).to_response()
+
+        current_user = get_current_user()
+        reviewer_agent_id = int(data['reviewer_agent_id'])
+        designated = resolve_reviewer_agent_id(task, binding)
+        if designated and reviewer_agent_id != designated:
+            return ApiResponse.error(
+                f"Only designated reviewer agent {designated} may submit review", 403,
+                error_details={"code": "NOT_DESIGNATED_REVIEWER"},
+            ).to_response()
+
+        # 关联 PR：显式 pr_number 优先，缺省取最新 pr 证据
+        if data.get('pr_number'):
+            pr_number = int(data['pr_number'])
+        else:
+            pr_evidence = (
+                TaskEvidenceRecord.query
+                .filter_by(task_id=task.id, evidence_type='pr')
+                .order_by(TaskEvidenceRecord.id.desc())
+                .first()
+            )
+            pr_number = (pr_evidence.detail or {}).get('pr_number') if pr_evidence else None
+
+        from datetime import datetime
+
+        review = TaskEvidenceRecord(
+            task_id=task.id,
+            evidence_type='review',
+            status='passed' if decision == 'approved' else 'failed',
+            summary=(str(data.get('summary'))[:500] if data.get('summary') else f"review {decision}"),
+            detail={
+                'pr_number': pr_number,
+                'decision': decision,
+                'reviewer_agent_id': reviewer_agent_id,
+            },
+            verified_at=datetime.utcnow(),
+            created_by=f'agent:{reviewer_agent_id}',
+        )
+        db.session.add(review)
+        db.session.commit()
+
+        return ApiResponse.success(data={
+            'review_id': review.id,
+            'status': review.status,
+            'pr_number': pr_number,
+        }, message='Review recorded').to_response()
+    except Exception as e:
+        db.session.rollback()
+        return ApiResponse.error(f"Failed to record review: {e}", 500).to_response()
+
+
 @project_repo_bp.route('/tasks/<int:task_id>/pull-request/merge', methods=['POST'])
 @unified_auth_required
 def merge_task_pull_request(task_id: int):
@@ -869,6 +995,8 @@ def merge_task_pull_request(task_id: int):
 
         current_user = get_current_user()
         merge_result = _execute_merge(task, binding, int(pr_number), merge_method, actor=current_user)
+        if merge_result.get("_gate_blocked"):
+            return merge_result["response"]
 
         db.session.commit()
 

@@ -54,6 +54,7 @@ class TeamTaskOrchestration(BaseModel):
     strategy = Column(Enum(OrchestrationStrategy), nullable=False,
                       comment='编排策略')
     participating_agent_ids = Column(JSON, comment='参与的 Agent ID 列表')
+    role_assignments = Column(JSON, comment='角色 → Agent ID 映射 (如 {"developer":3,"reviewer":5,"tester":7})')
 
     # 状态
     status = Column(Enum(OrchestrationStatus), default=OrchestrationStatus.PENDING,

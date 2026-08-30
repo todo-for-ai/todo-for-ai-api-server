@@ -12,7 +12,7 @@ from .base import BaseModel
 class TaskEvidenceRecord(BaseModel):
     """任务验证证据（列存字符串，便于跨库迁移）"""
 
-    TYPES = ('test', 'build', 'lint', 'command', 'pr', 'manual')
+    TYPES = ('test', 'build', 'lint', 'command', 'pr', 'manual', 'review')
     STATUSES = ('passed', 'failed', 'unknown')
     """任务验证证据"""
 
