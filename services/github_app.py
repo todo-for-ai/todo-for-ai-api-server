@@ -91,7 +91,15 @@ def generate_app_jwt(app_id: str, private_key_pem: str) -> str:
 
 def get_installation_token(app_id: str, private_key_pem: str, installation_id: str,
                            timeout: int = 15) -> str:
-    """用 App JWT 换取 installation token（约 1 小时有效）。"""
+    """用 App JWT 换取 installation token（仅返回 token 字符串，无缓存）。"""
+    return _request_installation_token(app_id, private_key_pem, installation_id, timeout)[0]
+
+
+def _request_installation_token(app_id: str, private_key_pem: str, installation_id: str,
+                                timeout: int = 15):
+    """请求 installation token，返回 (token, expires_at epoch 秒)。"""
+    import time as _time
+
     jwt_token = generate_app_jwt(app_id, private_key_pem)
     resp = requests.post(
         f"{GITHUB_API_BASE}/app/installations/{installation_id}/access_tokens",
@@ -106,7 +114,49 @@ def get_installation_token(app_id: str, private_key_pem: str, installation_id: s
         raise GitHubAppError(
             f"installation token request failed: {resp.status_code} {resp.text[:200]}"
         )
-    return resp.json()["token"]
+    data = resp.json()
+    expires_at = None
+    raw_expires = data.get("expires_at")
+    if raw_expires:
+        try:
+            from datetime import datetime as _dt
+            expires_at = _dt.fromisoformat(raw_expires.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            expires_at = None
+    if not expires_at:
+        # GitHub 未返回时的保守默认：10 分钟
+        expires_at = _time.time() + 600
+    return data["token"], expires_at
+
+
+# 进程内缓存：{key: (token, expires_at)}
+_installation_token_cache: dict = {}
+_TOKEN_REFRESH_MARGIN_SECONDS = 300
+
+
+def get_cached_installation_token(app_id: str, private_key_pem: str, installation_id: str,
+                                  timeout: int = 15) -> str:
+    """获取 installation token，带进程内缓存（过期前 5 分钟刷新）。
+
+    App 凭据不完整或请求失败时抛出 GitHubAppError，由调用方回退到
+    绑定 token / 环境变量等静态凭证。
+    """
+    import time as _time
+
+    cache_key = f"{app_id}:{installation_id}"
+    cached = _installation_token_cache.get(cache_key)
+    now = _time.time()
+    if cached and cached[1] - _TOKEN_REFRESH_MARGIN_SECONDS > now:
+        return cached[0]
+
+    token, expires_at = _request_installation_token(app_id, private_key_pem, installation_id, timeout)
+    _installation_token_cache[cache_key] = (token, expires_at)
+    return token
+
+
+def clear_installation_token_cache():
+    """测试/配置变更后清空缓存。"""
+    _installation_token_cache.clear()
 
 
 def exchange_manifest_code(code: str, timeout: int = 15) -> dict:
@@ -150,6 +200,23 @@ def get_app_config():
         "private_key": _decrypt(row.private_key_encrypted),
         "webhook_secret": _decrypt(row.webhook_secret_encrypted),
     }
+
+
+def get_cached_installation_token_for_config() -> str:
+    """基于 GitHubAppConfig 的 installation token（repo 操作执行面优先凭证）。
+
+    App 已安装且凭据完整时返回有效 token；否则抛出 GitHubAppError，
+    调用方应回退到绑定 token / 环境变量。
+    """
+    config = get_app_config()
+    if not config:
+        raise GitHubAppError("GitHub App not configured")
+    if not (config.get("installed") and config.get("app_id")
+            and config.get("private_key") and config.get("installation_id")):
+        raise GitHubAppError("GitHub App installation incomplete")
+    return get_cached_installation_token(
+        config["app_id"], config["private_key"], config["installation_id"],
+    )
 
 
 def get_webhook_secret() -> Optional[str]:

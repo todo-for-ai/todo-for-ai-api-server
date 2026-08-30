@@ -10,7 +10,11 @@ from typing import Optional, Tuple
 
 import requests
 
-from services.github_app import decrypt_str
+import structlog
+
+from services.github_app import decrypt_str, GitHubAppError
+
+logger = structlog.get_logger()
 
 GITHUB_API_BASE = 'https://api.github.com'
 DEFAULT_TIMEOUT = 15
@@ -137,8 +141,26 @@ class GitHubClient:
         return data
 
 
-def resolve_token(binding) -> Optional[str]:
-    """解析仓库访问 token：绑定级（加密存储）优先，回退部署级 GITHUB_TOKEN。"""
+def resolve_token(binding, prefer_app: bool = True) -> Optional[str]:
+    """解析仓库访问 token，凭证优先级：
+
+    1. GitHub App installation token（App 已安装且凭据完整；进程内缓存，
+       过期前自动刷新）—— 短期授权，推荐来源
+    2. 绑定级 token（加密存储，项目专属）
+    3. 部署级环境变量 GITHUB_TOKEN
+
+    App 凭据不可用（未配置/未安装/请求失败）时静默回退，保证闭环可用。
+    prefer_app=False 可强制走静态凭证（如 App 配置排障时）。
+    """
+    if prefer_app:
+        try:
+            from services.github_app import get_cached_installation_token_for_config
+            return get_cached_installation_token_for_config()
+        except GitHubAppError as e:
+            logger.warning("repo.token_app_unavailable", error=str(e))
+        except Exception as e:
+            logger.warning("repo.token_app_error", error=str(e))
+
     if binding is not None and binding.token_encrypted:
         decrypted = decrypt_str(binding.token_encrypted)
         if decrypted:

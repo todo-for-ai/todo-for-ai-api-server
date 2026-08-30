@@ -242,3 +242,110 @@ class TestAppService:
 
         with pytest.raises(GitHubAppError):
             generate_app_jwt("999", "not-a-key")
+
+
+class TestInstallationTokenExecution:
+    """installation token 接入 repo 操作执行面（resolve_token 优先级链 + 缓存）。"""
+
+    def _seed_app(self, db_session, monkeypatch, *, installed=True):
+        monkeypatch.setenv("SECRET_ENCRYPTION_KEY", "uCuDTIUbpnE0Z47hrUqyNY8w7SjtIwKxnvZTduXeN30=")
+        from services.github_app import upsert_app_config, clear_installation_token_cache
+        upsert_app_config({
+            "app_id": "999",
+            "slug": "todo-for-ai",
+            "installation_id": "42",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nseed\n-----END PRIVATE KEY-----\n",
+            "webhook_secret": WEBHOOK_SECRET,
+            "installed": installed,
+        })
+        clear_installation_token_cache()
+        yield
+        from services.github_app import clear_installation_token_cache as _clear
+        _clear()
+
+    def test_resolve_prefers_app_installation_token(self, db_session, monkeypatch, project_factory):
+        from models import ProjectRepoBinding
+        from services.github_client import resolve_token
+        from services import github_app
+
+        list(self._seed_app(db_session, monkeypatch))
+
+        binding = ProjectRepoBinding(project_id=1, repo_owner="acme", repo_name="widget")
+        binding.token_encrypted = None
+        monkeypatch.setenv("GITHUB_TOKEN", "env-fallback")
+        monkeypatch.setattr(
+            github_app, "get_cached_installation_token_for_config",
+            lambda: "app-install-token",
+        )
+
+        assert resolve_token(binding) == "app-install-token"
+        assert resolve_token(binding, prefer_app=False) == "env-fallback"
+
+    def test_resolve_falls_back_when_app_not_installed(self, db_session, monkeypatch):
+        from models import ProjectRepoBinding
+        from services.github_client import resolve_token
+
+        list(self._seed_app(db_session, monkeypatch, installed=False))
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+        binding = ProjectRepoBinding(project_id=1, repo_owner="acme", repo_name="widget")
+        assert resolve_token(binding) is None  # 无静态凭证、App 未安装 → None
+
+    def test_resolve_falls_back_to_binding_token(self, db_session, monkeypatch, project_factory):
+        from models import ProjectRepoBinding
+        from services.github_client import resolve_token
+        from services.github_app import encrypt_str
+
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+        binding = ProjectRepoBinding(
+            project_id=1, repo_owner="acme", repo_name="widget",
+            token_encrypted=encrypt_str("binding-token"),
+        )
+
+        assert resolve_token(binding) == "binding-token"
+
+    def test_installation_token_cached_until_expiry(self, db_session, monkeypatch):
+        """同一 App/安装的 token 进程内缓存：第二次调用不触发刷新请求。"""
+        from services import github_app
+        from services.github_app import get_cached_installation_token, clear_installation_token_cache
+
+        calls = []
+        monkeypatch.setattr(
+            github_app, "_request_installation_token",
+            lambda app_id, key, inst, timeout=15: (calls.append(1) or (f"tok-{len(calls)}", 9999999999)),
+        )
+        clear_installation_token_cache()
+
+        assert get_cached_installation_token("999", "key", "42") == "tok-1"
+        assert get_cached_installation_token("999", "key", "42") == "tok-1"  # 缓存命中
+        assert len(calls) == 1
+        clear_installation_token_cache()
+
+    def test_installation_token_refreshes_near_expiry(self, db_session, monkeypatch):
+        """过期余量（5 分钟）内触发刷新。"""
+        import time as time_mod
+        from services import github_app
+        from services.github_app import get_cached_installation_token, clear_installation_token_cache
+
+        calls = []
+
+        def fake_request(app_id, key, inst, timeout=15):
+            calls.append(1)
+            # 60s < 5min 刷新余量 → 每次都视为临期
+            return f"tok-{len(calls)}", time_mod.time() + 60
+
+        monkeypatch.setattr(github_app, "_request_installation_token", fake_request)
+
+        assert get_cached_installation_token("777", "key", "42") == "tok-1"
+        assert get_cached_installation_token("777", "key", "42") == "tok-2"  # 临期刷新
+        assert len(calls) == 2
+        clear_installation_token_cache()
+
+    def test_app_error_on_incomplete_config(self, db_session, monkeypatch):
+        from services.github_app import (
+            GitHubAppError, get_cached_installation_token_for_config, clear_installation_token_cache,
+        )
+
+        clear_installation_token_cache()
+        with pytest.raises(GitHubAppError):
+            get_cached_installation_token_for_config()
