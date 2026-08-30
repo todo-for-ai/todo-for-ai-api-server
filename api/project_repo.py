@@ -7,15 +7,25 @@
 - 查询 PR 状态并同步回写任务（merged → 任务自动 DONE）
 """
 
-from flask import Blueprint
+from flask import Blueprint, request
 
 import uuid
 
-from models import AgentTaskEvent, AuditLog, db, Project, Task, TaskEvidenceRecord, ProjectRepoBinding
+from models import (
+    AgentTaskEvent,
+    AuditLog,
+    db,
+    Project,
+    ProjectMember,
+    ProjectMemberRole,
+    Task,
+    TaskEvidenceRecord,
+    ProjectRepoBinding,
+)
 from core.auth import unified_auth_required, get_current_user
 from core.secret_encryption import get_secret_encryption
 from services.github_app import encrypt_str as _encrypt_secret, decrypt_str as _decrypt_secret
-from .base import ApiResponse, validate_json_request
+from .base import ApiResponse, get_request_args, validate_json_request
 from services.github_client import (
     GitHubClient,
     GitHubClientError,
@@ -734,6 +744,90 @@ def approve_task_pull_request(task_id: int):
     except Exception as e:
         db.session.rollback()
         return ApiResponse.error(f"Failed to approve interaction: {e}", 500).to_response()
+
+
+@project_repo_bp.route('/tasks/pull-request/approvals/pending', methods=['GET'])
+@unified_auth_required
+def list_pending_pr_approvals():
+    """列出当前用户可管理项目中待审批的 PR 交互请求（L0 审批队列前端数据源）。
+
+    返回 interaction_request 事件（interaction_type ∈ pr_create/pr_merge、
+    status=pending_approval），附带任务标题/项目，供 Command Center 展示与操作。
+    """
+    try:
+        from sqlalchemy import or_ as sa_or
+
+        current_user = get_current_user()
+        page = max(request.args.get('page', 1, type=int) or 1, 1)
+        per_page = min(max(request.args.get('per_page', 20, type=int) or 20, 1), 100)
+
+        # 用户可管理的项目（owner 或成员 manage+）
+        if current_user.is_admin:
+            managed_project_ids = [pid for (pid,) in (
+                db.session.query(Project.id).order_by(Project.id.desc()).limit(500).all()
+            )]
+        else:
+            owned = db.session.query(Project.id).filter(Project.owner_id == current_user.id)
+            member = db.session.query(ProjectMember.project_id).filter(
+                ProjectMember.user_id == current_user.id,
+                ProjectMember.role.in_([
+                    ProjectMemberRole.OWNER, ProjectMemberRole.ADMIN,
+                    ProjectMemberRole.MAINTAINER,
+                ]),
+            )
+            managed_project_ids = [pid for (pid,) in owned.union(member).all()]
+
+        if not managed_project_ids:
+            return ApiResponse.success(data={'items': [], 'pagination': {
+                'page': page, 'per_page': per_page, 'total': 0, 'has_next': False,
+            }}, message='No pending PR approvals').to_response()
+
+        rows = (
+            AgentTaskEvent.query
+            .filter(
+                AgentTaskEvent.event_type == INTERACTION_REQUEST_EVENT_TYPE,
+                AgentTaskEvent.payload['interaction_type'].as_string().in_(['pr_create', 'pr_merge']),
+                AgentTaskEvent.payload['status'].as_string() == 'pending_approval',
+                Task.project_id.in_(managed_project_ids),
+            )
+            .join(Task, Task.id == AgentTaskEvent.task_id)
+            .order_by(AgentTaskEvent.id.desc())
+            .limit(per_page * page)
+            .all()
+        )
+
+        # 无既有决策记录的才视为 pending
+        items = []
+        for row in rows:
+            payload = row.payload or {}
+            interaction_id = payload.get('interaction_id')
+            decided = AgentTaskEvent.query.filter(
+                AgentTaskEvent.task_id == row.task_id,
+                AgentTaskEvent.event_type == INTERACTION_APPROVAL_EVENT_TYPE,
+                AgentTaskEvent.payload['interaction_id'].as_string() == interaction_id,
+            ).first()
+            if decided:
+                continue
+            task = Task.query.get(row.task_id)
+            items.append({
+                'interaction_id': interaction_id,
+                'interaction_type': payload.get('interaction_type'),
+                'task_id': row.task_id,
+                'task_title': task.title if task else None,
+                'project_id': task.project_id if task else None,
+                'pr_number': payload.get('pr_number'),
+                'repo_full_name': payload.get('repo_full_name'),
+                'head_branch': (payload.get('metadata') or {}).get('head_branch'),
+                'requested_at': payload.get('requested_at'),
+            })
+            if len(items) >= per_page:
+                break
+
+        return ApiResponse.success(data={'items': items, 'pagination': {
+            'page': page, 'per_page': per_page, 'total': len(items), 'has_next': False,
+        }}, message='Pending PR approvals retrieved').to_response()
+    except Exception as e:
+        return ApiResponse.error(f"Failed to list pending PR approvals: {e}", 500).to_response()
 
 
 @project_repo_bp.route('/tasks/<int:task_id>/pull-request/merge', methods=['POST'])

@@ -572,3 +572,60 @@ class TestAutonomyLevels:
         assert data["auto_merged"] is None
         assert data["task_status"] != "done"
         fake_client.merge_pull_request.assert_not_called()
+
+
+class TestPendingPrApprovalsList:
+    """L0 审批队列前端数据源：pending 列表端点。"""
+
+    @pytest.fixture
+    def owned_org_project(self, db_session, owner_auth, project_factory):
+        from models import Project
+        project = project_factory(owner_id=owner_auth["user"].id)
+        project.organization_id = 9999
+        db_session.add(project)
+        db_session.commit()
+        return project
+
+    def test_pending_list_and_decide_flow(self, client, db_session, owner_auth, owned_org_project, task_factory):
+        from models import AgentTaskEvent
+
+        client.put(
+            f"{BASE_URL}/projects/{owned_org_project.id}/repo",
+            json={"repo_owner": "acme", "repo_name": "widget", "autonomy_level": 0},
+            headers=owner_auth["headers"],
+        )
+        task = task_factory(project_id=owned_org_project.id, owner_id=owner_auth["user"].id, title="Queue me")
+
+        # 记录创建前已有的 pending 交互（task_factory 手动 id 会在测试间重复，用差集定位本次）
+        def _pending_ids():
+            r = client.get(f"{BASE_URL}/tasks/pull-request/approvals/pending", headers=owner_auth["headers"])
+            return {i["interaction_id"]: i for i in r.get_json()["data"]["items"]}
+
+        before = _pending_ids()
+
+        # L0 创建 → 生成 pending 请求
+        client.post(
+            f"{BASE_URL}/tasks/{task.id}/pull-request",
+            json={"head_branch": "agent/q"},
+            headers=owner_auth["headers"],
+        )
+
+        after = _pending_ids()
+        new_ids = set(after) - set(before)
+        assert len(new_ids) == 1
+        interaction_id = new_ids.pop()
+        mine = after[interaction_id]
+        assert mine["interaction_type"] == "pr_create"
+        assert mine["head_branch"] == "agent/q"
+        fake_client = MagicMock()
+        fake_client.create_pull_request.return_value = _pr_data(number=55)
+        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+            resp = client.post(
+                f"{BASE_URL}/tasks/{task.id}/pull-request/approve",
+                json={"interaction_id": interaction_id, "decision": "approved"},
+                headers=owner_auth["headers"],
+            )
+        assert resp.status_code == 200
+
+        after_approval = _pending_ids()
+        assert interaction_id not in after_approval
