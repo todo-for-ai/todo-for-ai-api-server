@@ -10,16 +10,24 @@ BASE_URL = "/todo-for-ai/api/v1"
 
 @pytest.fixture(autouse=True)
 def _cleanup_runtime_rows(db_session):
-    """清理提交协议侧的持久行，避免会话级测试库中的跨用例残留。"""
-    yield
+    """清理提交协议侧的持久行，避免会话级测试库中的跨用例残留。
+
+    本文件与 test_agent_runtime_protocol.py 共享同一个会话级 SQLite 库，
+    双向清理（用例前+用例后）active lease 等行，防止 UNIQUE 冲突。
+    """
     from models import AgentTaskLease, AgentTaskAttempt, AgentResultDedup, TaskEvidenceRecord
 
-    db_session.rollback()
-    db_session.query(AgentTaskLease).delete(synchronize_session=False)
-    db_session.query(AgentTaskAttempt).delete(synchronize_session=False)
-    db_session.query(AgentResultDedup).delete(synchronize_session=False)
-    db_session.query(TaskEvidenceRecord).delete(synchronize_session=False)
-    db_session.commit()
+    def _purge():
+        db_session.rollback()
+        db_session.query(AgentTaskLease).delete(synchronize_session=False)
+        db_session.query(AgentTaskAttempt).delete(synchronize_session=False)
+        db_session.query(AgentResultDedup).delete(synchronize_session=False)
+        db_session.query(TaskEvidenceRecord).delete(synchronize_session=False)
+        db_session.commit()
+
+    _purge()
+    yield
+    _purge()
 
 
 @pytest.fixture
