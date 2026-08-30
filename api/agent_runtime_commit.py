@@ -19,6 +19,7 @@ from models import (
 )
 from .base import ApiResponse, validate_json_request
 from .agent_common import now_utc, write_agent_audit, agent_session_required
+from services.failure_recovery import handle_failed_commit
 
 
 agent_runtime_commit_bp = Blueprint('agent_runtime_commit', __name__)
@@ -240,6 +241,7 @@ def commit_task(task_id):
         return ApiResponse.error(f'Invalid evidence: {evidence_error}', 400).to_response()
 
     final_status = (data.get('status') or '').lower()
+    recovery = None
 
     if final_status == 'succeeded' and task.dod and _dod_evidence_required():
         unmet = _check_dod_coverage(task, evidence_items)
@@ -273,6 +275,21 @@ def commit_task(task_id):
         attempt.state = AgentTaskAttemptState.ABORTED
         attempt.failure_code = str(data.get('failure_code') or 'FAILED')
         attempt.failure_reason = str(data.get('failure_reason') or 'Agent reported failure')
+
+        # P2.3 失败自愈：归因 + 修复子任务回流 / 封顶升级人工
+        recovery = None
+        try:
+            recovery = handle_failed_commit(
+                task, agent, attempt_id=data['attempt_id'],
+                failure_code=attempt.failure_code,
+                failure_reason=attempt.failure_reason,
+            )
+        except Exception as recovery_error:
+            # 自愈失败不影响失败提交本身
+            import structlog
+            structlog.get_logger().warning(
+                "commit.recovery_failed", task_id=task.id, error=str(recovery_error),
+            )
     elif final_status == 'cancelled':
         task.status = TaskStatus.CANCELLED
         attempt.state = AgentTaskAttemptState.ABORTED
@@ -335,6 +352,7 @@ def commit_task(task_id):
             'final_status': final_status,
             'committed_at': now.isoformat(),
             'evidence_count': len(evidence_items),
+            'recovery': recovery,
         },
         'Task committed successfully',
     ).to_response()
