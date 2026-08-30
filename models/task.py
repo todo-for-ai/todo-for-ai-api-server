@@ -32,8 +32,8 @@ class Task(BaseModel):
 
     __tablename__ = 'tasks'
 
-    # 重写id字段为BigInteger以支持大量任务
-    id = Column(BigInteger, primary_key=True, autoincrement=True, comment='主键ID')
+    # 重写id字段为BigInteger以支持大量任务；SQLite 下以 INTEGER 渲染使主键成为 rowid 别名（自增可用）
+    id = Column(BigInteger().with_variant(Integer, 'sqlite'), primary_key=True, autoincrement=True, comment='主键ID')
 
     # 基本信息
     project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, comment='所属项目ID')

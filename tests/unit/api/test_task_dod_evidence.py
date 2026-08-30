@@ -371,3 +371,53 @@ class TestAcrInstrumentation:
 
         db_session.expire(task)
         assert (task.human_intervention_count or 0) == 0
+
+
+class TestDodViaTaskApi:
+    """通过任务 API 声明/更新 DoD。"""
+
+    def test_create_task_with_dod(self, client, db_session, owner_auth, project_factory):
+        project = project_factory(owner_id=owner_auth["user"].id)
+        resp = client.post(
+            f"{BASE_URL}/tasks",
+            json={
+                "project_id": project.id,
+                "title": "Task with dod",
+                "dod": [
+                    {"type": "test", "value": "pytest -q"},
+                    {"type": "build", "value": "make build"},
+                ],
+            },
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code in (200, 201), resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["dod"] == [
+            {"type": "test", "value": "pytest -q"},
+            {"type": "build", "value": "make build"},
+        ]
+
+    def test_create_task_rejects_invalid_dod_type(self, client, db_session, owner_auth, project_factory):
+        project = project_factory(owner_id=owner_auth["user"].id)
+        resp = client.post(
+            f"{BASE_URL}/tasks",
+            json={
+                "project_id": project.id,
+                "title": "Bad dod",
+                "dod": [{"type": "vibes", "value": "trust me"}],
+            },
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 400
+
+    def test_update_task_dod(self, client, db_session, owner_auth, project_factory, task_factory):
+        project = project_factory(owner_id=owner_auth["user"].id)
+        task = task_factory(project_id=project.id, title="Update dod")
+        resp = client.put(
+            f"{BASE_URL}/tasks/{task.id}",
+            json={"dod": [{"type": "lint", "value": "ruff check ."}]},
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 200, resp.get_json()
+        db_session.expire(task)
+        assert task.dod == [{"type": "lint", "value": "ruff check ."}]

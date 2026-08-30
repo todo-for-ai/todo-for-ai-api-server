@@ -42,6 +42,24 @@ def _user_display_name(user):
     return user.full_name or user.nickname or user.username or user.email or str(user.id)
 
 
+def _validate_dod_payload(dod):
+    """校验 DoD 载荷：[{type, value}]；type 必须属于 TaskEvidenceRecord.TYPES。返回 (normalized, error)。"""
+    if not isinstance(dod, list):
+        return None, "dod must be an array of {type, value} objects"
+    normalized = []
+    for item in dod:
+        if not isinstance(item, dict):
+            return None, "each dod item must be an object"
+        dod_type = str(item.get('type') or '').strip().lower()
+        if dod_type not in TaskEvidenceRecord.TYPES:
+            return None, f"invalid dod type: {dod_type!r} (allowed: {', '.join(TaskEvidenceRecord.TYPES)})"
+        normalized.append({
+            'type': dod_type,
+            'value': str(item.get('value') or item.get('description') or '')[:500],
+        })
+    return normalized, None
+
+
 def _build_accessible_tasks_query(user_id: int):
     """Build task access scope with an owner-only fast path."""
     foreign_member_project_ids_query = db.session.query(ProjectMember.project_id).join(
@@ -197,12 +215,18 @@ def create_task():
             optional_fields=[
                 'title', 'content', 'status', 'priority',
                 'due_date', 'tags', 'labels', 'is_ai_task',
-                'assignees', 'mentions'
+                'assignees', 'mentions', 'dod'
             ]
         )
 
         if isinstance(data, tuple):  # 错误响应
             return data
+
+        dod_normalized = None
+        if 'dod' in data:
+            dod_normalized, dod_error = _validate_dod_payload(data['dod'])
+            if dod_error:
+                return ApiResponse.error(dod_error, 400).to_response()
 
         # 验证项目是否存在
         project = Project.query.get(data['project_id'])
@@ -273,6 +297,7 @@ def create_task():
             mentions=normalized_mentions,
             revision=1,
             is_ai_task=data.get('is_ai_task', False),
+            dod=dod_normalized,
             creator_id=current_user.id,  # 设置创建者ID
             created_by=current_user.email  # 设置创建者邮箱
         )
@@ -449,7 +474,7 @@ def update_task(task_id):
             optional_fields=[
                 'title', 'content', 'status', 'priority',
                 'due_date', 'completion_rate', 'tags', 'labels',
-                'assignees', 'mentions', 'expected_revision'
+                'assignees', 'mentions', 'expected_revision', 'dod'
             ]
         )
         
@@ -490,6 +515,16 @@ def update_task(task_id):
             except ValueError:
                 return ApiResponse.error("Invalid due_date format. Use ISO format.", 400).to_response()
         
+        # 处理 DoD 变更（验证门）
+        if 'dod' in data:
+            dod_normalized, dod_error = _validate_dod_payload(data['dod'])
+            if dod_error:
+                return ApiResponse.error(dod_error, 400).to_response()
+            old_dod = task.dod
+            if old_dod != dod_normalized:
+                changes.append(('dod', old_dod or [], dod_normalized))
+                task.dod = dod_normalized
+
         # 处理状态变更
         if 'status' in data:
             try:

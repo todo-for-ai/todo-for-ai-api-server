@@ -3,7 +3,7 @@ from datetime import datetime
 from flask import g
 
 from core.cache_invalidation import invalidate_user_caches
-from models import ContextRule, Project, Task, db
+from models import ContextRule, Project, Task, TaskEvidenceRecord, db
 
 from ..shared import sanitize_input, validate_integer
 
@@ -303,3 +303,96 @@ def create_task(arguments):
     except Exception as e:
         db.session.rollback()
         return {'error': f'Failed to create task: {str(e)}'}
+
+
+def _task_access_error(task):
+    """MCP 侧任务访问检查（与 get_task_by_id 保持一致）。"""
+    if task.creator_id != g.current_user.id:
+        project = Project.query.get(task.project_id)
+        if not project or project.owner_id != g.current_user.id:
+            return {'error': 'Access denied: You can only access your own tasks'}
+    return None
+
+
+def get_task_evidence(arguments):
+    """获取任务的完成标准（DoD）与验证证据"""
+    task_id = arguments.get('task_id')
+    if not task_id:
+        return {'error': 'task_id is required'}
+    try:
+        task_id = validate_integer(task_id, 'task_id')
+    except ValueError as e:
+        return {'error': str(e)}
+
+    task = Task.query.get(task_id)
+    if not task:
+        return {'error': f'Task with ID {task_id} not found'}
+
+    access_error = _task_access_error(task)
+    if access_error:
+        return access_error
+
+    items = (
+        TaskEvidenceRecord.query
+        .filter_by(task_id=task.id)
+        .order_by(TaskEvidenceRecord.id.desc())
+        .limit(50)
+        .all()
+    )
+    return {
+        'task_id': task.id,
+        'task_status': task.status.value if task.status else None,
+        'dod': task.dod or [],
+        'evidence': [
+            {
+                'id': ev.id,
+                'evidence_type': ev.evidence_type,
+                'status': ev.status,
+                'summary': ev.summary,
+                'url': ev.url,
+                'attempt_id': ev.attempt_id,
+                'created_at': ev.created_at.isoformat() if ev.created_at else None,
+            }
+            for ev in items
+        ],
+    }
+
+
+def set_task_dod(arguments):
+    """设置任务的完成标准（DoD）。提交空数组可清除 DoD。"""
+    task_id = arguments.get('task_id')
+    dod = arguments.get('dod')
+
+    if not task_id:
+        return {'error': 'task_id is required'}
+    try:
+        task_id = validate_integer(task_id, 'task_id')
+    except ValueError as e:
+        return {'error': str(e)}
+
+    if dod is None or not isinstance(dod, list):
+        return {'error': 'dod must be an array of {type, value} objects'}
+
+    normalized = []
+    for item in dod:
+        if not isinstance(item, dict):
+            return {'error': 'each dod item must be an object'}
+        dod_type = str(item.get('type') or '').strip().lower()
+        if dod_type not in TaskEvidenceRecord.TYPES:
+            return {'error': f"invalid dod type: {dod_type!r} (allowed: {', '.join(TaskEvidenceRecord.TYPES)})"}
+        normalized.append({
+            'type': dod_type,
+            'value': str(item.get('value') or '')[:500],
+        })
+
+    task = Task.query.get(task_id)
+    if not task:
+        return {'error': f'Task with ID {task_id} not found'}
+
+    access_error = _task_access_error(task)
+    if access_error:
+        return access_error
+
+    task.dod = normalized
+    db.session.commit()
+    return {'task_id': task.id, 'dod': task.dod, 'updated': True}
