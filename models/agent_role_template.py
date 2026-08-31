@@ -5,7 +5,9 @@ Agent 角色模板模型
 """
 
 import enum
-from sqlalchemy import Column, String, Text, Enum, Integer, ForeignKey, JSON, Boolean
+from datetime import datetime
+
+from sqlalchemy import Column, String, Text, Enum, Integer, ForeignKey, JSON, Boolean, DateTime
 from sqlalchemy.orm import relationship
 from .base import BaseModel
 
@@ -59,6 +61,9 @@ class AgentRoleTemplate(BaseModel):
 
     # 元数据
     is_builtin = Column(Boolean, default=False, nullable=False, comment='是否为内置模板')
+    published_to_marketplace = Column(Boolean, default=False, nullable=False,
+                                      comment='是否发布到数字员工市场（跨工作区可安装）')
+    published_at = Column(DateTime, comment='发布时间')
     status = Column(Enum(AgentRoleTemplateStatus), default=AgentRoleTemplateStatus.ACTIVE,
                     nullable=False, comment='状态')
     usage_count = Column(Integer, default=0, comment='使用次数')

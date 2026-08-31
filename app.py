@@ -227,6 +227,7 @@ def register_blueprints(app):
     from api.budgets import budgets_bp
     from api.knowledge_curation import knowledge_curation_bp
     from api.insight_actions import insight_actions_bp
+    from api.marketplace import marketplace_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -285,6 +286,7 @@ def register_blueprints(app):
     app.register_blueprint(budgets_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(knowledge_curation_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(insight_actions_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(marketplace_bp, url_prefix='/todo-for-ai/api/v1')
 
 
 
