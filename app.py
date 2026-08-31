@@ -231,6 +231,7 @@ def register_blueprints(app):
     from api.open_protocol import open_protocol_bp
     from api.enterprise import enterprise_bp
     from api.connectors import connectors_bp
+    from api.deploy_check import deploy_check_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -293,6 +294,7 @@ def register_blueprints(app):
     app.register_blueprint(open_protocol_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(enterprise_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(connectors_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(deploy_check_bp, url_prefix='/todo-for-ai/api/v1')
 
 
 
