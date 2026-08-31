@@ -59,7 +59,9 @@ def owner_auth(app, db_session):
 @pytest.fixture
 def runtime_ctx(client, db_session, user_factory, organization_factory, agent_factory):
     """创建带 runtime 认证的 Agent 上下文（introspect 换取 agent token）。"""
-    from models import AgentKey
+    from models import AgentExperience, AgentKey
+
+    created_agents = []
 
     def _create():
         user = user_factory()
@@ -69,6 +71,7 @@ def runtime_ctx(client, db_session, user_factory, organization_factory, agent_fa
             creator_user_id=user.id,
             runner_enabled=True,
         )
+        created_agents.append(agent)
         key_row, raw_key = AgentKey.generate_key(
             name=f"Runtime Key {uuid.uuid4().hex[:6]}",
             workspace_id=org.id,
@@ -93,7 +96,12 @@ def runtime_ctx(client, db_session, user_factory, organization_factory, agent_fa
             "headers": {"Authorization": f"Bearer {token}"},
         }
 
-    return _create
+    yield _create
+
+    # failed commit 会写失败经验（P3.1）；删 Agent 前先清掉，避免 FK 冲突
+    for agent in created_agents:
+        AgentExperience.query.filter_by(agent_id=agent.id).delete()
+    db_session.commit()
 
 
 def _make_lease(db_session, agent, task):

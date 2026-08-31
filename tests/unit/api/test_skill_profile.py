@@ -229,3 +229,46 @@ class TestDispatchScoring:
 
         result = score_task_for_agent(task, agent)
         assert result.get("skill_profile_bonus", 0) == 0
+
+
+class TestFailureToExperience:
+    """P2.3 → P3.1 学习闭环：failed 提交归因结果自动沉淀为失败经验。"""
+
+    def test_failed_commit_records_failure_experience(self, db_session, owner_auth, agent, task_factory):
+        from models import AgentExperience
+        from services.failure_recovery import handle_failed_commit
+
+        project = task_factory(owner_id=owner_auth["user"].id).project
+        task = task_factory(project_id=project.id, owner_id=owner_auth["user"].id,
+                            title="Broken build", tags=["python"])
+
+        result = handle_failed_commit(
+            task, agent, attempt_id="att-exp-1",
+            failure_code="TESTS_FAILED",
+            failure_reason="assert 1 == 2 in test_login",
+        )
+        assert result["action"] == "repair_created"
+        assert result["category"] == "test_failure"
+
+        exps = AgentExperience.query.filter_by(
+            agent_id=agent.id, experience_type="failure_pattern",
+        ).all()
+        assert len(exps) == 1
+        exp = exps[0]
+        assert exp.task_type == "test_failure"
+        assert exp.domain == "python"
+        assert "TESTS_FAILED" in (exp.outcome_pattern or "")
+        assert exp.source_task_id == task.id
+
+        # 画像重建后失败经验应计入技能统计
+        from services.skill_profile import build_skill_profile
+        profile = build_skill_profile(agent)
+        skills = {(s["name"], s["kind"]): s for s in profile["skills"]}
+        assert ("test_failure", "task_type") in skills
+        assert skills[("test_failure", "task_type")]["success_rate"] == 0
+
+        # 清理自愈子任务与经验，避免 factory teardown FK 冲突
+        from models import Task
+        Task.query.filter(Task.parent_task_id == task.id).delete()
+        AgentExperience.query.filter_by(agent_id=agent.id).delete()
+        db_session.commit()

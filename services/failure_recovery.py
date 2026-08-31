@@ -68,6 +68,40 @@ CATEGORY_LABELS = {
 DEFAULT_MAX_REPAIR_ATTEMPTS = 2
 
 
+def _record_failure_experience(task, agent, category: str,
+                               failure_code: Optional[str], failure_reason: Optional[str]) -> None:
+    """失败经验自动入库（P2.3 → P3.1 学习闭环）。
+
+    归因结果作为 failure_pattern 经验沉淀到 AgentExperience，
+    供技能画像（skill_profile）与派单打分（experience_bonus）消费。
+    经验写入失败只记日志，不阻断自愈主流程。
+    """
+    import structlog
+
+    from models import AgentExperience
+
+    if not agent:
+        return
+    logger = structlog.get_logger()
+    try:
+        tags = getattr(task, 'tags', None) or []
+        db.session.add(AgentExperience(
+            agent_id=int(agent.id),
+            experience_type='failure_pattern',
+            domain=str(tags[0]).strip().lower() if tags else None,
+            task_type=category,
+            capabilities_used=(getattr(agent, 'capabilities', None) or [])[:3],
+            outcome_pattern=f"{failure_code or 'N/A'}: {(failure_reason or '').strip()[:300]}",
+            key_learnings=f"自动归因类别: {category}（任务 #{task.id}）",
+            confidence=0.6,
+            source_task_id=int(task.id),
+        ))
+        db.session.flush()
+    except Exception as e:  # noqa: BLE001 - 经验沉淀绝不能阻断恢复主流程
+        logger.warning("recovery.experience_record_failed", error=str(e))
+        db.session.rollback()
+
+
 def classify_failure(failure_code: Optional[str], failure_reason: Optional[str]) -> str:
     """归因：failure_code 精确匹配优先，reason 关键词次之，其余 unknown。"""
     code = (failure_code or "").strip().upper()
@@ -120,6 +154,9 @@ def handle_failed_commit(task, agent, attempt_id: str,
 
     if _has_recovery_event(task.id, attempt_id):
         return {"action": "skipped", "reason": "already processed", "category": category}
+
+    # 失败经验沉淀（P3.1 学习闭环）：每个被处理的 attempt 记一条 failure_pattern
+    _record_failure_experience(task, agent, category, failure_code, failure_reason)
 
     # 封顶：升级人工（interaction_request 审批事件，budget/pr 审批同一队列可见）
     if failed_attempts >= max_attempts:

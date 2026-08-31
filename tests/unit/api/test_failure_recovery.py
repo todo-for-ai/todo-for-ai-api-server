@@ -71,12 +71,15 @@ class TestClassifyFailure:
 class TestFailedCommitRecovery:
     @pytest.fixture
     def runtime_ctx(self, client, db_session, user_factory, organization_factory, agent_factory):
-        from models import AgentKey
+        from models import AgentExperience, AgentKey
+
+        created_agents = []
 
         def _create():
             user = user_factory()
             org = organization_factory(owner_id=user.id)
             agent = agent_factory(workspace_id=org.id, runner_enabled=True)
+            created_agents.append(agent)
             key_row, raw_key = AgentKey.generate_key(
                 name=f"Key {uuid.uuid4().hex[:6]}", workspace_id=org.id,
                 agent_id=agent.id, created_by_user_id=user.id,
@@ -89,7 +92,12 @@ class TestFailedCommitRecovery:
             return {"user": user, "org": org, "agent": agent,
                     "headers": {"Authorization": f"Bearer {token}"}}
 
-        return _create
+        yield _create
+
+        # failed commit 现在会写失败经验（P3.1）；删 Agent 前先清掉，避免 FK 冲突
+        for agent in created_agents:
+            AgentExperience.query.filter_by(agent_id=agent.id).delete()
+        db_session.commit()
 
     def _failed_attempt(self, db_session, agent, task, attempt_id=None):
         """建一个 ABORTED attempt + 配套 active lease（commit 校验要求）。"""
