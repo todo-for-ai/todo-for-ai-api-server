@@ -152,7 +152,8 @@ class TestSSOLogin:
         # state 可被服务端校验并还原 workspace
         assert verify_oidc_state(data["state"]) == ws
 
-    def test_saml_login_not_implemented_501(self, client, db_session, owner_auth):
+    def test_saml_login_without_metadata_400(self, client, db_session, owner_auth):
+        """SAML 已实现（见 test_saml_login.py）；缺 IdP 元数据地址属配置错误 400。"""
         ws = owner_auth["org"].id
         from models import WorkspaceSSOConfig
         db_session.add(WorkspaceSSOConfig(
@@ -161,7 +162,7 @@ class TestSSOLogin:
         db_session.commit()
 
         resp = client.post(f"{BASE_URL}/workspaces/{ws}/sso/login")
-        assert resp.status_code == 501
+        assert resp.status_code == 400
 
     def test_callback_via_injected_client(self, client, owner_auth):
         """回调链路端到端：注入假 IdP 客户端完成 code→JWT 链路。"""

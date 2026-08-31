@@ -24,7 +24,7 @@ STATE_MAX_AGE_SECONDS = 300
 
 
 class SAMLNotImplemented(NotImplementedError):
-    """SAML 登录链路尚未实现（配置可存）。"""
+    """兼容占位：SAML 登录链路已实现，不再抛出（保留异常名以防外部引用）。"""
 
 
 def get_config(workspace_id: int) -> Optional[WorkspaceSSOConfig]:
@@ -166,6 +166,79 @@ def login_oidc(workspace_id: int, code: str, state: str,
 
     userinfo = exchange_code(config, code, http_client=http_client)
     user = find_or_create_user(userinfo)
+
+    from flask_jwt_extended import create_access_token
+    token = create_access_token(identity=str(user.id))
+    return {
+        'user': user.to_public_dict(),
+        'access_token': token,
+    }
+
+
+# ── SAML 登录链路（Phase 4 企业能力）──
+
+def build_saml_login(workspace_id: int, state: str) -> Dict[str, Any]:
+    """SP-initiated：构造 AuthnRequest + Redirect Binding 跳转地址。
+
+    state 应为 verify_oidc_state 可校验的签名串（含 ws 与 request_id）。
+    """
+    from services.saml import build_authn_request, build_saml_redirect, fetch_idp_metadata
+
+    config = get_config(workspace_id)
+    if not config or config.provider != WorkspaceSSOConfig.PROVIDER_SAML or not config.enabled:
+        raise ValueError('SAML not enabled for this workspace')
+
+    payload = _state_serializer().loads(state, max_age=STATE_MAX_AGE_SECONDS)
+    request_id = payload.get('request_id')
+    if not request_id:
+        raise ValueError('state missing request_id')
+
+    metadata = fetch_idp_metadata(config.idp_metadata_url)
+    authn_request = build_authn_request(
+        sp_entity_id=config.issuer or '',
+        acs_url=config.redirect_uri or '',
+        request_id=request_id,
+    )
+    redirect_url = build_saml_redirect(metadata['sso_url'], authn_request, state)
+    return {'redirect_url': redirect_url, 'request_id': request_id}
+
+
+def make_saml_state(workspace_id: int) -> str:
+    """SAML state：签名携带工作区与本次 AuthnRequest 的 request_id。"""
+    from services.saml import new_request_id
+
+    request_id = new_request_id()
+    return _state_serializer().dumps({
+        'ws': workspace_id, 'request_id': request_id, 'nonce': secrets.token_urlsafe(8),
+    })
+
+
+def login_saml(workspace_id: int, saml_response_b64: str, relay_state: str,
+               http_client=None) -> Dict[str, Any]:
+    """SAML 回调链路：state 校验 → 断言校验（签名/时间窗/audience）→ JWT。"""
+    from services.saml import fetch_idp_metadata, verify_saml_response
+
+    payload = _state_serializer().loads(relay_state, max_age=STATE_MAX_AGE_SECONDS)
+    if int(payload.get('ws', -1)) != workspace_id:
+        raise ValueError('state workspace mismatch')
+    request_id = payload.get('request_id')
+
+    config = get_config(workspace_id)
+    if not config or config.provider != WorkspaceSSOConfig.PROVIDER_SAML or not config.enabled:
+        raise ValueError('SAML not enabled for this workspace')
+
+    metadata = fetch_idp_metadata(config.idp_metadata_url, http_client=http_client)
+    userinfo = verify_saml_response(
+        saml_response_b64,
+        idp_entity_id=config.idp_entity_id,
+        sp_entity_id=config.issuer or '',
+        certificate_pem=metadata['certificate_pem'],
+        request_id=request_id,
+    )
+    user = find_or_create_user({
+        'email': userinfo['email'],
+        'name': userinfo.get('name') or userinfo['email'].split('@')[0],
+    })
 
     from flask_jwt_extended import create_access_token
     token = create_access_token(identity=str(user.id))

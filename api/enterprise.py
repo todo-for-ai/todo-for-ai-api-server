@@ -31,8 +31,11 @@ from .base import ApiResponse, validate_json_request
 from services.sso import (
     build_oidc_authorize_url,
     build_oidc_state,
+    build_saml_login,
     get_config,
     login_oidc,
+    login_saml,
+    make_saml_state,
     upsert_config,
 )
 
@@ -101,31 +104,61 @@ def put_sso_config(workspace_id: int):
 
 @enterprise_bp.route('/workspaces/<int:workspace_id>/sso/login', methods=['POST'])
 def sso_login(workspace_id: int):
-    """生成 IdP 授权 URL（未认证入口，无需平台 token）。"""
+    """生成 IdP 跳转入口（未认证入口，无需平台 token）。
+
+    OIDC → 授权 URL；SAML → AuthnRequest Redirect Binding 跳转地址。
+    """
     config = get_config(workspace_id)
     if not config or not config.enabled:
         return ApiResponse.error('SSO not enabled for this workspace', 400).to_response()
+
     if config.provider == WorkspaceSSOConfig.PROVIDER_SAML:
-        return ApiResponse.error('SAML login flow not implemented yet', 501).to_response()
+        try:
+            state = make_saml_state(workspace_id)
+            result = build_saml_login(workspace_id, state)
+        except ValueError as e:
+            return ApiResponse.error(str(e), 400).to_response()
+        except Exception as e:  # noqa: BLE001 - 元数据拉取失败等
+            return ApiResponse.error(f'SAML metadata unavailable: {e}', 502).to_response()
+        return ApiResponse.success(
+            data={'provider': 'saml', 'redirect_url': result['redirect_url'], 'state': state},
+            message='SAML redirect generated',
+        ).to_response()
 
     state = build_oidc_state(workspace_id)
     url = build_oidc_authorize_url(config, state)
     return ApiResponse.success(data={
+        'provider': 'oidc',
         'authorization_url': url,
         'state': state,
     }).to_response()
 
 
-@enterprise_bp.route('/sso/callback/<int:workspace_id>', methods=['GET'])
+@enterprise_bp.route('/sso/callback/<int:workspace_id>', methods=['GET', 'POST'])
 def sso_callback(workspace_id: int):
-    """OIDC 回调：code+state → 平台 JWT（骨架版返回 JSON）。"""
+    """IdP 回调：OIDC（code+state）或 SAML（SAMLResponse+RelayState，POST binding）。
+
+    两者均以 find_or_create_user → 平台 JWT 收尾；骨架版返回 JSON。
+    """
+    # SAML POST binding（form）优先
+    saml_response = request.form.get('SAMLResponse') or request.args.get('SAMLResponse')
+    if saml_response:
+        relay_state = request.form.get('RelayState') or request.args.get('RelayState') or ''
+        if not relay_state:
+            return ApiResponse.error('missing RelayState', 400).to_response()
+        try:
+            result = login_saml(workspace_id, saml_response, relay_state)
+        except Exception as e:  # noqa: BLE001 - 断言校验失败的统一入口
+            return ApiResponse.error(f'SSO login failed: {e}', 401).to_response()
+        return ApiResponse.success(data=result, message='SSO login succeeded').to_response()
+
     code = request.args.get('code') or ''
     state = request.args.get('state') or ''
     if not code or not state:
         return ApiResponse.error('missing code or state', 400).to_response()
     try:
         result = login_oidc(workspace_id, code, state)
-    except Exception as e:  # noqa: BLE001 - state 校验/交换失败的统一入口
+    except Exception as e:  # noqa: BLE001
         return ApiResponse.error(f'SSO login failed: {e}', 401).to_response()
     return ApiResponse.success(data=result, message='SSO login succeeded').to_response()
 
