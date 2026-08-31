@@ -225,6 +225,7 @@ def register_blueprints(app):
     from api.github_app import github_app_bp
     from api.goals import goals_bp
     from api.budgets import budgets_bp
+    from api.knowledge_curation import knowledge_curation_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
@@ -281,6 +282,7 @@ def register_blueprints(app):
     app.register_blueprint(github_app_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(goals_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(budgets_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(knowledge_curation_bp, url_prefix='/todo-for-ai/api/v1')
 
 
 

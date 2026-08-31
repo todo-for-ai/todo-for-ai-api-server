@@ -27,6 +27,7 @@ from .project_repo import ProjectRepoBinding
 from .github_app import GitHubAppConfig
 from .budget import Budget
 from .goal import Goal, GoalStatus, Epic, EpicStatus
+from .knowledge_proposal import ProjectKnowledgeProposal
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -166,6 +167,7 @@ __all__ = [
     'GoalStatus',
     'Epic',
     'EpicStatus',
+    'ProjectKnowledgeProposal',
     'ActionType',
     'Attachment',
     'ApiToken',

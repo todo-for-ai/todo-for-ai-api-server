@@ -158,6 +158,18 @@ def handle_failed_commit(task, agent, attempt_id: str,
     # 失败经验沉淀（P3.1 学习闭环）：每个被处理的 attempt 记一条 failure_pattern
     _record_failure_experience(task, agent, category, failure_code, failure_reason)
 
+    # 项目知识自动策展（P3.2）：失败归因 → 知识提案（幂等，不阻断主流程）
+    try:
+        from services.knowledge_curation import propose_from_failure
+
+        propose_from_failure(task, agent, category, failure_reason)
+        db.session.flush()
+    except Exception as e:  # noqa: BLE001 - 策展失败不阻断恢复主流程
+        import structlog
+
+        structlog.get_logger().warning("recovery.curation_proposal_failed", error=str(e))
+        db.session.rollback()
+
     # 封顶：升级人工（interaction_request 审批事件，budget/pr 审批同一队列可见）
     if failed_attempts >= max_attempts:
         if workspace_id:
