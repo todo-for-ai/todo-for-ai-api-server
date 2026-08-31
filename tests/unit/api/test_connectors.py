@@ -361,3 +361,130 @@ class TestGitLabIngest:
             data=body, headers=self._gitlab_headers(token="wrong-token"),
         )
         assert resp.status_code == 401
+
+
+class TestJiraIngest:
+    """Phase 4 写回侧第三个连接器：Jira（配置令牌验签）。"""
+
+    @pytest.fixture
+    def jira_ctx(self, client, db_session, owner_auth, project_factory):
+        ws = owner_auth["org"].id
+        project = project_factory(owner_id=owner_auth["user"].id, organization_id=ws)
+        resp = client.put(
+            f"{BASE_URL}/workspaces/{ws}/connectors/jira",
+            json={"enabled": True, "secret": WEBHOOK_SECRET,
+                  "default_project_id": project.id},
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 200
+        return {"project": project, "ws": ws}
+
+    def _jira_headers(self, token=WEBHOOK_SECRET, *, signed=True):
+        headers = {"Content-Type": "application/json"}
+        if signed:
+            headers["X-Todo4AI-Token"] = token
+        return headers
+
+    def _issue_payload(self, key="PROJ-12", status_name="In Progress", action="created"):
+        return {
+            "webhookEvent": f"jira:issue_{action}",
+            "issue": {
+                "key": key,
+                "fields": {
+                    "summary": "Jira issue title",
+                    "description": "from jira",
+                    "status": {"name": status_name},
+                },
+            },
+        }
+
+    def test_issue_created_imports_task(self, client, db_session, owner_auth, jira_ctx):
+        import json as _json
+
+        from models import Task, TaskEventOutbox
+
+        ws = jira_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+        resp = client.post(
+            f"{BASE_URL}/connectors/jira/{ws}/ingest",
+            data=body, headers=self._jira_headers(),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        result = resp.get_json()["data"]
+        assert result["handled"] is True and result["created"] is True
+
+        task = db_session.get(Task, result["task_id"])
+        assert task.creator_identifier == "jira:PROJ-12"
+        assert task.project_id == jira_ctx["project"].id
+        assert task.status.value == "in_progress"
+
+        outbox = TaskEventOutbox.query.filter_by(
+            event_type="connector.jira.issue_synced", task_id=task.id,
+        ).all()
+        assert len(outbox) == 1
+
+    def test_issue_updated_maps_done_no_duplicate(self, client, db_session, owner_auth, jira_ctx):
+        import json as _json
+
+        from models import Task
+
+        ws = jira_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+        client.post(f"{BASE_URL}/connectors/jira/{ws}/ingest",
+                    data=body, headers=self._jira_headers())
+
+        done_payload = self._issue_payload(status_name="Done", action="updated")
+        body = _json.dumps(done_payload).encode()
+        resp = client.post(f"{BASE_URL}/connectors/jira/{ws}/ingest",
+                           data=body, headers=self._jira_headers())
+        assert resp.status_code == 200
+        result = resp.get_json()["data"]
+        assert result["created"] is False and result["status_changed"] is True
+
+        tasks = Task.query.filter_by(creator_identifier="jira:PROJ-12").all()
+        assert len(tasks) == 1
+        assert tasks[0].status.value == "done"
+
+    def test_comment_appends_task_log(self, client, db_session, owner_auth, jira_ctx):
+        import json as _json
+
+        from models import TaskLog
+
+        ws = jira_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+        client.post(f"{BASE_URL}/connectors/jira/{ws}/ingest",
+                    data=body, headers=self._jira_headers())
+
+        comment_payload = {
+            "webhookEvent": "jira:comment_created",
+            "issue": {"key": "PROJ-12"},
+            "comment": {"body": "Jira 侧评论", "author": {"displayName": "Carol"}},
+        }
+        body = _json.dumps(comment_payload).encode()
+        resp = client.post(f"{BASE_URL}/connectors/jira/{ws}/ingest",
+                           data=body, headers=self._jira_headers())
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["handled"] is True
+
+        logs = TaskLog.query.filter_by(created_by="connector:jira").all()
+        assert len(logs) == 1
+        assert "[Jira · Carol]" in logs[0].content
+
+    def test_query_token_accepted_and_bad_token_rejected(self, client, db_session, owner_auth, jira_ctx):
+        import json as _json
+
+        ws = jira_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+
+        # query 参数携带令牌也可通过
+        ok = client.post(
+            f"{BASE_URL}/connectors/jira/{ws}/ingest?token={WEBHOOK_SECRET}",
+            data=body, headers={"Content-Type": "application/json"},
+        )
+        assert ok.status_code == 200
+
+        bad = client.post(
+            f"{BASE_URL}/connectors/jira/{ws}/ingest",
+            data=body, headers=self._jira_headers(token="wrong"),
+        )
+        assert bad.status_code == 401

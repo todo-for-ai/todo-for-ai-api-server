@@ -14,10 +14,12 @@ from .base import ApiResponse, validate_json_request
 from services.connectors import (
     get_connector,
     ingest_gitlab,
+    ingest_jira,
     ingest_linear,
     list_connectors,
     upsert_connector,
     verify_gitlab_token,
+    verify_jira_token,
     verify_linear_signature,
 )
 
@@ -128,6 +130,31 @@ def gitlab_ingest(workspace_id: int):
 
     try:
         result = ingest_gitlab(workspace_id, payload)
+    except ValueError as e:
+        return ApiResponse.error(str(e), 400).to_response()
+
+    return ApiResponse.success(data=result, message='Ingest processed').to_response()
+
+
+@connectors_bp.route('/connectors/jira/<int:workspace_id>/ingest', methods=['POST'])
+def jira_ingest(workspace_id: int):
+    """Jira webhook 入站：配置令牌常量时间校验（X-Todo4AI-Token 头或 ?token= query）→ 任务/评论导入。"""
+    config = get_connector(workspace_id, ExternalConnectorConfig.PROVIDER_JIRA)
+    if not config or not config.enabled:
+        return ApiResponse.error('jira connector not enabled', 400).to_response()
+
+    from services.github_app import decrypt_str
+    secret = decrypt_str(config.secret_encrypted) or ''
+    token = request.headers.get('X-Todo4AI-Token') or request.args.get('token', '')
+    if not verify_jira_token(token, secret):
+        return ApiResponse.error('invalid token', 401).to_response()
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return ApiResponse.error('invalid JSON payload', 400).to_response()
+
+    try:
+        result = ingest_jira(workspace_id, payload)
     except ValueError as e:
         return ApiResponse.error(str(e), 400).to_response()
 
