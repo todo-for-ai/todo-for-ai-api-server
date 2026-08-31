@@ -237,3 +237,127 @@ class TestLinearIngest:
         resp = client.post(f"{BASE_URL}/connectors/linear/{ws}/ingest",
                            data=body, headers=_linear_headers(body))
         assert resp.status_code == 400
+
+
+class TestGitLabIngest:
+    """Phase 4 写回侧第二个连接器：GitLab（X-GitLab-Token 验签）。"""
+
+    @pytest.fixture
+    def gitlab_ctx(self, client, db_session, owner_auth, project_factory):
+        ws = owner_auth["org"].id
+        project = project_factory(owner_id=owner_auth["user"].id, organization_id=ws)
+        resp = client.put(
+            f"{BASE_URL}/workspaces/{ws}/connectors/gitlab",
+            json={"enabled": True, "secret": WEBHOOK_SECRET,
+                  "default_project_id": project.id},
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 200
+        return {"project": project, "ws": ws}
+
+    def _gitlab_headers(self, token=WEBHOOK_SECRET, *, signed=True):
+        headers = {"Content-Type": "application/json"}
+        if signed:
+            headers["X-GitLab-Token"] = token
+        return headers
+
+    def _issue_payload(self, iid=7, action="open", state="opened", gl_project_id=101):
+        return {
+            "object_kind": "issue",
+            "event_type": "issue",
+            "object_attributes": {
+                "iid": iid, "title": "GitLab issue",
+                "description": "from gitlab",
+                "url": f"https://gitlab.com/x/y/-/issues/{iid}",
+                "state": state, "action": action,
+            },
+            "project": {"id": gl_project_id, "path_with_namespace": "x/y"},
+            "user": {"username": "alice"},
+        }
+
+    def _note_payload(self, iid=7):
+        return {
+            "object_kind": "note",
+            "object_attributes": {"note": "GitLab 侧评论"},
+            "issue": {"iid": iid},
+            "project": {"id": 101},
+            "user": {"username": "bob"},
+        }
+
+    def test_issue_open_imports_task(self, client, db_session, owner_auth, gitlab_ctx):
+        import json as _json
+
+        from models import Task, TaskEventOutbox
+
+        ws = gitlab_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+        resp = client.post(
+            f"{BASE_URL}/connectors/gitlab/{ws}/ingest",
+            data=body, headers=self._gitlab_headers(),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        result = resp.get_json()["data"]
+        assert result["handled"] is True and result["created"] is True
+
+        task = db_session.get(Task, result["task_id"])
+        assert task.creator_identifier == "gitlab:101:7"
+        assert task.project_id == gitlab_ctx["project"].id
+        assert task.status.value == "todo"
+
+        outbox = TaskEventOutbox.query.filter_by(
+            event_type="connector.gitlab.issue_synced", task_id=task.id,
+        ).all()
+        assert len(outbox) == 1
+
+    def test_issue_close_updates_status_no_duplicate(self, client, db_session, owner_auth, gitlab_ctx):
+        import json as _json
+
+        from models import Task
+
+        ws = gitlab_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+        client.post(f"{BASE_URL}/connectors/gitlab/{ws}/ingest",
+                    data=body, headers=self._gitlab_headers())
+
+        closed = self._issue_payload(action="close", state="closed")
+        body = _json.dumps(closed).encode()
+        resp = client.post(f"{BASE_URL}/connectors/gitlab/{ws}/ingest",
+                           data=body, headers=self._gitlab_headers())
+        assert resp.status_code == 200
+        result = resp.get_json()["data"]
+        assert result["created"] is False and result["status_changed"] is True
+
+        tasks = Task.query.filter_by(creator_identifier="gitlab:101:7").all()
+        assert len(tasks) == 1
+        assert tasks[0].status.value == "done"
+
+    def test_note_appends_task_log(self, client, db_session, owner_auth, gitlab_ctx):
+        import json as _json
+
+        from models import TaskLog
+
+        ws = gitlab_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+        client.post(f"{BASE_URL}/connectors/gitlab/{ws}/ingest",
+                    data=body, headers=self._gitlab_headers())
+
+        body = _json.dumps(self._note_payload()).encode()
+        resp = client.post(f"{BASE_URL}/connectors/gitlab/{ws}/ingest",
+                           data=body, headers=self._gitlab_headers())
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["handled"] is True
+
+        logs = TaskLog.query.filter_by(created_by="connector:gitlab").all()
+        assert len(logs) == 1
+        assert "[GitLab · bob]" in logs[0].content
+
+    def test_bad_token_rejected(self, client, db_session, owner_auth, gitlab_ctx):
+        import json as _json
+
+        ws = gitlab_ctx["ws"]
+        body = _json.dumps(self._issue_payload()).encode()
+        resp = client.post(
+            f"{BASE_URL}/connectors/gitlab/{ws}/ingest",
+            data=body, headers=self._gitlab_headers(token="wrong-token"),
+        )
+        assert resp.status_code == 401

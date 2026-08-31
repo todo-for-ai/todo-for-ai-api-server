@@ -13,9 +13,11 @@ from .agent_common import ensure_workspace_manage_access, get_workspace_or_404, 
 from .base import ApiResponse, validate_json_request
 from services.connectors import (
     get_connector,
+    ingest_gitlab,
     ingest_linear,
     list_connectors,
     upsert_connector,
+    verify_gitlab_token,
     verify_linear_signature,
 )
 
@@ -101,6 +103,31 @@ def linear_ingest(workspace_id: int):
 
     try:
         result = ingest_linear(workspace_id, payload)
+    except ValueError as e:
+        return ApiResponse.error(str(e), 400).to_response()
+
+    return ApiResponse.success(data=result, message='Ingest processed').to_response()
+
+
+@connectors_bp.route('/connectors/gitlab/<int:workspace_id>/ingest', methods=['POST'])
+def gitlab_ingest(workspace_id: int):
+    """GitLab webhook 入站：X-GitLab-Token 常量时间校验（fail-closed）→ 任务/评论导入。"""
+    config = get_connector(workspace_id, ExternalConnectorConfig.PROVIDER_GITLAB)
+    if not config or not config.enabled:
+        return ApiResponse.error('gitlab connector not enabled', 400).to_response()
+
+    from services.github_app import decrypt_str
+    secret = decrypt_str(config.secret_encrypted) or ''
+    token = request.headers.get('X-GitLab-Token', '')
+    if not verify_gitlab_token(token, secret):
+        return ApiResponse.error('invalid token', 401).to_response()
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return ApiResponse.error('invalid JSON payload', 400).to_response()
+
+    try:
+        result = ingest_gitlab(workspace_id, payload)
     except ValueError as e:
         return ApiResponse.error(str(e), 400).to_response()
 
