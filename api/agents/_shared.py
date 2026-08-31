@@ -615,6 +615,12 @@ def score_task_for_agent(task, agent):
         exp_bonus = int(exp_bonus * avg_conf)
         score += exp_bonus
 
+    # Skill profile bonus (P3.1): profiled skills matching the task add priority
+    from services.skill_profile import skill_profile_bonus as _sp_bonus
+
+    profile_bonus = _sp_bonus(agent, set(matched_tags) | set(matched_text))
+    score += profile_bonus
+
     return {
         "score": score,
         "matched_capabilities": sorted(set(matched_tags + matched_text)),
@@ -622,6 +628,7 @@ def score_task_for_agent(task, agent):
         "matched_text": matched_text,
         "missing_required": missing_required,
         "experience_bonus": exp_bonus if relevant_experiences else 0,
+        "skill_profile_bonus": profile_bonus,
     }
 
 

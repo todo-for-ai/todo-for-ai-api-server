@@ -90,6 +90,8 @@ class Agent(BaseModel):
     provider = Column(String(100), comment='Provider, e.g. openai/anthropic/local')
     model = Column(String(255), comment='默认模型或运行时名称')
     capabilities = Column(JSON, comment='能力描述列表')
+    skill_profile = Column(JSON, comment='P3.1 技能画像（运行历史聚合: skills 列表 + assignments 统计）')
+    skill_profile_updated_at = Column(DateTime, comment='画像最近重建时间')
     config = Column(JSON, comment='非敏感运行时配置（协作侧）')
     collaboration_role = Column(String(50), nullable=True, comment='协作角色: leader, follower, standalone')
     last_seen_at = Column(DateTime, comment='最近心跳时间')
