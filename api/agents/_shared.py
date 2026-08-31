@@ -621,6 +621,12 @@ def score_task_for_agent(task, agent):
     profile_bonus = _sp_bonus(agent, set(matched_tags) | set(matched_text))
     score += profile_bonus
 
+    # Load throttle (P3.3): agents forecast as overloaded are deprioritized
+    from services.insight_actions import compute_load_throttle
+
+    throttle_penalty, load_forecast = compute_load_throttle(agent)
+    score = max(0, score - throttle_penalty)
+
     return {
         "score": score,
         "matched_capabilities": sorted(set(matched_tags + matched_text)),
@@ -629,6 +635,8 @@ def score_task_for_agent(task, agent):
         "missing_required": missing_required,
         "experience_bonus": exp_bonus if relevant_experiences else 0,
         "skill_profile_bonus": profile_bonus,
+        "load_throttle_penalty": throttle_penalty,
+        "load_forecast": load_forecast,
     }
 
 
