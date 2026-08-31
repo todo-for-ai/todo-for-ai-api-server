@@ -116,7 +116,7 @@ class TestBuildSkillProfile:
         ))
         db_session.commit()
 
-        profile = rebuild_skill_profile(agent.id)
+        profile = rebuild_skill_profile(agent.id, edited_by_user_id=owner_auth["user"].id)
 
         skills = {(s["name"], s["kind"]): s for s in profile["skills"]}
         python_domain = skills[("python", "domain")]

@@ -14,15 +14,19 @@
 
 from datetime import datetime
 
+import json
+
 import structlog
 
 from models import (
     Agent,
     AgentExperience,
+    AgentSoulVersion,
     TaskAssignment,
     TaskAssignmentState,
     db,
 )
+from models.agent_soul_version import MEMORY_KIND_SKILL_PROFILE
 
 logger = structlog.get_logger()
 
@@ -100,8 +104,40 @@ def build_skill_profile(agent) -> dict:
     }
 
 
-def rebuild_skill_profile(agent_id: int) -> dict:
-    """重建并持久化 Agent 技能画像，返回画像 dict。"""
+def _next_memory_version(agent_id: int, memory_kind: str) -> int:
+    """某记忆种类当前最大版本号 + 1。"""
+    from sqlalchemy import func
+
+    max_version = db.session.query(
+        func.coalesce(func.max(AgentSoulVersion.version), 0)
+    ).filter_by(agent_id=agent_id, memory_kind=memory_kind).scalar()
+    return int(max_version or 0) + 1
+
+
+def record_memory_version(agent, snapshot: dict, edited_by_user_id: int,
+                          change_summary: str = '') -> AgentSoulVersion:
+    """技能画像版本快照入库（P3.4 记忆治理，复用 AgentSoulVersion 表）。"""
+    version_row = AgentSoulVersion(
+        agent_id=agent.id,
+        workspace_id=agent.workspace_id,
+        version=_next_memory_version(agent.id, MEMORY_KIND_SKILL_PROFILE),
+        memory_kind=MEMORY_KIND_SKILL_PROFILE,
+        soul_markdown='',
+        snapshot_json=json.dumps(snapshot, ensure_ascii=False),
+        change_summary=(change_summary or 'rebuild')[:255],
+        edited_by_user_id=int(edited_by_user_id),
+        created_by=f'user:{edited_by_user_id}',
+    )
+    db.session.add(version_row)
+    return version_row
+
+
+def rebuild_skill_profile(agent_id: int, edited_by_user_id: int,
+                          change_summary: str = '') -> dict:
+    """重建并持久化 Agent 技能画像，返回画像 dict。
+
+    每次重建写入一条版本快照（P3.4）。
+    """
     agent = db.session.get(Agent, agent_id)
     if not agent:
         raise ValueError(f'agent {agent_id} not found')
@@ -109,6 +145,8 @@ def rebuild_skill_profile(agent_id: int) -> dict:
     profile = build_skill_profile(agent)
     agent.skill_profile = profile
     agent.skill_profile_updated_at = datetime.utcnow()
+    record_memory_version(agent, profile, edited_by_user_id=edited_by_user_id,
+                          change_summary=change_summary or 'rebuild')
     db.session.commit()
 
     logger.info(
@@ -117,6 +155,32 @@ def rebuild_skill_profile(agent_id: int) -> dict:
         skill_count=len(profile['skills']),
     )
     return profile
+
+
+def forget_skill_profile(agent_id: int, edited_by_user_id: int) -> dict:
+    """遗忘技能画像（P3.4 可遗忘）：清空画像并写入墓碑版本快照。"""
+    agent = db.session.get(Agent, agent_id)
+    if not agent:
+        raise ValueError(f'agent {agent_id} not found')
+
+    forgotten = {
+        'skills': [],
+        'assignments': {'completed': 0, 'failed': 0},
+        'experience_count': 0,
+        'generated_at': datetime.utcnow().isoformat() + 'Z',
+        'forgotten': True,
+    }
+    agent.skill_profile = None
+    agent.skill_profile_updated_at = None
+    record_memory_version(
+        agent, forgotten,
+        edited_by_user_id=edited_by_user_id,
+        change_summary='forgotten (right to erasure)',
+    )
+    db.session.commit()
+
+    logger.info("skill_profile.forgotten", agent_id=agent_id)
+    return forgotten
 
 
 def skill_profile_bonus(agent, matched_terms) -> int:

@@ -48,6 +48,7 @@ from . import workflow_routes  # noqa: E402
 from . import project_members  # noqa: E402
 from . import analytics_workflow  # noqa: E402
 from . import skill_profile  # noqa: E402
+from . import memory_governance  # noqa: E402
 
 # ── Re-exports for backward compatibility ──
 from ._shared import flush_sse_notifications  # noqa: E402

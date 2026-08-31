@@ -61,7 +61,11 @@ def rebuild_agent_skill_profile(agent_id: int):
         return access_err
 
     try:
-        profile = rebuild_skill_profile(agent.id)
+        profile = rebuild_skill_profile(
+            agent.id,
+            edited_by_user_id=user.id,
+            change_summary='manual rebuild',
+        )
     except ValueError as e:
         return ApiResponse.error(str(e), 404).to_response()
 
