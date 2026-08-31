@@ -29,6 +29,7 @@ from .budget import Budget
 from .goal import Goal, GoalStatus, Epic, EpicStatus
 from .knowledge_proposal import ProjectKnowledgeProposal
 from .workspace_sso_config import WorkspaceSSOConfig
+from .external_connector_config import ExternalConnectorConfig
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -170,6 +171,7 @@ __all__ = [
     'EpicStatus',
     'ProjectKnowledgeProposal',
     'WorkspaceSSOConfig',
+    'ExternalConnectorConfig',
     'ActionType',
     'Attachment',
     'ApiToken',
