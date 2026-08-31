@@ -44,6 +44,15 @@ def client(_isolated_app):
     return _isolated_app.test_client()
 
 
+@pytest.fixture(autouse=True)
+def _cleanup_experience_rows(db_session, agent_factory):
+    """经验数据引用 Agent；本清理依赖 agent_factory 以保证在其 teardown 之前执行。"""
+    yield
+    from models import AgentExperience
+    AgentExperience.query.delete()
+    db_session.commit()
+
+
 @pytest.fixture
 def owner_auth(_isolated_app, db_session):
     import uuid as _uuid
@@ -267,3 +276,139 @@ class TestDodRecommendations:
             headers=headers,
         )
         assert resp.status_code == 403
+
+
+class TestMentorshipOrchestration:
+    """P3.3 第三子项：知识传播网络 → 导师制编排。"""
+
+    def _add_experience(self, db_session, agent, domain, reused=2, shared=False):
+        from models import AgentExperience
+
+        db_session.add(AgentExperience(
+            agent_id=agent.id, experience_type="success_pattern",
+            domain=domain, times_reused=reused, is_shared=shared,
+            confidence=0.8,
+        ))
+
+    def test_pairs_high_output_mentor_with_zero_coverage_mentee(self, db_session, owner_auth, agent_factory):
+        from services.insight_actions import recommend_mentorship_pairs
+
+        ws = owner_auth["org"].id
+        mentor = agent_factory(workspace_id=ws)
+        mentee = agent_factory(workspace_id=ws)
+        self._add_experience(db_session, mentor, "python", reused=5)
+        self._add_experience(db_session, mentor, "devops", reused=1)
+        db_session.commit()
+
+        rec = recommend_mentorship_pairs(ws)
+        assert rec["has_suggestions"] is True
+        pairs = {(s["mentor_id"], s["mentee_id"]) for s in rec["suggestions"]}
+        assert (mentor.id, mentee.id) in pairs
+        pair = next(s for s in rec["suggestions"] if s["mentee_id"] == mentee.id)
+        assert pair["domain"] in ("python", "devops")
+        assert pair["mentor_reuses"] >= 1
+
+    def test_no_suggestions_when_all_have_experience(self, db_session, owner_auth, agent_factory):
+        from services.insight_actions import recommend_mentorship_pairs
+
+        ws = owner_auth["org"].id
+        a, b = agent_factory(workspace_id=ws), agent_factory(workspace_id=ws)
+        self._add_experience(db_session, a, "python")
+        self._add_experience(db_session, b, "frontend")
+        db_session.commit()
+
+        rec = recommend_mentorship_pairs(ws)
+        assert rec["has_suggestions"] is False
+        assert rec["suggestions"] == []
+
+    def test_apply_creates_team_and_shares_experiences(self, client, db_session, owner_auth, agent_factory):
+        from services.insight_actions import recommend_mentorship_pairs, apply_mentorship_pair
+        from models import AgentExperience, AgentTeam, AgentTeamMember, AgentTeamMemberRole
+
+        ws = owner_auth["org"].id
+        mentor = agent_factory(workspace_id=ws)
+        mentee = agent_factory(workspace_id=ws)
+        self._add_experience(db_session, mentor, "python", reused=3, shared=False)
+        db_session.commit()
+
+        result = apply_mentorship_pair(
+            mentor, mentee, "python", created_by_user_id=owner_auth["user"].id,
+        )
+        assert result["created"] is True
+        assert result["shared_experiences"] == 1
+
+        team = db_session.get(AgentTeam, result["team_id"])
+        assert team.config["mentorship"] == {
+            "mentor_id": mentor.id, "mentee_id": mentee.id, "domain": "python",
+        }
+        roles = {
+            m.agent_id: m.role for m in
+            AgentTeamMember.query.filter_by(team_id=team.id).all()
+        }
+        assert roles[mentor.id] == AgentTeamMemberRole.LEADER
+        assert roles[mentee.id] == AgentTeamMemberRole.MEMBER
+
+        exp = AgentExperience.query.filter_by(agent_id=mentor.id).first()
+        assert exp.is_shared is True
+
+        # 幂等：再次 apply 复用既有团队
+        again = apply_mentorship_pair(
+            mentor, mentee, "python", created_by_user_id=owner_auth["user"].id,
+        )
+        assert again["created"] is False
+        assert again["team_id"] == result["team_id"]
+
+        # 清理：agent_factory teardown 删 Agent 前先解除 team 成员引用
+        AgentTeamMember.query.filter(AgentTeamMember.team_id == team.id).delete()
+        AgentTeam.query.filter_by(id=team.id).delete()
+        AgentExperience.query.filter_by(agent_id=mentor.id).delete()
+        db_session.commit()
+
+    def test_recommendations_endpoint(self, client, db_session, owner_auth, agent_factory):
+        ws = owner_auth["org"].id
+        mentor = agent_factory(workspace_id=ws)
+        mentee = agent_factory(workspace_id=ws)
+        self._add_experience(db_session, mentor, "python", reused=5)
+        db_session.commit()
+
+        resp = client.get(
+            f"{BASE_URL}/workspaces/{ws}/insights/mentorship-recommendations",
+            headers=owner_auth["headers"],
+        )
+        assert resp.status_code == 200
+        data = resp.get_json()["data"]
+        assert data["has_suggestions"] is True
+        assert any(s["mentor_id"] == mentor.id and s["mentee_id"] == mentee.id
+                   for s in data["suggestions"])
+
+    def test_apply_endpoint_and_permission(self, client, db_session, _isolated_app, owner_auth, agent_factory, user_factory):
+        import uuid as _uuid
+        from flask_jwt_extended import create_access_token
+        from models import User
+        from werkzeug.security import generate_password_hash
+
+        ws = owner_auth["org"].id
+        mentor = agent_factory(workspace_id=ws)
+        mentee = agent_factory(workspace_id=ws)
+        self._add_experience(db_session, mentor, "python")
+        db_session.commit()
+
+        ok = client.post(
+            f"{BASE_URL}/workspaces/{ws}/insights/mentorship-recommendations/apply",
+            json={"mentor_id": mentor.id, "mentee_id": mentee.id, "domain": "python"},
+            headers=owner_auth["headers"],
+        )
+        assert ok.status_code == 200, ok.get_json()
+        assert ok.get_json()["data"]["created"] is True
+
+        outsider = User(username=f"out_{str(_uuid.uuid4())[:6]}", email=f"out_{str(_uuid.uuid4())[:6]}@x.com")
+        outsider.password_hash = generate_password_hash("password123")
+        db_session.add(outsider)
+        db_session.commit()
+        with _isolated_app.app_context():
+            headers = {"Authorization": f"Bearer {create_access_token(identity=str(outsider.id))}"}
+        denied = client.get(
+            f"{BASE_URL}/workspaces/{ws}/insights/mentorship-recommendations",
+            headers=headers,
+        )
+        assert denied.status_code == 403

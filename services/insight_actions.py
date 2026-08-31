@@ -181,3 +181,166 @@ def apply_dod_template(task, categories: List[str]) -> Dict[str, Any]:
         task.dod = existing
         db.session.commit()
     return {'dod': task.dod or [], 'added': added}
+
+
+# ── 知识传播网络 → 导师制编排 ────────────────────────────────────────────
+
+def _agent_knowledge_coverage(workspace_id: int, since: datetime) -> Dict[int, Dict[str, Any]]:
+    """统计工作区内每个 Agent 的知识产出/覆盖：经验数、复用次数、领域集合。"""
+    from models import Agent, AgentExperience, AgentStatus
+
+    agents = Agent.query.filter_by(workspace_id=workspace_id).filter(
+        Agent.status != AgentStatus.DISABLED,
+    ).all()
+
+    rows = (
+        db.session.query(
+            AgentExperience.agent_id,
+            AgentExperience.domain,
+            AgentExperience.times_reused,
+        )
+        .join(Agent, AgentExperience.agent_id == Agent.id)
+        .filter(
+            Agent.workspace_id == workspace_id,
+            AgentExperience.is_valid.is_(True),
+            AgentExperience.created_at >= since,
+        )
+        .all()
+    )
+    coverage: Dict[int, Dict[str, Any]] = {
+        agent.id: {'agent': agent, 'exps': 0, 'reuses': 0, 'domains': set()}
+        for agent in agents
+    }
+    for agent_id, domain, reused in rows:
+        c = coverage.get(agent_id)
+        if not c:
+            continue
+        c['exps'] += 1
+        c['reuses'] += reused or 0
+        if domain:
+            c['domains'].add(str(domain).strip().lower())
+    return coverage
+
+
+def recommend_mentorship_pairs(workspace_id: int, limit: int = 5,
+                               window_days: int = 90) -> Dict[str, Any]:
+    """知识传播网络 → 导师制编排建议。
+
+    高产出知识 Agent（经验多/被复用多）与低覆盖 Agent（无/少经验）
+    按领域缺口配对：学徒缺什么、导师就擅长什么。
+    """
+    since = datetime.utcnow() - timedelta(days=window_days)
+    coverage = _agent_knowledge_coverage(workspace_id, since)
+
+    mentors_pool = sorted(
+        (c for c in coverage.values() if c['exps'] > 0),
+        key=lambda c: (-c['reuses'], -c['exps']),
+    )
+    mentees_pool = sorted(
+        (c for c in coverage.values() if c['exps'] == 0),
+        key=lambda c: c['agent'].name or '',
+    )
+
+    suggestions = []
+    used_mentor_domains: Dict[int, set] = {}
+    for mentee in mentees_pool:
+        for mentor in mentors_pool:
+            if mentor['agent'].id == mentee['agent'].id:
+                continue
+            taken = used_mentor_domains.setdefault(mentor['agent'].id, set())
+            # 导师尚未被占用的优势领域（学徒该领域零覆盖）
+            free_domains = [
+                d for d in sorted(mentor['domains'])
+                if d not in taken and d not in mentee['domains']
+            ]
+            if not free_domains:
+                continue
+            domain = free_domains[0]
+            taken.add(domain)
+            suggestions.append({
+                'mentor_id': mentor['agent'].id,
+                'mentor_name': mentor['agent'].name,
+                'mentee_id': mentee['agent'].id,
+                'mentee_name': mentee['agent'].name,
+                'domain': domain,
+                'mentor_exps': mentor['exps'],
+                'mentor_reuses': mentor['reuses'],
+                'reason': (
+                    f"导师在「{domain}」有 {mentor['exps']} 条有效经验"
+                    f"（被复用 {mentor['reuses']} 次），学徒该领域零覆盖"
+                ),
+            })
+            if len(suggestions) >= limit:
+                return {
+                    'workspace_id': workspace_id,
+                    'suggestions': suggestions,
+                    'has_suggestions': True,
+                }
+    return {
+        'workspace_id': workspace_id,
+        'suggestions': suggestions,
+        'has_suggestions': bool(suggestions),
+    }
+
+
+def apply_mentorship_pair(mentor, mentee, domain: str, created_by_user_id: int) -> Dict[str, Any]:
+    """确认导师制建议 → 落地为协作动作：
+
+    1. 创建（或复用）双成员团队「导师制:<mentor>→<mentee>:<domain>」，
+       导师 LEADER / 学徒 MEMBER；
+    2. 把导师该领域的历史经验置为 is_shared，学徒侧复用引擎立即可见。
+
+    幂等：同名团队已存在且配置匹配时直接返回既有团队。
+    """
+    from models import AgentExperience, AgentTeam, AgentTeamMember, AgentTeamMemberRole, AgentTeamStatus
+
+    domain = str(domain or '').strip().lower()
+    team_name = f"导师制:{mentor.name}→{mentee.name}:{domain}"[:128]
+
+    existing = AgentTeam.query.filter_by(workspace_id=mentor.workspace_id, name=team_name).first()
+    if existing:
+        return {
+            'team_id': existing.id, 'team_name': existing.name,
+            'created': False, 'shared_experiences': 0,
+        }
+
+    team = AgentTeam(
+        workspace_id=mentor.workspace_id,
+        created_by_user_id=created_by_user_id,
+        name=team_name,
+        description=f"知识传播网络驱动的导师制编排：{mentor.name} 在「{domain}」带教 {mentee.name}",
+        config={'mentorship': {
+            'mentor_id': mentor.id, 'mentee_id': mentee.id, 'domain': domain,
+        }},
+        status=AgentTeamStatus.ACTIVE,
+    )
+    db.session.add(team)
+    db.session.flush()
+
+    db.session.add(AgentTeamMember(
+        team_id=team.id, agent_id=mentor.id,
+        added_by_user_id=created_by_user_id,
+        role=AgentTeamMemberRole.LEADER,
+    ))
+    db.session.add(AgentTeamMember(
+        team_id=team.id, agent_id=mentee.id,
+        added_by_user_id=created_by_user_id,
+        role=AgentTeamMemberRole.MEMBER,
+    ))
+
+    # 协作动作：导师该领域经验共享（学徒侧复用/检索立即可见）
+    shared_count = AgentExperience.query.filter(
+        AgentExperience.agent_id == mentor.id,
+        AgentExperience.is_valid.is_(True),
+        AgentExperience.is_shared.is_(False),
+        func.lower(AgentExperience.domain) == domain,
+    ).update({'is_shared': True}, synchronize_session=False)
+
+    db.session.commit()
+    logger.info("mentorship.applied", team_id=team.id,
+                mentor_id=mentor.id, mentee_id=mentee.id, domain=domain,
+                shared_experiences=int(shared_count))
+    return {
+        'team_id': team.id, 'team_name': team.name,
+        'created': True, 'shared_experiences': int(shared_count),
+    }
