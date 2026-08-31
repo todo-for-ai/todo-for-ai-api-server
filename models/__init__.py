@@ -28,6 +28,7 @@ from .github_app import GitHubAppConfig
 from .budget import Budget
 from .goal import Goal, GoalStatus, Epic, EpicStatus
 from .knowledge_proposal import ProjectKnowledgeProposal
+from .workspace_sso_config import WorkspaceSSOConfig
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -168,6 +169,7 @@ __all__ = [
     'Epic',
     'EpicStatus',
     'ProjectKnowledgeProposal',
+    'WorkspaceSSOConfig',
     'ActionType',
     'Attachment',
     'ApiToken',
