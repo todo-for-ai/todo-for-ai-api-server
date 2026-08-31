@@ -162,6 +162,161 @@ class TestWebhookEvents:
         assert resp.get_json()["data"]["handled"] is False
 
 
+class TestIssueAndCIEvents:
+    """P2.5 事件面扩容：issues.opened 建任务、workflow_run 结论入 outbox。"""
+
+    @pytest.fixture
+    def binding_factory(self, db_session):
+        """创建 ProjectRepoBinding 并在 teardown 时删除（SQLite rowid 复用会撞唯一约束）。"""
+        created = []
+
+        def _create(project, repo_full_name="acme/widget"):
+            from models import ProjectRepoBinding
+
+            owner, name = repo_full_name.split("/", 1)
+            binding = ProjectRepoBinding(
+                project_id=project.id, repo_owner=owner, repo_name=name,
+            )
+            db_session.add(binding)
+            db_session.commit()
+            created.append(binding)
+            return binding
+
+        yield _create
+        for binding in created:
+            db_session.delete(binding)
+        db_session.commit()
+
+    def test_issue_opened_creates_task_and_outbox(self, client, db_session, app_configured, project_factory, task_factory, binding_factory):
+        from models import Task, TaskEventOutbox
+
+        project = project_factory()
+        binding_factory(project)
+
+        payload = {
+            "action": "opened",
+            "issue": {
+                "number": 42,
+                "title": "Fix login crash",
+                "body": "Login crashes on empty password.",
+                "html_url": "https://github.com/acme/widget/issues/42",
+                "labels": [{"name": "bug"}, {"name": "P1"}],
+            },
+            "repository": {"full_name": "acme/widget"},
+        }
+        resp = _webhook_post(client, payload, event="issues")
+
+        assert resp.status_code == 200
+        data = resp.get_json()["data"]
+        assert data["handled"] is True
+
+        task = db_session.get(Task, data["task_id"])
+        assert task is not None and task.project_id == project.id
+        assert task.title.startswith("[issue #42]")
+        assert "Login crashes on empty password." in (task.content or "")
+        assert task.status.value == "todo"
+
+        outbox = (
+            TaskEventOutbox.query
+            .filter_by(event_type="repo.issues.opened", task_id=task.id)
+            .all()
+        )
+        assert len(outbox) == 1
+        assert outbox[0].payload.get("issue_number") == 42
+
+        # 清理 webhook 建的任务：project_factory teardown 删项目时不能被 tasks FK 挡住
+        TaskEventOutbox.query.filter_by(task_id=task.id).delete()
+        Task.query.filter_by(id=task.id).delete()
+        db_session.commit()
+
+    def test_issue_closed_is_ignored(self, client, db_session, app_configured, project_factory, task_factory, binding_factory):
+        from models import Task
+
+        project = project_factory()
+        binding_factory(project)
+        before = Task.query.count()
+
+        payload = {
+            "action": "closed",
+            "issue": {"number": 42, "title": "Done already"},
+            "repository": {"full_name": "acme/widget"},
+        }
+        resp = _webhook_post(client, payload, event="issues")
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["handled"] is False
+        assert Task.query.count() == before
+
+    def test_issue_without_binding_creates_nothing(self, client, db_session, app_configured):
+        from models import Task
+
+        before = Task.query.count()
+        payload = {
+            "action": "opened",
+            "issue": {"number": 7, "title": "Orphan"},
+            "repository": {"full_name": "nobody/nothing"},
+        }
+        resp = _webhook_post(client, payload, event="issues")
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["handled"] is False
+        assert Task.query.count() == before
+
+    def _seed_task_with_pr_branch(self, db_session, project_factory, task_factory,
+                                  repo_full_name="acme/widget", branch="agent/fix-1"):
+        from models import TaskEvidenceRecord
+
+        project = project_factory()
+        task = task_factory(project_id=project.id, owner_id=project.owner_id, title="CI task")
+        db_session.add(TaskEvidenceRecord(
+            task_id=task.id, evidence_type="pr", status="unknown",
+            detail={"pr_number": 9, "repo": repo_full_name, "head_branch": branch},
+            created_by="test",
+        ))
+        db_session.commit()
+        db_session.expire(task)
+        return task
+
+    def test_workflow_run_failure_emits_repo_event(self, client, db_session, app_configured, project_factory, task_factory):
+        from models import TaskEventOutbox
+
+        task = self._seed_task_with_pr_branch(db_session, project_factory, task_factory)
+
+        payload = {
+            "action": "completed",
+            "workflow_run": {
+                "run_number": 12,
+                "conclusion": "failure",
+                "head_branch": "agent/fix-1",
+                "html_url": "https://github.com/acme/widget/actions/runs/9001",
+                "workflow": {"name": "CI"},
+            },
+            "repository": {"full_name": "acme/widget"},
+        }
+        resp = _webhook_post(client, payload, event="workflow_run")
+
+        assert resp.status_code == 200
+        data = resp.get_json()["data"]
+        assert data["handled"] is True and data["task_id"] == task.id
+
+        outbox = (
+            TaskEventOutbox.query
+            .filter_by(event_type="repo.workflow_run.failure", task_id=task.id)
+            .all()
+        )
+        assert len(outbox) == 1
+        assert outbox[0].payload.get("conclusion") == "failure"
+
+    def test_workflow_run_no_matching_task_ignored(self, client, db_session, app_configured, project_factory, task_factory):
+        self._seed_task_with_pr_branch(db_session, project_factory, task_factory, branch="other/branch")
+        payload = {
+            "action": "completed",
+            "workflow_run": {"conclusion": "failure", "head_branch": "unknown/branch"},
+            "repository": {"full_name": "acme/widget"},
+        }
+        resp = _webhook_post(client, payload, event="workflow_run")
+        assert resp.status_code == 200
+        assert resp.get_json()["data"]["handled"] is False
+
+
 class TestManifestFlow:
     def test_manifest_generated(self, client, owner_auth, monkeypatch):
         monkeypatch.setenv("GITHUB_APP_PUBLIC_BASE", "https://todo4ai.local")
