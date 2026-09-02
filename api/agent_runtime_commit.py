@@ -20,6 +20,7 @@ from models import (
 from .base import ApiResponse, validate_json_request
 from .agent_common import now_utc, write_agent_audit, agent_session_required
 from services.failure_recovery import handle_failed_commit
+from services.task_content import append_agent_section
 
 
 agent_runtime_commit_bp = Blueprint('agent_runtime_commit', __name__)
@@ -256,20 +257,18 @@ def commit_task(task_id):
         task.status = TaskStatus.DONE
         task.completed_at = now
         attempt.state = AgentTaskAttemptState.COMMITTED
-        # Write agent result back to task content
+        # Write agent result back to task content as a co-authoring section
         result_data = data.get('result') or {}
         output = result_data.get('output', '')
         if output:
-            try:
-                existing_content = json.loads(task.content) if task.content else {}
-                if not isinstance(existing_content, dict):
-                    existing_content = {"content": task.content}
-            except Exception:
-                existing_content = {"content": task.content}
-            existing_content['agent_output'] = output
-            existing_content['agent_metadata'] = result_data.get('metadata', {})
-            existing_content['processed_by'] = result_data.get('processed_by', 'agent')
-            task.content = json.dumps(existing_content, ensure_ascii=False)
+            agent_label = str(result_data.get('processed_by')
+                              or getattr(agent, 'name', '') or 'agent').strip()
+            task.content = append_agent_section(
+                task.content,
+                output,
+                agent_label=agent_label,
+                agent_metadata=result_data.get('metadata'),
+            )
     elif final_status == 'failed':
         task.status = TaskStatus.REVIEW
         attempt.state = AgentTaskAttemptState.ABORTED
