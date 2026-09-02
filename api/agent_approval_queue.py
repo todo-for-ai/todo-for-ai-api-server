@@ -95,13 +95,18 @@ def list_pending_approvals(workspace_id: int):
         payload = row.payload or {}
         interaction_id = str(payload.get('interaction_id') or '').strip()
         governance = payload.get('governance') or {}
+        # 优先用 Agent 名称；平台/MCP 发起的请求（agent_id 为空）回退到 payload 里的来源标识
+        agent_name = agent_map.get(row.agent_id) or payload.get('source_agent_name') \
+            or payload.get('source_user_name') \
+            or (f'Agent #{row.agent_id}' if row.agent_id is not None else None)
         items.append({
             'event_id': row.id,
             'interaction_id': interaction_id,
             'task_id': row.task_id,
             'task_title': task_map.get(row.task_id),
             'agent_id': row.agent_id,
-            'agent_name': agent_map.get(row.agent_id, f'Agent #{row.agent_id}'),
+            'agent_name': agent_name,
+            'source': payload.get('source') or 'agent',
             'interaction_type': payload.get('interaction_type'),
             'risk_tier': governance.get('risk_tier'),
             'sensitivity_level': governance.get('sensitivity_level'),

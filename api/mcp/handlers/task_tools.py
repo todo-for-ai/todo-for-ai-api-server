@@ -1,11 +1,444 @@
 from datetime import datetime
 
 from flask import g
+from sqlalchemy import or_
 
 from core.cache_invalidation import invalidate_user_caches
-from models import ContextRule, Project, Task, TaskEvidenceRecord, db
+from models import (
+    AgentTaskEvent,
+    ContextRule,
+    Project,
+    Task,
+    TaskEvidenceRecord,
+    TaskLog,
+    TaskLogActorType,
+    TaskStatus,
+    db,
+)
 
+from ...agent_common import generate_id, now_utc
 from ..shared import sanitize_input, validate_integer
+
+VALID_STATUSES = ['todo', 'in_progress', 'review', 'done', 'cancelled']
+
+
+def _status_members(status_values):
+    """状态字符串（value）→ TaskStatus 成员。Enum 列按 name 落库，直接用 value 字符串过滤会命中 0 行。"""
+    return [TaskStatus(value) for value in status_values]
+
+
+def _accessible_tasks_scope(user_id):
+    """任务可见范围（与既有 MCP 权限模型一致）：
+    自己创建的 / 自己拥有的 / 自己项目里的 / assignees 指派给自己的。
+    assignees 是 JSON 列，先用 LIKE 粗筛（MySQL/SQLite 通用），再在 Python 侧精确校验。
+    """
+    return or_(
+        Task.creator_id == user_id,
+        Task.owner_id == user_id,
+        Task.project_id.in_(db.session.query(Project.id).filter_by(owner_id=user_id)),
+        Task.assignees.like(f'%"id": {user_id}%'),
+    )
+
+
+def _assignee_matches_user(assignees, user_id):
+    for item in assignees or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get('type') or '').lower() == 'human':
+            try:
+                if int(item.get('id')) == int(user_id):
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def _task_status_value(task):
+    return task.status.value if hasattr(task.status, 'value') else task.status
+
+
+def list_my_tasks(arguments):
+    """列出与当前 token 用户相关的任务（外部 Agent 发现工作的入口）"""
+    status_filter = arguments.get('status_filter') or ['todo', 'in_progress', 'review']
+    project_id = arguments.get('project_id')
+    limit = arguments.get('limit', 50)
+
+    try:
+        limit = min(max(int(limit or 50), 1), 200)
+    except (TypeError, ValueError):
+        return {'error': 'limit must be an integer'}
+
+    if project_id is not None:
+        try:
+            project_id = validate_integer(project_id, 'project_id')
+        except ValueError as e:
+            return {'error': str(e)}
+
+    valid_statuses = VALID_STATUSES
+    if not isinstance(status_filter, list):
+        return {'error': 'status_filter must be an array of status strings'}
+    for status in status_filter:
+        if status not in valid_statuses:
+            return {'error': f'Invalid status in status_filter: {status}'}
+
+    query = Task.query.filter(_accessible_tasks_scope(g.current_user.id))
+    if project_id is not None:
+        query = query.filter(Task.project_id == project_id)
+    if status_filter:
+        query = query.filter(Task.status.in_(_status_members(status_filter)))
+
+    rows = query.order_by(Task.updated_at.desc()).limit(limit * 2).all()
+
+    tasks_data = []
+    for task in rows:
+        # LIKE 粗筛可能命中 agent 的同号 id，这里精确校验一次
+        if task.creator_id != g.current_user.id \
+                and task.owner_id != g.current_user.id \
+                and not _assignee_matches_user(task.assignees, g.current_user.id):
+            project_owner = db.session.query(Project.owner_id).filter_by(id=task.project_id).scalar()
+            if project_owner != g.current_user.id:
+                continue
+        task_dict = task.to_dict()
+        project = Project.query.get(task.project_id)
+        task_dict['project_name'] = project.name if project else None
+        tasks_data.append(task_dict)
+        if len(tasks_data) >= limit:
+            break
+
+    return {
+        'total_tasks': len(tasks_data),
+        'status_filter': status_filter,
+        'tasks': tasks_data,
+        'hint': 'Pick a task and set it in_progress with update_task_status; report_progress as you work; mark review/done when finished',
+    }
+
+
+def search_tasks(arguments):
+    """在可访问范围内按关键词搜索任务"""
+    keyword = arguments.get('keyword')
+    if not keyword or not str(keyword).strip():
+        return {'error': 'keyword is required'}
+    keyword = sanitize_input(str(keyword).strip())
+
+    project_id = arguments.get('project_id')
+    status = arguments.get('status')
+    limit = arguments.get('limit', 50)
+
+    try:
+        limit = min(max(int(limit or 50), 1), 200)
+    except (TypeError, ValueError):
+        return {'error': 'limit must be an integer'}
+
+    valid_statuses = VALID_STATUSES
+    if status is not None and status not in valid_statuses:
+        return {'error': f'Invalid status: {status}'}
+
+    query = Task.query.filter(_accessible_tasks_scope(g.current_user.id)).filter(
+        Task.title.like(f'%{keyword}%') | Task.content.like(f'%{keyword}%')
+    )
+    if project_id is not None:
+        try:
+            project_id = validate_integer(project_id, 'project_id')
+        except ValueError as e:
+            return {'error': str(e)}
+        query = query.filter(Task.project_id == project_id)
+    if status:
+        query = query.filter(Task.status == TaskStatus(status))
+
+    rows = query.order_by(Task.updated_at.desc()).limit(limit * 2).all()
+
+    tasks_data = []
+    for task in rows:
+        if task.creator_id != g.current_user.id \
+                and task.owner_id != g.current_user.id \
+                and not _assignee_matches_user(task.assignees, g.current_user.id):
+            project_owner = db.session.query(Project.owner_id).filter_by(id=task.project_id).scalar()
+            if project_owner != g.current_user.id:
+                continue
+        task_dict = task.to_dict()
+        project = Project.query.get(task.project_id)
+        task_dict['project_name'] = project.name if project else None
+        tasks_data.append(task_dict)
+        if len(tasks_data) >= limit:
+            break
+
+    return {
+        'keyword': keyword,
+        'total_tasks': len(tasks_data),
+        'tasks': tasks_data,
+    }
+
+
+def update_task_status(arguments):
+    """更新任务状态，支持 expected_revision 乐观锁"""
+    task_id = arguments.get('task_id')
+    status = arguments.get('status')
+    expected_revision = arguments.get('expected_revision')
+
+    if not task_id:
+        return {'error': 'task_id is required'}
+    try:
+        task_id = validate_integer(task_id, 'task_id')
+    except ValueError as e:
+        return {'error': str(e)}
+
+    valid_statuses = VALID_STATUSES
+    if status not in valid_statuses:
+        return {'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'}
+
+    task = Task.query.get(task_id)
+    if not task:
+        return {'error': f'Task with ID {task_id} not found'}
+
+    access_error = _task_access_error(task)
+    if access_error:
+        return access_error
+
+    if expected_revision is not None:
+        try:
+            expected_revision = int(expected_revision)
+        except (TypeError, ValueError):
+            return {'error': 'expected_revision must be an integer'}
+        if int(task.revision or 1) != expected_revision:
+            return {
+                'error': f'Revision conflict: task is at revision {task.revision}, expected {expected_revision}',
+                'conflict': True,
+                'current_revision': task.revision,
+            }
+
+    old_status = _task_status_value(task)
+    task.status = TaskStatus(status)
+    task.revision = int(task.revision or 1) + 1
+
+    project = Project.query.get(task.project_id)
+    if project:
+        project.last_activity_at = datetime.utcnow()
+
+    db.session.commit()
+    invalidate_user_caches(g.current_user.id)
+
+    from models import UserActivity
+    try:
+        UserActivity.record_activity(g.current_user.id, 'task_status_changed')
+        if status == 'done':
+            UserActivity.record_activity(g.current_user.id, 'task_completed')
+    except Exception as e:
+        print(f"Warning: Failed to record user activity: {str(e)}")
+
+    result = {
+        'task_id': task.id,
+        'title': task.title,
+        'old_status': old_status,
+        'status': _task_status_value(task),
+        'revision': task.revision,
+        'updated': True,
+    }
+
+    # 软性 DoD 提醒：声明了验收标准但没有对应类型的通过证据时，提示而非阻断
+    if status == 'done' and task.dod:
+        evidence = TaskEvidenceRecord.query.filter_by(task_id=task.id).all()
+        passed_types = {ev.evidence_type for ev in evidence if ev.status == 'passed'}
+        missing = [
+            f"{item.get('type')}:{item.get('value', '')}"
+            for item in task.dod
+            if item.get('type') not in passed_types
+        ]
+        if missing:
+            result['dod_warning'] = 'Task has DoD criteria without passing evidence: ' + '; '.join(missing)
+            result['hint'] = 'Submit evidence via the runtime commit protocol or use get_task_evidence to review current evidence'
+
+    return result
+
+
+def report_progress(arguments):
+    """向任务追加一条进度日志（append-only）"""
+    task_id = arguments.get('task_id')
+    content = arguments.get('content')
+    content_type = arguments.get('content_type', 'text/markdown')
+
+    if not task_id:
+        return {'error': 'task_id is required'}
+    try:
+        task_id = validate_integer(task_id, 'task_id')
+    except ValueError as e:
+        return {'error': str(e)}
+
+    if not content or not str(content).strip():
+        return {'error': 'content is required'}
+    content = sanitize_input(str(content).strip())
+
+    task = Task.query.get(task_id)
+    if not task:
+        return {'error': f'Task with ID {task_id} not found'}
+
+    access_error = _task_access_error(task)
+    if access_error:
+        return access_error
+
+    row = TaskLog(
+        task_id=task.id,
+        actor_type=TaskLogActorType.AGENT,
+        actor_user_id=g.current_user.id,
+        content=content,
+        content_type=(content_type or 'text/markdown')[:32],
+        created_by=f'mcp:{g.current_user.username}',
+    )
+    db.session.add(row)
+    db.session.commit()
+
+    return {
+        'task_id': task.id,
+        'log_id': row.id,
+        'content': row.content,
+        'reported': True,
+        'timestamp': row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def request_approval(arguments):
+    """请求人类决策：写入审批队列（interaction_request），owner/admin 可批准或拒绝"""
+    task_id = arguments.get('task_id')
+    question = arguments.get('question')
+    interaction_type = arguments.get('interaction_type', 'human_approval')
+    sensitivity_level = arguments.get('sensitivity_level', 'medium')
+    options = arguments.get('options')
+
+    if not task_id:
+        return {'error': 'task_id is required'}
+    try:
+        task_id = validate_integer(task_id, 'task_id')
+    except ValueError as e:
+        return {'error': str(e)}
+
+    if not question or not str(question).strip():
+        return {'error': 'question is required'}
+    question = sanitize_input(str(question).strip())
+
+    interaction_type = sanitize_input(str(interaction_type or 'human_approval')) or 'human_approval'
+    if sensitivity_level not in ('low', 'medium', 'high', 'critical'):
+        return {'error': 'sensitivity_level must be one of: low, medium, high, critical'}
+    if options is not None:
+        if not isinstance(options, list) or not all(isinstance(opt, str) for opt in options):
+            return {'error': 'options must be an array of strings'}
+        options = [str(opt)[:200] for opt in options][:10]
+
+    task = Task.query.get(task_id)
+    if not task:
+        return {'error': f'Task with ID {task_id} not found'}
+
+    access_error = _task_access_error(task)
+    if access_error:
+        return access_error
+
+    project = Project.query.get(task.project_id)
+    workspace_id = project.organization_id if project else None
+    if not workspace_id:
+        return {'error': 'Task project is not attached to a workspace; approval queue unavailable'}
+
+    user = g.current_user
+    interaction_id = generate_id('intx')
+    event_time = now_utc()
+    risk_score = {'low': 5, 'medium': 15, 'high': 30, 'critical': 60}.get(sensitivity_level, 15)
+
+    payload = {
+        'interaction_id': interaction_id,
+        'interaction_type': interaction_type,
+        'source': 'mcp',
+        'source_user_id': user.id,
+        'source_user_name': user.username,
+        'target_agent_id': None,
+        'task_id': task.id,
+        'attempt_id': generate_id('ia'),
+        'description': question,
+        'options': options or [],
+        'contract': {},
+        'security_context': {'sensitivity_level': sensitivity_level},
+        'metadata': {'channel': 'mcp', 'api_token_name': getattr(g.api_token, 'name', None)},
+        'status': 'pending_approval',
+        'governance': {
+            'requires_approval': True,
+            'risk_tier': sensitivity_level,
+            'sensitivity_level': sensitivity_level,
+            'risk_score': risk_score,
+        },
+        'requested_at': event_time.isoformat(),
+    }
+
+    row = AgentTaskEvent(
+        task_id=task.id,
+        attempt_id=payload['attempt_id'],
+        agent_id=None,
+        workspace_id=workspace_id,
+        event_type='interaction_request',
+        seq=1,
+        event_timestamp=event_time,
+        payload=payload,
+        message=f"MCP approval request {interaction_id} by {user.username}",
+        created_by=f'user:{user.id}',
+    )
+    db.session.add(row)
+
+    from api.agent_common import write_agent_audit
+    write_agent_audit(
+        event_type='interaction.requested',
+        actor_type='user',
+        actor_id=user.id,
+        target_type='task',
+        target_id=task.id,
+        workspace_id=workspace_id,
+        payload={
+            'interaction_id': interaction_id,
+            'task_id': task.id,
+            'interaction_type': interaction_type,
+            'audit_source': 'mcp_request_approval',
+            'source': 'mcp',
+            'source_user_id': user.id,
+            'sensitivity_level': sensitivity_level,
+            'risk_tier': sensitivity_level,
+            'requires_approval': True,
+            'request_status': 'pending_approval',
+        },
+        risk_score=risk_score,
+    )
+    db.session.commit()
+
+    # 通知任务房间与任务创建者
+    try:
+        from api.user_websocket import push_to_task_room, push_to_user
+        push_to_task_room(task.id, 'approval_request', {
+            'task_id': task.id,
+            'interaction_id': interaction_id,
+            'interaction_type': interaction_type,
+            'source': 'mcp',
+            'source_user_name': user.username,
+            'risk_tier': sensitivity_level,
+            'sensitivity_level': sensitivity_level,
+        })
+        if task.created_by and ':' in str(task.created_by):
+            try:
+                owner_id = int(str(task.created_by).split(':')[-1])
+                if owner_id != user.id:
+                    push_to_user(owner_id, 'approval_request', {
+                        'task_id': task.id,
+                        'interaction_id': interaction_id,
+                        'interaction_type': interaction_type,
+                        'source_user_name': user.username,
+                    })
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+
+    return {
+        'interaction_id': interaction_id,
+        'task_id': task.id,
+        'status': 'pending_approval',
+        'question': question,
+        'requested_at': payload['requested_at'],
+        'workspace_id': workspace_id,
+        'next_step': 'Workspace owner/admin can approve or reject via POST /workspaces/<workspace_id>/tasks/'
+                     f'{task.id}/interactions/{interaction_id}/approval with {{"decision": "approved"|"rejected"}}',
+    }
 
 
 def get_project_tasks_by_name(arguments):
@@ -36,7 +469,7 @@ def get_project_tasks_by_name(arguments):
     # 获取任务
     query = Task.query.filter_by(project_id=project.id)
     if status_filter:
-        query = query.filter(Task.status.in_(status_filter))
+        query = query.filter(Task.status.in_(_status_members(status_filter)))
 
     tasks = query.order_by(Task.created_at.asc()).all()
 

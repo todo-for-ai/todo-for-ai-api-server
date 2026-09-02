@@ -171,6 +171,142 @@ MCP_TOOLS = [
 
 MCP_TOOLS.extend([
     {
+        "name": "list_my_tasks",
+        "description": "List tasks relevant to the current API token user: created by them, owned by them, in their own projects, or assigned to them. This is the entry point for an external agent to discover work",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status_filter": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["todo", "in_progress", "review", "done", "cancelled"]
+                    },
+                    "description": "Filter tasks by status (default: todo, in_progress, review)",
+                    "default": ["todo", "in_progress", "review"]
+                },
+                "project_id": {
+                    "type": "integer",
+                    "description": "Restrict to one project (optional)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max tasks returned (default 50, max 200)",
+                    "default": 50
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "search_tasks",
+        "description": "Search accessible tasks by keyword in title or content",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword": {
+                    "type": "string",
+                    "description": "Keyword to search in task title/content"
+                },
+                "project_id": {
+                    "type": "integer",
+                    "description": "Restrict to one project (optional)"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["todo", "in_progress", "review", "done", "cancelled"],
+                    "description": "Filter by a single status (optional)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max tasks returned (default 50, max 200)",
+                    "default": 50
+                }
+            },
+            "required": ["keyword"]
+        }
+    },
+    {
+        "name": "update_task_status",
+        "description": "Update a task's status (todo/in_progress/review/done/cancelled). Pass expected_revision to guard against concurrent edits; a mismatch is rejected",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "The ID of the task"
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["todo", "in_progress", "review", "done", "cancelled"],
+                    "description": "The new status"
+                },
+                "expected_revision": {
+                    "type": "integer",
+                    "description": "Optimistic concurrency guard: reject the update if the task revision differs (optional)"
+                }
+            },
+            "required": ["task_id", "status"]
+        }
+    },
+    {
+        "name": "report_progress",
+        "description": "Append a progress log entry to a task (append-only task log). Use this to keep humans informed while working on a task",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "The ID of the task"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Progress note in markdown (what was done, current state, next steps)"
+                },
+                "content_type": {
+                    "type": "string",
+                    "description": "Content type, default text/markdown",
+                    "default": "text/markdown"
+                }
+            },
+            "required": ["task_id", "content"]
+        }
+    },
+    {
+        "name": "request_approval",
+        "description": "Ask the human to decide something about a task (e.g. destructive operation, budget, scope change). The request enters the workspace approval queue and workspace owner/admin can approve or reject it",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "The ID of the task this request is about"
+                },
+                "question": {
+                    "type": "string",
+                    "description": "What you are asking for and why (shown to the approver)"
+                },
+                "interaction_type": {
+                    "type": "string",
+                    "description": "Short type tag, e.g. human_approval / permission_request / budget_request (default: human_approval)",
+                    "default": "human_approval"
+                },
+                "sensitivity_level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "critical"],
+                    "description": "How sensitive the requested action is (default: medium)",
+                    "default": "medium"
+                },
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional decision options to present to the approver"
+                }
+            },
+            "required": ["task_id", "question"]
+        }
+    },
+    {
         "name": "get_task_evidence",
         "description": "Get a task's Definition of Done (DoD) and verification evidence (test/build/lint results, linked pull requests) submitted by agents",
         "inputSchema": {

@@ -91,7 +91,7 @@ def decide_interaction_approval(workspace_id: int, task_id: int, interaction_id:
     decision_row = AgentTaskEvent(
         task_id=int(task_id),
         attempt_id=str(request_payload.get('attempt_id') or ''),
-        agent_id=int(request_row.agent_id),
+        agent_id=int(request_row.agent_id) if request_row.agent_id is not None else None,
         workspace_id=int(workspace_id),
         event_type=INTERACTION_APPROVAL_EVENT_TYPE,
         seq=1,
