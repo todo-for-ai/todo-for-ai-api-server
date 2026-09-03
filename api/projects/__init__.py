@@ -14,5 +14,6 @@ from .shared import projects_list_fallback_cache  # noqa: E402
 from . import routes_project_listing as _routes_project_listing  # noqa: F401,E402
 from . import routes_project_crud as _routes_project_crud  # noqa: F401,E402
 from . import routes_members as _routes_members  # noqa: F401,E402
+from . import routes_project_overview as _routes_project_overview  # noqa: F401,E402
 
 __all__ = ['projects_bp', 'projects_list_fallback_cache']
