@@ -41,6 +41,7 @@ class AgentRoleTemplate(BaseModel):
     description = Column(Text, comment='模板描述')
     avatar_url = Column(String(512), comment='默认头像URL')
     category = Column(String(32), default='general', comment='分类：developer, qa, pm, designer, analyst, writer, architect, custom')
+    industry = Column(String(64), nullable=True, index=True, comment='所属行业（空=跨行业通用）')
 
     # 核心配置
     capability_tags = Column(JSON, comment='能力标签列表')
@@ -79,6 +80,7 @@ class AgentRoleTemplate(BaseModel):
         data = super().to_dict()
         data['status'] = self.status.value if self.status else None
         data['capability_tags'] = self.capability_tags or []
+        data['industry'] = self.industry
         data['response_style'] = self.response_style or {}
         data['tool_policy'] = self.tool_policy or {}
         data['memory_policy'] = self.memory_policy or {}

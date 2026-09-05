@@ -5,7 +5,7 @@ Agent 角色模板管理 API
 """
 
 from flask import Blueprint, request, g
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 
 from models import (
     db, AgentRoleTemplate, AgentRoleTemplateStatus,
@@ -35,6 +35,44 @@ def _filter_editable_fields(data):
     return {k: v for k, v in data.items() if k in TEMPLATE_EDITABLE_FIELDS}
 
 
+@agent_role_templates_bp.route('/workspaces/<int:workspace_id>/agent-role-templates/industries', methods=['GET'])
+@unified_auth_required
+def list_template_industries(workspace_id):
+    """行业清单（含各行业模板数量），供岗位选择器按行业浏览。"""
+    user = get_current_user()
+    workspace, err = get_workspace_or_404(workspace_id)
+    if err:
+        return err
+
+    access_err = ensure_workspace_access(user, workspace)
+    if access_err:
+        return access_err
+
+    rows = (
+        db.session.query(
+            AgentRoleTemplate.industry,
+            func.count(AgentRoleTemplate.id),
+        )
+        .filter(
+            AgentRoleTemplate.status == AgentRoleTemplateStatus.ACTIVE,
+            AgentRoleTemplate.is_builtin == True,
+            AgentRoleTemplate.industry.isnot(None),
+        )
+        .group_by(AgentRoleTemplate.industry)
+        .order_by(func.count(AgentRoleTemplate.id).desc())
+        .all()
+    )
+    return ApiResponse.success(
+        data={
+            'industries': [
+                {'industry': name, 'count': count} for name, count in rows
+            ],
+            'total': sum(count for _, count in rows),
+        },
+        message='Template industries retrieved',
+    ).to_response()
+
+
 @agent_role_templates_bp.route('/workspaces/<int:workspace_id>/agent-role-templates', methods=['GET'])
 @unified_auth_required
 def list_templates(workspace_id):
@@ -62,6 +100,19 @@ def list_templates(workspace_id):
 
     if category:
         query = query.filter(AgentRoleTemplate.category == category)
+
+    industry = request.args.get('industry')
+    if industry:
+        query = query.filter(AgentRoleTemplate.industry == industry)
+    if request.args.get('keyword'):
+        kw = request.args.get('keyword').strip()
+        like = f"%{kw}%"
+        query = query.filter(
+            or_(
+                AgentRoleTemplate.display_name.like(like),
+                AgentRoleTemplate.description.like(like),
+            )
+        )
 
     query = query.filter(AgentRoleTemplate.status == AgentRoleTemplateStatus.ACTIVE)
     query = query.order_by(AgentRoleTemplate.is_builtin.desc(), AgentRoleTemplate.updated_at.desc())
