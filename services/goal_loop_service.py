@@ -1,14 +1,16 @@
 """
-GoalLoop 目标循环驱动器
+GoalLoop 目标循环驱动器（v2：计划式拆解）
 
-循环机制：任务终态 → notify_task_finished → maybe_advance → 规划器从目标
-推导下一步（continue=建下一轮任务并自动派发 / complete=宣告达成 / blocked=
-受阻计数），护栏：轮数上限、连续受阻容忍、人工暂停/停止。规划器可插拔：
-默认走平台 LLM（feature='goal_loop'），GOAL_LOOP_PLANNER=scripted 时用
+循环机制：创建循环 → 规划器把目标**拆解成有序计划**（steps）→ 逐轮把计划
+步骤物化为任务并自动派发 → 任务成功则直接执行下一步（省一次评审调用），
+任务失败或计划耗尽则触发**评审**（继续扩展计划/重排计划/宣告完成/受阻）。
+
+护栏：轮数上限、连续受阻容忍、人工暂停/停止/kick。并发防护：advancing
+CAS 标记，同一循环不并发双发；LLM 调用期间不持锁，落库前复核状态。
+
+规划器可插拔：默认走平台 LLM（feature='goal_loop'），并注入执行 Agent 的
+岗位角色上下文（agent.role_template）；GOAL_LOOP_PLANNER=scripted 时使用
 确定性脚本规划器（仅供测试/E2E）。
-
-并发防护：推进前 CAS 抢占 advancing 标记（同一循环不并发双发任务）；
-LLM 调用期间不持行锁，用户暂停/停止后推进在落库前复核状态即中止。
 """
 
 import json
@@ -16,7 +18,6 @@ import os
 from datetime import datetime
 
 from models import db, GoalLoop, GoalLoopStatus, Task, TaskStatus, Project, Agent
-from api.agent_common import now_utc
 
 TERMINAL_TASK_STATUSES = {TaskStatus.DONE, TaskStatus.CANCELLED}
 ACTIVE_TASK_STATUSES = {TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVIEW, TaskStatus.BLOCKED}
@@ -31,6 +32,11 @@ def _naive_utc_now():
 
 # ── 查询助手 ──
 
+def _tag_prefix():
+    from models.goal_loop import GOAL_LOOP_TAG_PREFIX
+    return GOAL_LOOP_TAG_PREFIX
+
+
 def _loop_task_query(loop_id):
     from sqlalchemy import cast, String
     tag = f'{_tag_prefix()}{loop_id}'
@@ -39,11 +45,6 @@ def _loop_task_query(loop_id):
         Task.project_id.isnot(None),
         cast(Task.tags, String).like(f'%{tag}%'),
     )
-
-
-def _tag_prefix():
-    from models.goal_loop import GOAL_LOOP_TAG_PREFIX
-    return GOAL_LOOP_TAG_PREFIX
 
 
 def loop_tasks(loop_id):
@@ -57,79 +58,31 @@ def rounds_done(loop_id) -> int:
 
 def _recent_history(loop, limit=5):
     rows = loop_tasks(loop.id)[-limit:]
-    history = []
-    for t in rows:
-        history.append({
+    return [
+        {
             'title': t.title,
             'status': t.status.value if t.status else None,
-        })
-    return history
+        }
+        for t in rows
+    ]
 
 
-# ── 规划器 ──
-
-def _planner_mode() -> str:
-    return (os.getenv('GOAL_LOOP_PLANNER') or 'llm').strip().lower()
-
-
-def _llm_planner(loop, history) -> dict:
-    from services.ai_service import call_llm_production
-
-    system_prompt = (
-        '你是目标循环规划器。根据目标、完成标准和最近轮次历史，决定下一步。'
-        '只输出 JSON：{"action":"continue|complete|blocked",'
-        '"title":"下一轮任务标题(continue时必填)",'
-        '"content":"下一轮任务内容(continue时必填,给 agent 的可执行指令)",'
-        '"reason":"决策原因或完成总结"}'
-    )
-    user_prompt = (
-        f'目标：{loop.goal_text}\n'
-        f'完成标准：{loop.done_definition or "（未明确，由你判断）"}\n'
-        f'已进行轮数：{rounds_done(loop.id)}/{loop.rounds_limit}\n'
-        f'最近轮次：{json.dumps(history, ensure_ascii=False)}\n'
-        f'连续受阻次数：{loop.stall_count}'
-    )
-    result = call_llm_production(
-        feature='goal_loop',
-        messages=[
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt},
-        ],
-        user_id=loop.created_by or 0,
-        use_cache=False,
-        temperature=0.4,
-        max_tokens=1200,
-    )
-    if not result.get('success'):
-        raise RuntimeError(f"llm_failed: {result.get('error')}")
-    parsed = _extract_json(result['data'])
-    action = (parsed.get('action') or '').strip().lower()
-    if action not in ('continue', 'complete', 'blocked'):
-        raise RuntimeError(f'llm_bad_action: {action}')
-    if action == 'continue' and not (parsed.get('title') or '').strip():
-        raise RuntimeError('llm_continue_without_title')
-    return parsed
-
-
-def _scripted_planner(loop, history) -> dict:
-    """确定性脚本规划器：仅供测试/E2E，验证循环机制本身。"""
-    target_rounds = int(os.getenv('GOAL_LOOP_SCRIPTED_ROUNDS', '3'))
-    done = rounds_done(loop.id)
-    if done >= target_rounds:
-        return {'action': 'complete', 'reason': f'脚本规划器：已完成 {done} 轮，目标达成'}
-    n = done + 1
+def _role_context(agent: Agent) -> dict:
+    """执行 Agent 的岗位角色上下文（来自绑定的角色模板）。"""
+    template = agent.role_template if agent else None
+    if not template:
+        return {'role': None, 'role_description': None}
     return {
-        'action': 'continue',
-        'title': f'{loop.title} · 第 {n} 轮',
-        'content': f'朝目标推进第 {n} 步。目标：{loop.goal_text}',
-        'reason': f'脚本规划器第 {n} 轮',
+        'role': template.display_name or template.name,
+        'role_category': template.category,
+        'role_description': (template.description or '')[:500],
     }
 
 
-def _call_planner(loop, history) -> dict:
-    if _planner_mode() == 'scripted':
-        return _scripted_planner(loop, history)
-    return _llm_planner(loop, history)
+# ── 规划器（v2：拆解 + 评审 两段） ──
+
+def _planner_mode() -> str:
+    return (os.getenv('GOAL_LOOP_PLANNER') or 'llm').strip().lower()
 
 
 def _extract_json(raw):
@@ -149,9 +102,120 @@ def _extract_json(raw):
         raise
 
 
+def _valid_steps(steps, max_steps) -> bool:
+    return (
+        isinstance(steps, list)
+        and 1 <= len(steps) <= max_steps
+        and all(isinstance(s, dict) and (s.get('title') or '').strip() for s in steps)
+    )
+
+
+def _llm_call(loop, system_prompt: str, user_prompt: str) -> dict:
+    from services.ai_service import call_llm_production
+    result = call_llm_production(
+        feature='goal_loop',
+        messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt},
+        ],
+        user_id=loop.created_by or 0,
+        use_cache=False,
+        temperature=0.4,
+        max_tokens=2000,
+    )
+    if not result.get('success'):
+        raise RuntimeError(f"llm_failed: {result.get('error')}")
+    return _extract_json(result['data'])
+
+
+def _decompose(loop) -> list:
+    """把目标拆解成有序计划步骤。"""
+    role = _role_context(loop.agent)
+    role_line = ''
+    if role.get('role'):
+        role_line = f"执行者角色：{role['role']}（{role.get('role_category') or ''}）{role.get('role_description') or ''}\n"
+
+    system_prompt = (
+        '你是目标循环规划器。把目标拆解为有序的执行步骤（计划）。'
+        '只输出 JSON：{"steps": [{"title": "步骤标题", "content": "给 Agent 的可执行指令"}]}，'
+        '步骤数量不超过轮数上限，最后一步应包含验收/收尾。'
+    )
+    user_prompt = (
+        f'{role_line}'
+        f'目标：{loop.goal_text}\n'
+        f'完成标准：{loop.done_definition or "（未明确，由你判断）"}\n'
+        f'轮数上限：{loop.rounds_limit}'
+    )
+    parsed = _llm_call(loop, system_prompt, user_prompt)
+    steps = parsed.get('steps') if isinstance(parsed, dict) else None
+    if not _valid_steps(steps, loop.rounds_limit):
+        raise RuntimeError('llm_bad_plan')
+    return steps
+
+
+def _review(loop, last_status: str) -> dict:
+    """计划耗尽或上轮失败后的评审：扩展/重排计划、宣告完成或受阻。"""
+    role = _role_context(loop.agent)
+    role_line = f"执行者角色：{role.get('role')}\n" if role.get('role') else ''
+
+    system_prompt = (
+        '你是目标循环评审器。根据目标、完成标准和执行历史决定下一步。'
+        '只输出 JSON：{"action": "complete|extend|blocked", '
+        '"steps": [{"title": "...", "content": "..."}]（action=extend 时必填，为剩余计划）, '
+        '"reason": "决策原因或完成总结"}'
+    )
+    user_prompt = (
+        f'{role_line}'
+        f'目标：{loop.goal_text}\n'
+        f'完成标准：{loop.done_definition or "（未明确，由你判断）"}\n'
+        f'已执行轮数：{rounds_done(loop.id)}/{loop.rounds_limit}\n'
+        f'最近轮次：{json.dumps(_recent_history(loop), ensure_ascii=False)}\n'
+        f'上一轮状态：{last_status or "未知"}'
+    )
+    parsed = _llm_call(loop, system_prompt, user_prompt)
+    action = (parsed.get('action') or '').strip().lower()
+    if action not in ('complete', 'extend', 'blocked'):
+        raise RuntimeError(f'llm_bad_action: {action}')
+    if action == 'extend' and not _valid_steps(parsed.get('steps'), loop.rounds_limit):
+        raise RuntimeError('llm_extend_without_steps')
+    return parsed
+
+
+def _scripted_decompose(loop) -> list:
+    target = int(os.getenv('GOAL_LOOP_SCRIPTED_ROUNDS', '3'))
+    return [
+        {
+            'title': f'{loop.title} · 计划步骤 {i}',
+            'content': f'朝目标推进第 {i}/{target} 步。目标：{loop.goal_text}',
+        }
+        for i in range(1, target + 1)
+    ]
+
+
+def _scripted_review(loop, last_status: str) -> dict:
+    if last_status == 'done':
+        return {
+            'action': 'complete',
+            'reason': f'脚本规划器：已完成 {rounds_done(loop.id)} 轮，目标达成',
+        }
+    return {'action': 'blocked', 'reason': f'脚本规划器：上轮状态 {last_status}，无法推进'}
+
+
+def _call_decompose(loop) -> list:
+    if _planner_mode() == 'scripted':
+        return _scripted_decompose(loop)
+    return _decompose(loop)
+
+
+def _call_review(loop, last_status: str) -> dict:
+    if _planner_mode() == 'scripted':
+        return _scripted_review(loop, last_status)
+    return _review(loop, last_status)
+
+
 # ── 核心推进逻辑 ──
 
-def maybe_advance(loop_id) -> dict:
+def maybe_advance(loop_id, trigger_task_id=None) -> dict:
     """推进一次循环（幂等、并发安全）。返回 {advanced: bool, reason: str}。"""
     loop = db.session.get(GoalLoop, loop_id)
     if not loop:
@@ -160,16 +224,13 @@ def maybe_advance(loop_id) -> dict:
     if loop.status != GoalLoopStatus.RUNNING:
         return {'advanced': False, 'reason': f'not_running:{loop.status.value}'}
 
-    # CAS 抢占推进标记，防并发双发
-    claimed = GoalLoop.query.filter_by(id=loop_id, advancing=0).update(
-        {'advancing': 1}
-    )
+    claimed = GoalLoop.query.filter_by(id=loop_id, advancing=0).update({'advancing': 1})
     db.session.commit()
     if not claimed:
         return {'advanced': False, 'reason': 'already_advancing'}
 
     try:
-        return _advance_locked(loop_id)
+        return _advance_locked(loop_id, trigger_task_id)
     finally:
         try:
             GoalLoop.query.filter_by(id=loop_id).update({'advancing': 0})
@@ -178,7 +239,7 @@ def maybe_advance(loop_id) -> dict:
             db.session.rollback()
 
 
-def _advance_locked(loop_id) -> dict:
+def _advance_locked(loop_id, trigger_task_id=None) -> dict:
     loop = db.session.get(GoalLoop, loop_id)
     if not loop or loop.status != GoalLoopStatus.RUNNING:
         return {'advanced': False, 'reason': 'not_running'}
@@ -189,25 +250,58 @@ def _advance_locked(loop_id) -> dict:
                 last_error=f'轮数上限 {loop.rounds_limit} 已耗尽，目标未宣告完成')
         return {'advanced': False, 'reason': 'rounds_limit'}
 
-    active = [
-        t for t in loop_tasks(loop.id)
-        if t.status in ACTIVE_TASK_STATUSES
-    ]
+    loop_tasks_all = loop_tasks(loop.id)
+    active = [t for t in loop_tasks_all if t.status in ACTIVE_TASK_STATUSES]
     if active:
         return {'advanced': False, 'reason': 'active_task_exists'}
 
-    history = _recent_history(loop)
+    last_status = None
+    if trigger_task_id:
+        trigger = db.session.get(Task, trigger_task_id)
+        if trigger is not None:
+            last_status = trigger.status.value if trigger.status else None
+
+    # ── ① 无计划：先拆解 ──
+    if not loop.plan:
+        try:
+            steps = _call_decompose(loop)
+        except Exception as exc:  # noqa: BLE001
+            return _register_stall(loop, f'decompose_failed: {exc}')
+        db.session.expire(loop)
+        if loop.status != GoalLoopStatus.RUNNING:
+            return {'advanced': False, 'reason': 'not_running_after_planner'}
+        loop.plan = steps
+        loop.plan_index = 0
+        loop.plan_revision = (loop.plan_revision or 0) + 1
+
+    plan = loop.plan or []
+    plan_index = loop.plan_index or 0
+
+    # ── ② 计划有剩余步骤 且 上轮成功（或首轮）：直接物化下一步 ──
+    if plan_index < len(plan) and (last_status in (None, 'done')):
+        step = plan[plan_index]
+        task = _create_round_task(loop, step)
+        loop.plan_index = plan_index + 1
+        loop.last_task_id = task.id
+        loop.stall_count = 0
+        loop.last_error = None
+        if loop.started_at is None:
+            loop.started_at = _naive_utc_now()
+        db.session.commit()
+        _auto_assign(task)
+        return {'advanced': True, 'reason': 'task_created', 'task_id': task.id}
+
+    # ── ③ 计划耗尽 或 上轮失败：评审 ──
     try:
-        decision = _call_planner(loop, history)
-    except Exception as exc:  # noqa: BLE001 - 规划器失败归入受阻计数
-        return _register_stall(loop, f'planner_failed: {exc}')
+        decision = _call_review(loop, last_status or 'unknown')
+    except Exception as exc:  # noqa: BLE001
+        return _register_stall(loop, f'review_failed: {exc}')
 
-    action = decision.get('action')
-
-    # 规划期间用户可能已暂停/停止，落库前复核
     db.session.expire(loop)
     if loop.status != GoalLoopStatus.RUNNING:
         return {'advanced': False, 'reason': 'not_running_after_planner'}
+
+    action = (decision.get('action') or '').strip().lower()
 
     if action == 'complete':
         loop.status = GoalLoopStatus.DONE
@@ -217,20 +311,24 @@ def _advance_locked(loop_id) -> dict:
         db.session.commit()
         return {'advanced': False, 'reason': 'completed'}
 
-    if action == 'blocked':
-        return _register_stall(loop, f"blocked: {decision.get('reason') or '未给出原因'}")
+    if action == 'extend':
+        steps = decision.get('steps')
+        if not _valid_steps(steps, loop.rounds_limit):
+            return _register_stall(loop, 'extend_without_valid_steps')
+        remaining = list(plan[max(plan_index, 0):])
+        loop.plan = remaining + steps
+        loop.plan_index = max(plan_index, 0)
+        loop.plan_revision = (loop.plan_revision or 0) + 1
+        step = loop.plan[loop.plan_index]
+        task = _create_round_task(loop, step)
+        loop.plan_index += 1
+        loop.stall_count = 0
+        loop.last_error = None
+        db.session.commit()
+        _auto_assign(task)
+        return {'advanced': True, 'reason': 'plan_extended', 'task_id': task.id}
 
-    # continue → 建下一轮任务并自动派发
-    task = _create_round_task(loop, decision)
-    loop.last_task_id = task.id
-    loop.stall_count = 0
-    loop.last_error = None
-    if loop.started_at is None:
-        loop.started_at = _naive_utc_now()
-    db.session.commit()
-
-    _auto_assign(task)
-    return {'advanced': True, 'reason': 'task_created', 'task_id': task.id}
+    return _register_stall(loop, f"blocked: {decision.get('reason') or '未给出原因'}")
 
 
 def _register_stall(loop, reason: str) -> dict:
@@ -258,10 +356,13 @@ def _finish(loop, status: GoalLoopStatus, last_error: str = None):
     db.session.commit()
 
 
-def _create_round_task(loop, decision: dict) -> Task:
+def _create_round_task(loop, step: dict) -> Task:
+    role = _role_context(loop.agent)
+    content = (step.get('content') or step.get('title') or '').strip()
+    role_line = f"【执行角色：{role['role']}】\n" if role.get('role') else ''
     task = Task(
-        title=(decision.get('title') or f'{loop.title} · 下一轮').strip()[:500],
-        content=(decision.get('content') or decision.get('title') or '').strip(),
+        title=(step.get('title') or f'{loop.title} · 下一轮').strip()[:500],
+        content=f"{role_line}{content}",
         project_id=loop.project_id,
         owner_id=loop.created_by,
         is_ai_task=True,
@@ -278,7 +379,7 @@ def _auto_assign(task):
     try:
         from services.agent_runtime_controller import AgentRuntimeController
         AgentRuntimeController.auto_assign_task(task)
-    except Exception as exc:  # noqa: BLE001 - 派发失败不回滚任务本身
+    except Exception:
         db.session.rollback()
 
 
@@ -321,7 +422,7 @@ def notify_task_finished(task_id: int):
                     continue
                 break
         if loop_id:
-            maybe_advance(loop_id)
+            maybe_advance(loop_id, trigger_task_id=task_id)
     except Exception:
         db.session.rollback()
 

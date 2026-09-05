@@ -150,6 +150,7 @@ def get_project_overview(project_id: int):
             for agent in visible_agents:
                 bucket = stats_by_agent.get(agent.id, {"total": 0, "succeeded": 0, "failed": 0})
                 last_run = last_run_by_agent.get(agent.id)
+                role_template = agent.role_template
                 agents_payload.append(
                     {
                         "id": agent.id,
@@ -161,6 +162,16 @@ def get_project_overview(project_id: int):
                         "sandbox_profile": agent.sandbox_profile,
                         "explicitly_allowed": bool(agent.allowed_project_ids),
                         "has_active_lease": agent.id in active_lease_agent_ids,
+                        "role": (
+                            {
+                                "id": role_template.id,
+                                "name": role_template.name,
+                                "display_name": role_template.display_name,
+                                "category": role_template.category,
+                            }
+                            if role_template
+                            else None
+                        ),
                         "runs_total": bucket["total"],
                         "runs_succeeded": bucket["succeeded"],
                         "runs_failed": bucket["failed"],

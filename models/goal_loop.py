@@ -8,7 +8,7 @@ GoalLoop 目标循环模型
 
 import enum
 
-from sqlalchemy import Column, String, Integer, Text, DateTime, Enum, ForeignKey
+from sqlalchemy import Column, String, Integer, Text, DateTime, Enum, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from .base import BaseModel
 
@@ -54,6 +54,12 @@ class GoalLoop(BaseModel):
     last_error = Column(Text, comment='最近一次受阻/失败原因')
     completion_summary = Column(Text, comment='目标达成时的总结（规划器给出）')
     last_task_id = Column(Integer, comment='最近一轮生成的任务ID')
+
+    # 计划式拆解：先由规划器把目标拆成有序步骤，再逐轮物化为任务
+    plan = Column(JSON, comment='拆解出的有序计划步骤 [{title, content}]')
+    plan_index = Column(Integer, nullable=False, default=0, comment='下一个待执行步骤下标')
+    plan_revision = Column(Integer, nullable=False, default=0, comment='计划重排次数')
+
     started_at = Column(DateTime, comment='首次推进时间')
     finished_at = Column(DateTime, comment='进入终态时间')
 
@@ -69,4 +75,7 @@ class GoalLoop(BaseModel):
         data = super().to_dict()
         data['status'] = self.status.value if self.status else None
         data['tag'] = self.tag
+        data['plan'] = self.plan or []
+        data['plan_index'] = self.plan_index or 0
+        data['plan_revision'] = self.plan_revision or 0
         return data

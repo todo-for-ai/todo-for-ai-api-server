@@ -94,12 +94,15 @@ class Agent(BaseModel):
     skill_profile_updated_at = Column(DateTime, comment='画像最近重建时间')
     config = Column(JSON, comment='非敏感运行时配置（协作侧）')
     collaboration_role = Column(String(50), nullable=True, comment='协作角色: leader, follower, standalone')
+    role_template_id = Column(Integer, ForeignKey('agent_role_templates.id'), nullable=True,
+                              comment='岗位角色模板ID（产品经理/开发/测试等，复用 agent_role_templates）')
     last_seen_at = Column(DateTime, comment='最近心跳时间')
     is_system = Column(Boolean, default=False, nullable=False, comment='是否系统管理的 Agent')
 
     # ── 关系 ──
     workspace = relationship('Organization', foreign_keys=[workspace_id])
     creator = relationship('User', foreign_keys=[creator_user_id])
+    role_template = relationship('AgentRoleTemplate', foreign_keys=[role_template_id])
     keys = relationship('AgentKey', back_populates='agent', cascade='all, delete-orphan', lazy='dynamic')
     soul_versions = relationship('AgentSoulVersion', back_populates='agent', cascade='all, delete-orphan', lazy='dynamic')
     secrets = relationship('AgentSecret', back_populates='agent', cascade='all, delete-orphan', lazy='dynamic')
@@ -117,6 +120,18 @@ class Agent(BaseModel):
         data['capabilities'] = self.capabilities or []
         data['config'] = self.config or {}
         data['collaboration_role'] = self.collaboration_role or 'standalone'
+        role_template = self.role_template
+        data['role_template_id'] = self.role_template_id
+        data['role'] = (
+            {
+                'id': role_template.id,
+                'name': role_template.name,
+                'display_name': role_template.display_name,
+                'category': role_template.category,
+            }
+            if role_template
+            else None
+        )
         data['allowed_project_ids'] = self.allowed_project_ids or []
         data['response_style'] = self.response_style or {}
         data['tool_policy'] = self.tool_policy or {}

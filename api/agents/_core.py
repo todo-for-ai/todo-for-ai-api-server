@@ -425,11 +425,25 @@ def update_agent(agent_id):
             return response
 
         data = validate_json_request(
-            optional_fields=["name", "description", "kind", "status", "provider", "model", "capabilities", "config", "collaboration_role"],
+            optional_fields=["name", "description", "kind", "status", "provider", "model", "capabilities", "config", "collaboration_role", "role_template_id"],
         )
 
         if isinstance(data, tuple):
             return data
+
+        # 岗位角色绑定：校验模板存在且为内置或同工作区
+        if "role_template_id" in data:
+            from models import AgentRoleTemplate, AgentRoleTemplateStatus
+            raw_role = data["role_template_id"]
+            if raw_role in (None, "", 0):
+                data["role_template_id"] = None
+            else:
+                template = db.session.get(AgentRoleTemplate, int(raw_role))
+                if not template or template.status != AgentRoleTemplateStatus.ACTIVE:
+                    return ApiResponse.error("Role template not found or inactive", 400).to_response()
+                if not template.is_builtin and template.workspace_id != agent.workspace_id:
+                    return ApiResponse.error("Role template does not belong to this agent workspace", 400).to_response()
+                data["role_template_id"] = template.id
 
         if "kind" in data:
             try:

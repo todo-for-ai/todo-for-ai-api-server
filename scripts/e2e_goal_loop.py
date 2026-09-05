@@ -78,6 +78,10 @@ def main():
           f"status={loop['tasks'][0]['status']} rounds={loop['rounds_done']}")
     assert loop["rounds_done"] == 1
     assert loop["tasks"][0]["status"] == "in_progress", "应已被 auto-assign 置为进行中"
+    # v2：创建即拆解出计划（scripted 3 步）
+    assert len(loop["plan"]) == 3, f"应有 3 步计划，实际 {len(loop['plan'])}"
+    assert loop["plan_index"] == 1, "第 1 步应已物化"
+    print(f"✅ 计划式拆解：{len(loop['plan'])} 步计划，plan_index={loop['plan_index']}")
 
     for round_no in range(3):
         loop = get_loop(loop_id)
