@@ -25,7 +25,7 @@ from models import db
 logger = structlog.get_logger()
 
 # 代码侧声明的部署 schema 版本（对应 migrations/versions 最新编号）
-DEPLOY_SCHEMA_VERSION = 13
+DEPLOY_SCHEMA_VERSION = 16
 
 # 必需配置项：缺失 → error
 REQUIRED_ENV_KEYS = (
@@ -52,6 +52,9 @@ EXPECTED_SCHEMA: List[Dict[str, Any]] = [
     {'migration': '000011 marketplace', 'table': 'agent_role_templates', 'columns': ['published_to_marketplace', 'published_at']},
     {'migration': '000012 sso', 'table': 'workspace_sso_configs', 'columns': ['provider', 'enabled']},
     {'migration': '000013 connectors', 'table': 'external_connector_configs', 'columns': ['provider', 'secret_encrypted']},
+    {'migration': '000014 task parent indexes', 'table': 'tasks', 'columns': ['parent_task_id']},
+    {'migration': '000015 audit project ids', 'table': 'agent_audit_events', 'columns': ['project_id']},
+    {'migration': '000016 user theme', 'table': 'user_settings', 'columns': ['theme']},
 ]
 
 # 基础 schema 特征（更早功能，缺失即核心能力受损）

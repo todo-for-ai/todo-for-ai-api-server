@@ -56,6 +56,12 @@ def update_user_settings():
             if language not in ['zh-CN', 'en']:
                 return ApiResponse.error("Invalid language. Must be 'zh-CN' or 'en'", 400).to_response()
             settings.language = language
+
+        # 更新界面皮肤（到人级别持久化；未知皮肤 ID 由前端回退默认，这里只校验格式）
+        if 'theme' in data and not settings.update_theme(data['theme']):
+            return ApiResponse.error(
+                "Invalid theme. Must match [a-z0-9_-]{1,32}", 400
+            ).to_response()
         
         # 更新其他设置数据
         if 'settings_data' in data:

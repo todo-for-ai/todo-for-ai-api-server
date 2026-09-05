@@ -20,7 +20,10 @@ class UserSettings(BaseModel):
     
     # 语言设置
     language = Column(String(10), default='en', comment='界面语言 (zh-CN, en)')
-    
+
+    # 界面皮肤（像素色板 id，如 sky/fc/gameboy；到人级别持久化，跨设备跟随）
+    theme = Column(String(32), nullable=False, default='sky', comment='界面皮肤 ID')
+
     # 其他设置（预留扩展）
     settings_data = Column(JSON, comment='其他设置数据 (JSON格式)')
     
@@ -52,6 +55,15 @@ class UserSettings(BaseModel):
         """更新语言设置"""
         if language in ['zh-CN', 'en']:
             self.language = language
+            self.save()
+            return True
+        return False
+
+    def update_theme(self, theme):
+        """更新界面皮肤 ID（格式校验，未知值由前端回退默认皮肤）"""
+        import re
+        if isinstance(theme, str) and re.fullmatch(r'[a-z0-9_-]{1,32}', theme):
+            self.theme = theme
             self.save()
             return True
         return False
