@@ -237,7 +237,7 @@ def raise_budget_exceeded(workspace_id: int, violations: List[Dict[str, Any]],
                 target_type='budget',
                 target_id=budget_id,
                 workspace_id=workspace_id,
-                payload=violation,
+                payload={**violation, 'task_id': int(task_id)},
                 risk_score=30,
             )
         except RuntimeError:

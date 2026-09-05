@@ -18,6 +18,7 @@ from models import (
     AgentAuditEvent,
     AgentActivityEvent,
     Organization,
+    Task,
 )
 from .base import ApiResponse
 
@@ -223,7 +224,17 @@ def write_agent_audit(event_type, actor_type, actor_id, target_type, target_id, 
     run_id = _to_text_optional(payload_data.get('run_id'))
     attempt_id = _to_text_optional(payload_data.get('attempt_id'))
     task_id = _to_int_optional(payload_data.get('task_id'))
+    if task_id is None and str(target_type or '').strip().lower() == 'task':
+        # task 目标事件的 target_id 就是任务 ID（历史调用方大量只传 target_id）
+        task_id = _to_int_optional(target_id) or None
     project_id = _to_int_optional(payload_data.get('project_id'))
+    if project_id is None and task_id is not None:
+        # 项目详情页「最近动态」按 project_id/task_id 召回审计事件；
+        # 调用方通常不带 project_id，这里按主键派生一次，保证项目维度可召回
+        try:
+            project_id = db.session.query(Task.project_id).filter(Task.id == task_id).scalar()
+        except Exception:
+            project_id = None
     duration_ms = _to_int_optional(payload_data.get('duration_ms'))
     error_code = _to_text_optional(payload_data.get('error_code'))
 

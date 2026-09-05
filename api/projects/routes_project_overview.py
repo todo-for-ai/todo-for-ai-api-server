@@ -200,22 +200,15 @@ def get_project_overview(project_id: int):
         }
 
         # ── 本项目审计事件 ──
-        # 现状：写入方基本不填 project_id，但 task.leased/committed 等运行时
-        # 事件带 task_id。因此取最新 500 条（occurred_at 有索引）后按
-        # project_id 或项目任务 ID 匹配，兼顾成本与召回；写入方补全
-        # project_id 后可退回纯索引过滤。
-        task_id_set = set(project_task_ids or [])
-        candidate_events = (
-            AgentAuditEvent.query.order_by(AgentAuditEvent.occurred_at.desc())
-            .limit(500)
+        # 写入方已回填 project_id（task.leased/committed 显式携带，
+        # 其余事件由 write_agent_audit 从 task_id 派生），走 project_id
+        # 索引过滤即可；历史数据由迁移 000015 按 target_id 回填。
+        recent_event_rows = (
+            AgentAuditEvent.query.filter(AgentAuditEvent.project_id == project_id)
+            .order_by(AgentAuditEvent.occurred_at.desc())
+            .limit(20)
             .all()
         )
-        matched_events = [
-            row
-            for row in candidate_events
-            if row.project_id == project_id
-            or (row.task_id is not None and row.task_id in task_id_set)
-        ][:20]
         recent_events = [
             {
                 "id": row.id,
@@ -228,7 +221,7 @@ def get_project_overview(project_id: int):
                 "error_code": row.error_code,
                 "occurred_at": row.occurred_at.isoformat() if row.occurred_at else None,
             }
-            for row in matched_events
+            for row in recent_event_rows
         ]
 
         return ApiResponse.success(
