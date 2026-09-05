@@ -27,6 +27,7 @@ from .project_repo import ProjectRepoBinding
 from .github_app import GitHubAppConfig
 from .budget import Budget
 from .goal import Goal, GoalStatus, Epic, EpicStatus
+from .goal_loop import GoalLoop, GoalLoopStatus, GOAL_LOOP_TAG_PREFIX
 from .knowledge_proposal import ProjectKnowledgeProposal
 from .workspace_sso_config import WorkspaceSSOConfig
 from .external_connector_config import ExternalConnectorConfig

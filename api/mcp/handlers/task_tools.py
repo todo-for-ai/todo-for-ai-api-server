@@ -217,6 +217,13 @@ def update_task_status(arguments):
     db.session.commit()
     invalidate_user_caches(g.current_user.id)
 
+    # GoalLoop 目标循环：循环任务到终态后推进下一轮（非循环任务零开销）
+    try:
+        from services.goal_loop_service import notify_task_finished
+        notify_task_finished(task.id)
+    except Exception:
+        pass
+
     from models import UserActivity
     try:
         UserActivity.record_activity(g.current_user.id, 'task_status_changed')

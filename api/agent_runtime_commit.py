@@ -345,6 +345,13 @@ def commit_task(task_id):
 
     db.session.commit()
 
+    # GoalLoop 目标循环：循环任务提交到终态后推进下一轮（非循环任务零开销）
+    try:
+        from services.goal_loop_service import notify_task_finished
+        notify_task_finished(task.id)
+    except Exception:
+        pass
+
     return ApiResponse.success(
         {
             'task_id': task.id,

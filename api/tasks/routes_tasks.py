@@ -739,11 +739,19 @@ def update_task(task_id):
                 # 记录活跃度失败不应该影响任务更新
                 print(f"Warning: Failed to record user activity: {str(e)}")
 
+        # GoalLoop 目标循环：循环任务到终态后推进下一轮（非循环任务零开销）
+        if status_changed:
+            try:
+                from services.goal_loop_service import notify_task_finished
+                notify_task_finished(task.id)
+            except Exception:
+                pass
+
         return ApiResponse.success(
             task.to_dict(include_project=True, include_stats=True),
             "Task updated successfully"
         ).to_response()
-        
+
     except Exception as e:
         db.session.rollback()
         return ApiResponse.error(f"Failed to update task: {str(e)}", 500).to_response()
