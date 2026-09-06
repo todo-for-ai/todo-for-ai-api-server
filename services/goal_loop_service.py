@@ -30,7 +30,17 @@ ACTIVE_TASK_STATUSES = {TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVI
 DEFAULT_ROUNDS_LIMIT = 10
 DEFAULT_STALL_LIMIT = 2
 MAX_ROUNDS_LIMIT = 2000
+MAX_TIME_BUDGET_HOURS = 24 * 30
 DEFAULT_STUCK_TASK_HOURS = 6
+
+
+def _clamp_int(value, lo, hi, default=None):
+    """护栏参数钳制；非法输入返回 default（None 表示调用方自行决定）。"""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, value))
 
 
 def _naive_utc_now():
@@ -548,13 +558,6 @@ def create_loop(*, project: Project, agent: Agent, title: str, goal_text: str,
                 done_definition: str = None, rounds_limit: int = DEFAULT_ROUNDS_LIMIT,
                 created_by: int = None, director: Agent = None,
                 time_budget_hours: int = None, stall_limit: int = DEFAULT_STALL_LIMIT) -> GoalLoop:
-    def _clamp(value, lo, hi, default):
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            return default
-        return max(lo, min(hi, value))
-
     loop = GoalLoop(
         workspace_id=project.organization_id,
         project_id=project.id,
@@ -564,14 +567,40 @@ def create_loop(*, project: Project, agent: Agent, title: str, goal_text: str,
         goal_text=goal_text,
         done_definition=(done_definition or '').strip() or None,
         status=GoalLoopStatus.RUNNING,
-        rounds_limit=_clamp(rounds_limit, 1, MAX_ROUNDS_LIMIT, DEFAULT_ROUNDS_LIMIT),
-        time_budget_hours=_clamp(time_budget_hours, 1, 24 * 30, None) if time_budget_hours else None,
-        stall_limit=_clamp(stall_limit, 1, 50, DEFAULT_STALL_LIMIT),
+        rounds_limit=_clamp_int(rounds_limit, 1, MAX_ROUNDS_LIMIT, DEFAULT_ROUNDS_LIMIT),
+        time_budget_hours=_clamp_int(time_budget_hours, 1, MAX_TIME_BUDGET_HOURS, None) if time_budget_hours else None,
+        stall_limit=_clamp_int(stall_limit, 1, 50, DEFAULT_STALL_LIMIT),
         created_by=created_by,
     )
     db.session.add(loop)
     db.session.commit()
     maybe_advance(loop.id)
+    return loop
+
+
+def update_guardrails(loop_id: int, *, rounds_limit=None, time_budget_hours=None,
+                      stall_limit=None) -> GoalLoop:
+    """调整长跑护栏（用户可设置"跑多久/多少轮才停"）；仅非终态循环可调。
+
+    time_budget_hours 传 0/None 表示清除时长预算（改为不限时，仅受轮数约束）。
+    预算以 started_at 为基准绝对计时：延长预算即延长总时长。
+    """
+    loop = db.session.get(GoalLoop, loop_id)
+    if not loop:
+        raise LookupError('goal_loop_not_found')
+    if loop.status in (GoalLoopStatus.DONE, GoalLoopStatus.STOPPED):
+        raise ValueError('goal_loop_terminal')
+
+    if rounds_limit is not None:
+        loop.rounds_limit = _clamp_int(rounds_limit, 1, MAX_ROUNDS_LIMIT, loop.rounds_limit)
+    if time_budget_hours is not None:
+        loop.time_budget_hours = (
+            _clamp_int(time_budget_hours, 1, MAX_TIME_BUDGET_HOURS, None)
+            if time_budget_hours else None
+        )
+    if stall_limit is not None:
+        loop.stall_limit = _clamp_int(stall_limit, 1, 50, loop.stall_limit)
+    db.session.commit()
     return loop
 
 

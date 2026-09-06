@@ -215,6 +215,61 @@ def get_goal_loop(loop_id: int):
         return handle_api_error(e)
 
 
+@projects_bp.route('/goal-loops/<int:loop_id>', methods=['PUT'])
+@unified_auth_required
+def update_goal_loop(loop_id: int):
+    """调整长跑护栏（时长预算/轮数上限/受阻容忍）——用户设置"跑多久/多少轮才停"。
+
+    limit_reached/stalled 的循环调参后 resume 即可继续推进；done/stopped 拒绝调整。
+    """
+    try:
+        loop = _get_loop(loop_id)
+        if not loop:
+            return ApiResponse.error('Goal loop not found', 404).to_response()
+        managed, error = _get_managed_project_or_error(loop.project_id)
+        if error:
+            return error
+
+        data = request.get_json(silent=True) or {}
+        rounds_limit = data.get('rounds_limit')
+        time_budget_hours = data.get('time_budget_hours')
+        stall_limit = data.get('stall_limit')
+
+        try:
+            if rounds_limit is not None and not (1 <= int(rounds_limit) <= 2000):
+                return ApiResponse.error('rounds_limit must be within 1..2000', 400).to_response()
+            if time_budget_hours not in (None, '', 0) and not (1 <= int(time_budget_hours) <= 720):
+                return ApiResponse.error('time_budget_hours must be within 1..720 (30 days)', 400).to_response()
+            if stall_limit not in (None, '', 0) and not (1 <= int(stall_limit) <= 50):
+                return ApiResponse.error('stall_limit must be within 1..50', 400).to_response()
+        except (TypeError, ValueError):
+            return ApiResponse.error('rounds_limit/time_budget_hours/stall_limit must be integers', 400).to_response()
+
+        if rounds_limit is None and time_budget_hours is None and stall_limit is None:
+            return ApiResponse.error('nothing to update', 400).to_response()
+
+        try:
+            goal_loop_service.update_guardrails(
+                loop_id,
+                rounds_limit=rounds_limit,
+                time_budget_hours=time_budget_hours,
+                stall_limit=stall_limit,
+            )
+        except LookupError:
+            return ApiResponse.error('Goal loop not found', 404).to_response()
+        except ValueError:
+            return ApiResponse.error(
+                'Terminal loops (done/stopped) cannot be adjusted', 409,
+                error_details={'code': 'GOAL_LOOP_TERMINAL'},
+            ).to_response()
+
+        return ApiResponse.success(
+            data=_loop_with_tasks(_get_loop(loop_id)), message='Goal loop updated'
+        ).to_response()
+    except Exception as e:  # noqa: BLE001
+        return handle_api_error(e)
+
+
 def _loop_action(loop_id: int, status: GoalLoopStatus, kick_after_resume=False):
     try:
         loop = _get_loop(loop_id)

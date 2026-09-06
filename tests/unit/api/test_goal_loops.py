@@ -649,3 +649,104 @@ class TestMultiDayEndurance:
         assert result["time_exhausted"] == 1
         assert loop.status.value == "limit_reached"
         assert "时长预算" in (loop.last_error or "")
+
+
+class TestGuardrailUpdates:
+    """护栏调整：用户设置"跑多久/多少轮才停"，limit_reached 续命后继续跑。"""
+
+    def _put(self, client, env, loop_id, payload):
+        return client.put(
+            f"{BASE_URL}/goal-loops/{loop_id}",
+            json=payload,
+            headers=env["headers"],
+        )
+
+    def test_update_extends_limit_reached_loop_and_resume_continues(self, client, env, monkeypatch):
+        monkeypatch.setenv("GOAL_LOOP_SCRIPTED_ROUNDS", "99")
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={"title": "续命", "goal_text": "目标X", "rounds_limit": 2},
+            headers=env["headers"],
+        )
+        loop = resp.get_json()["data"]
+        from models import Task
+        for _ in range(2):
+            _finish_task(db.session.get(Task, loop["tasks"][-1]["id"]))
+            loop = client.get(
+                f"{BASE_URL}/goal-loops/{loop['id']}", headers=env["headers"]
+            ).get_json()["data"]
+        assert loop["status"] == "limit_reached"
+
+        # 调大轮数上限 → resume → 继续物化第 3 轮
+        resp = self._put(client, env, loop["id"], {"rounds_limit": 5, "time_budget_hours": 48})
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["rounds_limit"] == 5
+        assert data["time_budget_hours"] == 48
+
+        client.post(f"{BASE_URL}/goal-loops/{loop['id']}/resume", headers=env["headers"])
+        data = client.get(
+            f"{BASE_URL}/goal-loops/{loop['id']}", headers=env["headers"]
+        ).get_json()["data"]
+        assert data["status"] == "running"
+        assert data["rounds_done"] == 3
+
+    def test_update_partial_and_clear_budget(self, client, env):
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={"title": "局部更新", "goal_text": "目标U", "time_budget_hours": 48},
+            headers=env["headers"],
+        )
+        loop_id = resp.get_json()["data"]["id"]
+        # 清除时长预算（0 = 不限时）
+        data = self._put(client, env, loop_id, {"time_budget_hours": 0}).get_json()["data"]
+        assert data["time_budget_hours"] is None
+        # 单独调 stall_limit
+        data = self._put(client, env, loop_id, {"stall_limit": 8}).get_json()["data"]
+        assert data["time_budget_hours"] is None
+
+        from models import GoalLoop
+        assert db.session.get(GoalLoop, loop_id).stall_limit == 8
+
+    def test_update_rejects_out_of_range(self, client, env):
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={"title": "越界", "goal_text": "y"},
+            headers=env["headers"],
+        )
+        loop_id = resp.get_json()["data"]["id"]
+        assert self._put(client, env, loop_id, {"rounds_limit": 5001}).status_code == 400
+        assert self._put(client, env, loop_id, {"time_budget_hours": 1000}).status_code == 400
+        assert self._put(client, env, loop_id, {}).status_code == 400
+
+    def test_update_rejected_on_terminal_loop(self, client, env):
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={"title": "终态", "goal_text": "y"},
+            headers=env["headers"],
+        )
+        loop_id = resp.get_json()["data"]["id"]
+        client.post(f"{BASE_URL}/goal-loops/{loop_id}/stop", headers=env["headers"])
+        resp = self._put(client, env, loop_id, {"rounds_limit": 10})
+        assert resp.status_code == 409
+        assert resp.get_json()["error_details"]["code"] == "GOAL_LOOP_TERMINAL"
+
+    def test_update_requires_manager(self, client, env):
+        from flask_jwt_extended import create_access_token
+        from models import User
+
+        outsider = User(username=f"u_{uuid.uuid4().hex[:8]}", email=f"u_{uuid.uuid4().hex[:6]}@t.io")
+        db.session.add(outsider)
+        db.session.commit()
+        headers = {"Authorization": f"Bearer {create_access_token(identity=str(outsider.id))}"}
+
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={"title": "权限", "goal_text": "y"},
+            headers=env["headers"],
+        )
+        loop_id = resp.get_json()["data"]["id"]
+        resp = client.put(
+            f"{BASE_URL}/goal-loops/{loop_id}", json={"rounds_limit": 10}, headers=headers
+        )
+        assert resp.status_code == 403
