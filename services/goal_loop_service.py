@@ -1,21 +1,26 @@
 """
-GoalLoop 目标循环驱动器（v2：计划式拆解）
+GoalLoop 目标循环驱动器（v3：多 Agent 自动编排）
 
-循环机制：创建循环 → 规划器把目标**拆解成有序计划**（steps）→ 逐轮把计划
-步骤物化为任务并自动派发 → 任务成功则直接执行下一步（省一次评审调用），
-任务失败或计划耗尽则触发**评审**（继续扩展计划/重排计划/宣告完成/受阻）。
+循环机制：创建循环 → 指挥者把目标**拆解成有序计划**（steps，每步可指名
+执行岗位）→ 逐轮把计划步骤物化为任务并**按岗位路由执行者 Agent** → 任务
+成功则直接执行下一步（省一次评审调用），任务失败或计划耗尽则触发**评审**
+（继续扩展计划/重排计划/宣告完成/受阻）。
+
+多 Agent 分工：loop.director（指挥者）负责拆解与评审，规划提示词注入
+指挥者岗位上下文与工作区可用执行者角色清单；执行者按步骤声明的 role
+（岗位名）从工作区活跃 Agent 池匹配路由，无匹配退回绑定 Agent（单 Agent
+模式完全向后兼容）。
 
 护栏：轮数上限、连续受阻容忍、人工暂停/停止/kick。并发防护：advancing
 CAS 标记，同一循环不并发双发；LLM 调用期间不持锁，落库前复核状态。
 
-规划器可插拔：默认走平台 LLM（feature='goal_loop'），并注入执行 Agent 的
-岗位角色上下文（agent.role_template）；GOAL_LOOP_PLANNER=scripted 时使用
-确定性脚本规划器（仅供测试/E2E）。
+规划器可插拔：默认走平台 LLM（feature='goal_loop'）；
+GOAL_LOOP_PLANNER=scripted 时使用确定性脚本规划器（仅供测试/E2E）。
 """
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from models import db, GoalLoop, GoalLoopStatus, Task, TaskStatus, Project, Agent
 
@@ -68,7 +73,7 @@ def _recent_history(loop, limit=5):
 
 
 def _role_context(agent: Agent) -> dict:
-    """执行 Agent 的岗位角色上下文（来自绑定的角色模板）。"""
+    """Agent 的岗位角色上下文（来自绑定的角色模板）。"""
     template = agent.role_template if agent else None
     if not template:
         return {'role': None, 'role_description': None}
@@ -77,6 +82,54 @@ def _role_context(agent: Agent) -> dict:
         'role_category': template.category,
         'role_description': (template.description or '')[:500],
     }
+
+
+def _director(loop) -> Agent:
+    """循环的指挥者：显式指定优先，否则退回绑定 Agent（单 Agent 模式）。"""
+    return loop.director if loop.director_agent_id else loop.agent
+
+
+def _executor_pool(loop) -> list:
+    """工作区内可接单的活跃 Agent（含岗位绑定），按创建序。"""
+    return (
+        Agent.query.filter(
+            Agent.workspace_id == loop.workspace_id,
+            Agent.runner_enabled.is_(True),
+            Agent.status == 'ACTIVE',
+        )
+        .order_by(Agent.id)
+        .all()
+    )
+
+
+def _available_executor_roles(loop, limit=20) -> list:
+    """可接单 Agent 的岗位角色清单（供指挥者拆解时指派步骤参考）。"""
+    roles = []
+    for a in _executor_pool(loop):
+        template = a.role_template
+        if not template:
+            continue
+        name = (template.display_name or template.name or '').strip()
+        if name and name not in roles:
+            roles.append(name)
+        if len(roles) >= limit:
+            break
+    return roles
+
+
+def _pick_executor(loop, step: dict) -> Agent:
+    """按步骤声明的岗位要求路由执行者；无匹配退回绑定 Agent。"""
+    wanted = (step.get('role') or '').strip()
+    if wanted:
+        for cand in _executor_pool(loop):
+            template = cand.role_template
+            if not template:
+                continue
+            names = {(template.display_name or '').strip(), (template.name or '').strip()}
+            names.discard('')
+            if wanted in names or any(wanted in n for n in names):
+                return cand
+    return loop.agent
 
 
 # ── 规划器（v2：拆解 + 评审 两段） ──
@@ -129,19 +182,24 @@ def _llm_call(loop, system_prompt: str, user_prompt: str) -> dict:
 
 
 def _decompose(loop) -> list:
-    """把目标拆解成有序计划步骤。"""
-    role = _role_context(loop.agent)
+    """指挥者把目标拆解成有序计划步骤（每步可指名执行岗位）。"""
+    role = _role_context(_director(loop))
     role_line = ''
     if role.get('role'):
-        role_line = f"执行者角色：{role['role']}（{role.get('role_category') or ''}）{role.get('role_description') or ''}\n"
+        role_line = f"指挥者角色：{role['role']}（{role.get('role_category') or ''}）{role.get('role_description') or ''}\n"
+    roles = _available_executor_roles(loop)
+    roles_line = f"可用执行者角色：{'、'.join(roles)}\n" if roles else ''
 
     system_prompt = (
-        '你是目标循环规划器。把目标拆解为有序的执行步骤（计划）。'
-        '只输出 JSON：{"steps": [{"title": "步骤标题", "content": "给 Agent 的可执行指令"}]}，'
+        '你是目标循环的指挥者。把目标拆解为有序的执行步骤（计划），'
+        '不同步骤可安排给不同岗位的执行者完成（如规划/开发/测试/验收分工）。'
+        '只输出 JSON：{"steps": [{"title": "步骤标题", "content": "给执行者的可执行指令", '
+        '"role": "执行岗位（可选，从可用执行者角色中选择）"}]}，'
         '步骤数量不超过轮数上限，最后一步应包含验收/收尾。'
     )
     user_prompt = (
         f'{role_line}'
+        f'{roles_line}'
         f'目标：{loop.goal_text}\n'
         f'完成标准：{loop.done_definition or "（未明确，由你判断）"}\n'
         f'轮数上限：{loop.rounds_limit}'
@@ -155,17 +213,21 @@ def _decompose(loop) -> list:
 
 def _review(loop, last_status: str) -> dict:
     """计划耗尽或上轮失败后的评审：扩展/重排计划、宣告完成或受阻。"""
-    role = _role_context(loop.agent)
-    role_line = f"执行者角色：{role.get('role')}\n" if role.get('role') else ''
+    role = _role_context(_director(loop))
+    role_line = f"指挥者角色：{role.get('role')}\n" if role.get('role') else ''
+    roles = _available_executor_roles(loop)
+    roles_line = f"可用执行者角色：{'、'.join(roles)}\n" if roles else ''
 
     system_prompt = (
-        '你是目标循环评审器。根据目标、完成标准和执行历史决定下一步。'
+        '你是目标循环的评审器（指挥者）。根据目标、完成标准和执行历史决定下一步。'
         '只输出 JSON：{"action": "complete|extend|blocked", '
-        '"steps": [{"title": "...", "content": "..."}]（action=extend 时必填，为剩余计划）, '
+        '"steps": [{"title": "...", "content": "...", "role": "执行岗位（可选）"}]'
+        '（action=extend 时必填，为剩余计划）, '
         '"reason": "决策原因或完成总结"}'
     )
     user_prompt = (
         f'{role_line}'
+        f'{roles_line}'
         f'目标：{loop.goal_text}\n'
         f'完成标准：{loop.done_definition or "（未明确，由你判断）"}\n'
         f'已执行轮数：{rounds_done(loop.id)}/{loop.rounds_limit}\n'
@@ -288,7 +350,7 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         if loop.started_at is None:
             loop.started_at = _naive_utc_now()
         db.session.commit()
-        _auto_assign(task)
+        _auto_assign(task, _pick_executor(loop, step))
         return {'advanced': True, 'reason': 'task_created', 'task_id': task.id}
 
     # ── ③ 计划耗尽 或 上轮失败：评审 ──
@@ -325,7 +387,7 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         loop.stall_count = 0
         loop.last_error = None
         db.session.commit()
-        _auto_assign(task)
+        _auto_assign(task, _pick_executor(loop, step))
         return {'advanced': True, 'reason': 'plan_extended', 'task_id': task.id}
 
     return _register_stall(loop, f"blocked: {decision.get('reason') or '未给出原因'}")
@@ -356,10 +418,13 @@ def _finish(loop, status: GoalLoopStatus, last_error: str = None):
     db.session.commit()
 
 
-def _create_round_task(loop, step: dict) -> Task:
-    role = _role_context(loop.agent)
+def _create_round_task(loop, step: dict, executor: Agent = None) -> Task:
+    executor = executor or loop.agent
+    role_name = (step.get('role') or '').strip()
+    if not role_name:
+        role_name = (_role_context(executor).get('role') or '').strip()
     content = (step.get('content') or step.get('title') or '').strip()
-    role_line = f"【执行角色：{role['role']}】\n" if role.get('role') else ''
+    role_line = f"【执行角色：{role_name}】\n" if role_name else ''
     task = Task(
         title=(step.get('title') or f'{loop.title} · 下一轮').strip()[:500],
         content=f"{role_line}{content}",
@@ -375,11 +440,70 @@ def _create_round_task(loop, step: dict) -> Task:
     return task
 
 
-def _auto_assign(task):
+def _assign_task_to_agent(task, agent: Agent):
+    """把任务直接派给指定执行者（建 attempt+lease 并推送）。
+
+    AgentRuntimeController.auto_assign_task 固定派给工作区第一个活跃 Agent，
+    无法按步骤岗位路由，且该文件有并行会话在改，故此处自包含实现。
+    """
+    from api.agent_common import generate_id, now_utc
+    from models import AgentTaskAttempt, AgentTaskLease
+
+    now = now_utc()
+    attempt_id = generate_id('att')
+    lease_id = generate_id('lea')
+    db.session.add(AgentTaskAttempt(
+        attempt_id=attempt_id,
+        task_id=task.id,
+        agent_id=agent.id,
+        workspace_id=agent.workspace_id,
+        state='ACTIVE',
+        lease_id=lease_id,
+        started_at=now,
+        created_by='system',
+    ))
+    db.session.add(AgentTaskLease(
+        lease_id=lease_id,
+        task_id=task.id,
+        attempt_id=attempt_id,
+        agent_id=agent.id,
+        workspace_id=agent.workspace_id,
+        expires_at=now + timedelta(seconds=60),
+        active=True,
+        created_by='system',
+    ))
+    if task.status == TaskStatus.TODO:
+        task.status = TaskStatus.IN_PROGRESS
+    db.session.commit()
+
     try:
-        from services.agent_runtime_controller import AgentRuntimeController
-        AgentRuntimeController.auto_assign_task(task)
-    except Exception:
+        from api.agent_runtime_websocket import push_task_to_agent
+        push_task_to_agent(agent.id, {
+            'task_id': task.id,
+            'attempt_id': attempt_id,
+            'lease_id': lease_id,
+            'payload': {
+                'title': task.title,
+                'content': task.content,
+                'prompt': task.title or task.content or '',
+            },
+            'project_id': task.project_id,
+            'priority': str(task.priority) if task.priority else None,
+            'created_at': task.created_at.isoformat() if task.created_at else None,
+            'workspace_id': agent.workspace_id,
+        })
+    except Exception:  # noqa: BLE001  WebSocket 未连接时静默（agent 轮询可拉到）
+        pass
+
+
+def _auto_assign(task, agent: Agent = None):
+    try:
+        if agent is not None:
+            _assign_task_to_agent(task, agent)
+        else:
+            from services.agent_runtime_controller import AgentRuntimeController
+            AgentRuntimeController.auto_assign_task(task)
+    except Exception:  # noqa: BLE001
         db.session.rollback()
 
 
@@ -387,11 +511,12 @@ def _auto_assign(task):
 
 def create_loop(*, project: Project, agent: Agent, title: str, goal_text: str,
                 done_definition: str = None, rounds_limit: int = DEFAULT_ROUNDS_LIMIT,
-                created_by: int = None) -> GoalLoop:
+                created_by: int = None, director: Agent = None) -> GoalLoop:
     loop = GoalLoop(
         workspace_id=project.organization_id,
         project_id=project.id,
         agent_id=agent.id,
+        director_agent_id=director.id if director else None,
         title=title.strip()[:500],
         goal_text=goal_text,
         done_definition=(done_definition or '').strip() or None,

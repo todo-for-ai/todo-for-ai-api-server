@@ -40,6 +40,8 @@ class GoalLoop(BaseModel):
     workspace_id = Column(Integer, ForeignKey('organizations.id'), nullable=False, index=True, comment='工作区ID')
     project_id = Column(Integer, ForeignKey('projects.id'), nullable=False, index=True, comment='所属项目ID')
     agent_id = Column(Integer, ForeignKey('agents.id'), nullable=False, index=True, comment='绑定执行Agent ID')
+    director_agent_id = Column(Integer, ForeignKey('agents.id'), nullable=True, index=True,
+                               comment='指挥者Agent ID（规划+评审），NULL=退回绑定Agent')
 
     title = Column(String(500), nullable=False, comment='循环标题')
     goal_text = Column(Text, nullable=False, comment='目标描述（规划器的驱动源）')
@@ -65,7 +67,8 @@ class GoalLoop(BaseModel):
 
     created_by = Column(Integer, ForeignKey('users.id'), nullable=True, comment='创建人用户ID')
 
-    agent = relationship('Agent')
+    agent = relationship('Agent', foreign_keys=[agent_id])
+    director = relationship('Agent', foreign_keys=[director_agent_id])
 
     @property
     def tag(self) -> str:
@@ -78,4 +81,5 @@ class GoalLoop(BaseModel):
         data['plan'] = self.plan or []
         data['plan_index'] = self.plan_index or 0
         data['plan_revision'] = self.plan_revision or 0
+        data['director_agent_id'] = self.director_agent_id
         return data

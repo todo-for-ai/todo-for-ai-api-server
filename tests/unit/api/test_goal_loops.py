@@ -344,3 +344,185 @@ class TestAgentRoleBinding:
         )
         assert resp.status_code == 200
         assert resp.get_json()["data"]["role"] is None
+
+
+class TestMultiAgentOrchestration:
+    """v3 多 Agent 编排：指挥者拆解评审 + 步骤岗位路由执行者。"""
+
+    @pytest.fixture
+    def team(self, env):
+        """在 env 之上追加第二个 Agent（测试工程师角色）作执行者。"""
+        from models import Agent, AgentRoleTemplate
+
+        template = AgentRoleTemplate(
+            workspace_id=None,
+            created_by_user_id=env["user"].id,
+            name=f"qa_{uuid.uuid4().hex[:6]}",
+            display_name="测试工程师",
+            category="qa",
+            is_builtin=True,
+        )
+        db.session.add(template)
+        db.session.flush()
+        executor = Agent(
+            name=f"agent_{uuid.uuid4().hex[:6]}",
+            workspace_id=env["org"].id,
+            owner_id=env["user"].id,
+            creator_user_id=env["user"].id,
+            status="ACTIVE",
+            runner_enabled=True,
+            role_template_id=template.id,
+        )
+        db.session.add(executor)
+        db.session.commit()
+        env["executor"] = executor
+        env["executor_template"] = template
+        return env
+
+    def test_create_with_director_persists_and_returns_director(self, client, team):
+        resp = client.post(
+            f"{BASE_URL}/{team['project'].id}/goal-loops",
+            json={
+                "title": "指挥模式",
+                "goal_text": "目标D",
+                "agent_id": team["executor"].id,
+                "director_agent_id": team["agent"].id,
+            },
+            headers=team["headers"],
+        )
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["director_agent_id"] == team["agent"].id
+        assert data["director_display_name"] or data["director_name"]
+        assert data["agent_id"] == team["executor"].id
+
+    def test_director_not_found_rejected(self, client, team):
+        resp = client.post(
+            f"{BASE_URL}/{team['project'].id}/goal-loops",
+            json={"title": "x", "goal_text": "y", "director_agent_id": 987654321},
+            headers=team["headers"],
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["error_details"]["code"] == "DIRECTOR_NOT_FOUND"
+
+    def test_director_workspace_mismatch_rejected(self, client, team):
+        from models import Agent
+
+        stranger = Agent(
+            name=f"agent_{uuid.uuid4().hex[:6]}",
+            workspace_id=team["org"].id + 5000,
+            creator_user_id=team["user"].id,
+            status="ACTIVE",
+            runner_enabled=True,
+        )
+        db.session.add(stranger)
+        db.session.commit()
+
+        resp = client.post(
+            f"{BASE_URL}/{team['project'].id}/goal-loops",
+            json={
+                "title": "x", "goal_text": "y",
+                "director_agent_id": stranger.id,
+            },
+            headers=team["headers"],
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["error_details"]["code"] == "DIRECTOR_WORKSPACE_MISMATCH"
+
+    def test_planner_prompt_uses_director_role_and_lists_executors(self, _isolated_app, team, monkeypatch):
+        from services import goal_loop_service as svc
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+
+        captured = {}
+
+        def fake_llm(loop, system_prompt, user_prompt, **kwargs):
+            captured["user"] = user_prompt
+            return {"steps": [{"title": "步骤", "content": "做"}]}
+
+        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        svc.create_loop(
+            project=team["project"], agent=team["executor"],
+            title="指挥上下文", goal_text="目标C",
+            created_by=team["user"].id, director=team["agent"],
+        )
+        # 指挥者的角色上下文进入规划提示词，且列出可用执行者角色
+        assert "指挥者角色：产品经理" in captured["user"]
+        assert "可用执行者角色" in captured["user"]
+        assert "测试工程师" in captured["user"]
+
+    def test_step_role_routes_task_to_matching_executor(self, _isolated_app, team, monkeypatch):
+        from services import goal_loop_service as svc
+        from models import AgentTaskAttempt, Task
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+
+        def fake_llm(loop, system_prompt, user_prompt, **kwargs):
+            if "拆解为有序" in system_prompt:
+                return {"steps": [
+                    {"title": "用例设计", "content": "编写测试用例", "role": "测试工程师"},
+                    {"title": "无岗位步骤", "content": "自由执行"},
+                ]}
+            return {"action": "complete", "reason": "完成"}
+
+        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        loop = svc.create_loop(
+            project=team["project"], agent=team["agent"],
+            title="岗位路由", goal_text="目标R",
+            created_by=team["user"].id,
+        )
+        # 第 1 步声明 role=测试工程师 → 路由给执行者而非绑定 Agent
+        attempt = AgentTaskAttempt.query.filter_by(task_id=svc.loop_tasks(loop.id)[0].id).first()
+        assert attempt is not None
+        assert attempt.agent_id == team["executor"].id
+        assert "【执行角色：测试工程师】" in db.session.get(Task, attempt.task_id).content
+
+        # 第 2 步无 role → 退回绑定 Agent
+        _finish_task(db.session.get(Task, svc.loop_tasks(loop.id)[0].id))
+        tasks = svc.loop_tasks(loop.id)
+        attempt2 = AgentTaskAttempt.query.filter_by(task_id=tasks[-1].id).first()
+        assert attempt2 is not None
+        assert attempt2.agent_id == team["agent"].id
+
+    def test_step_role_no_match_falls_back_to_bound_agent(self, _isolated_app, team, monkeypatch):
+        from services import goal_loop_service as svc
+        from models import AgentTaskAttempt, Task
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+
+        def fake_llm(loop, system_prompt, user_prompt, **kwargs):
+            if "拆解为有序" in system_prompt:
+                return {"steps": [{"title": "x", "content": "y", "role": "不存在的岗位"}]}
+            return {"action": "complete", "reason": "完成"}
+
+        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        loop = svc.create_loop(
+            project=team["project"], agent=team["agent"],
+            title="回退", goal_text="目标F",
+            created_by=team["user"].id,
+        )
+        attempt = AgentTaskAttempt.query.filter_by(task_id=svc.loop_tasks(loop.id)[0].id).first()
+        assert attempt is not None
+        assert attempt.agent_id == team["agent"].id
+
+    def test_loop_tasks_api_returns_executor_per_round(self, _isolated_app, team, monkeypatch):
+        from services import goal_loop_service as svc
+        from models import Task
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+
+        def fake_llm(loop, system_prompt, user_prompt, **kwargs):
+            if "拆解为有序" in system_prompt:
+                return {"steps": [{"title": "s1", "content": "c1", "role": "测试工程师"}]}
+            return {"action": "complete", "reason": "完成"}
+
+        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        loop = svc.create_loop(
+            project=team["project"], agent=team["agent"],
+            title="API 执行者", goal_text="目标A",
+            created_by=team["user"].id,
+        )
+        _finish_task(db.session.get(Task, svc.loop_tasks(loop.id)[0].id))
+        resp = _isolated_app.test_client().get(
+            f"{BASE_URL}/goal-loops/{loop.id}",
+            headers={"Authorization": team["headers"]["Authorization"]},
+        )
+        data = resp.get_json()["data"]
+        assert data["tasks"][0]["agent_id"] == team["executor"].id
+        assert data["director_agent_id"] is None

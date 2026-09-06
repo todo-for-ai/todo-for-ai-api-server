@@ -130,7 +130,36 @@ def main():
         print("❌ 终态后仍推进")
         ok = False
 
-    # ── 场景 3：人工停止 ──
+    # ── 场景 3：多 Agent 编排（指挥者 + 步骤岗位返回） ──
+    status, body = call("GET", f"/projects/{PROJECT_ID}/overview")
+    agents = (body.get("data") or {}).get("agents") or []
+    director = next((a for a in agents if a.get("role")), None)
+    status, body = call("POST", f"/projects/{PROJECT_ID}/goal-loops", {
+        "title": "E2E 编排",
+        "goal_text": "E2E 验证：指挥者拆解评审（scripted 规划器退化为单 Agent）",
+        "director_agent_id": (director or {}).get("id"),
+    })
+    assert status == 200, body
+    loop = body["data"]
+    orch_id = loop["id"]
+    if (director and loop.get("director_agent_id") == director["id"]
+            and (loop.get("director_display_name") or loop.get("director_name"))):
+        print(f"✅ 指挥者已绑定: director={loop.get('director_display_name') or loop.get('director_name')}")
+    elif director is None:
+        print("⏭️  项目无绑定角色的 Agent，跳过指挥者断言")
+    else:
+        print(f"❌ 指挥者未正确绑定: {loop.get('director_agent_id')} != {director['id']}")
+        ok = False
+    t0 = loop["tasks"][0]
+    if "agent_id" in t0:
+        print(f"✅ 轮次任务带执行者: task={t0['id']} agent={t0.get('agent_name') or t0.get('agent_id')}")
+    else:
+        print("❌ 轮次任务缺少执行者字段")
+        ok = False
+    status, _ = call("POST", f"/projects/goal-loops/{orch_id}/stop")
+    assert status == 200
+
+    # ── 场景 4：人工停止 ──
     status, body = call("POST", f"/projects/{PROJECT_ID}/goal-loops", {
         "title": "E2E 停止", "goal_text": "验证人工停止",
     })

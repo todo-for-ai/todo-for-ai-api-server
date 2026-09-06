@@ -10,7 +10,7 @@
 
 from flask import request
 
-from models import db, GoalLoop, GoalLoopStatus, Project, Agent
+from models import db, GoalLoop, GoalLoopStatus, Project, Agent, AgentTaskAttempt
 from core.auth import unified_auth_required, get_current_user
 from ..base import ApiResponse, handle_api_error
 from services import goal_loop_service
@@ -19,18 +19,45 @@ from . import projects_bp
 
 def _loop_with_tasks(loop: GoalLoop) -> dict:
     data = loop.to_dict()
+    tasks = goal_loop_service.loop_tasks(loop.id)
+    # 每轮任务的实际执行者（首个 attempt 的 agent）
+    agent_ids = {}
+    if tasks:
+        attempts = (
+            AgentTaskAttempt.query.filter(AgentTaskAttempt.task_id.in_([t.id for t in tasks]))
+            .order_by(AgentTaskAttempt.id)
+            .all()
+        )
+        for att in attempts:
+            agent_ids.setdefault(att.task_id, att.agent_id)
+    agents = {
+        a.id: a for a in
+        Agent.query.filter(Agent.id.in_(set(agent_ids.values()))).all()
+    } if agent_ids else {}
+    def _agent_name(task_id):
+        aid = agent_ids.get(task_id)
+        agent = agents.get(aid) if aid else None
+        return (agent.display_name or agent.name) if agent else None
+
     data['tasks'] = [
         {
             'id': t.id,
             'title': t.title,
             'status': t.status.value if t.status else None,
+            'agent_id': agent_ids.get(t.id),
+            'agent_name': _agent_name(t.id),
         }
-        for t in goal_loop_service.loop_tasks(loop.id)
+        for t in tasks
     ]
     data['rounds_done'] = len(data['tasks'])
     if loop.agent:
         data['agent_name'] = loop.agent.name
         data['agent_display_name'] = loop.agent.display_name
+    if loop.director_agent_id:
+        director = db.session.get(Agent, loop.director_agent_id)
+        if director:
+            data['director_name'] = director.name
+            data['director_display_name'] = director.display_name
     return data
 
 
@@ -119,6 +146,22 @@ def create_goal_loop(project_id: int):
                 error_details={'code': 'AGENT_WORKSPACE_MISMATCH'},
             ).to_response()
 
+        # 指挥者（可选）：负责拆解与评审；缺省 = 绑定 Agent（单 Agent 模式）
+        director = None
+        director_agent_id = data.get('director_agent_id')
+        if director_agent_id:
+            director = db.session.get(Agent, int(director_agent_id))
+            if not director:
+                return ApiResponse.error(
+                    'Director agent not found', 400,
+                    error_details={'code': 'DIRECTOR_NOT_FOUND'},
+                ).to_response()
+            if director.workspace_id != project.organization_id:
+                return ApiResponse.error(
+                    'Director agent workspace does not match the project organization', 400,
+                    error_details={'code': 'DIRECTOR_WORKSPACE_MISMATCH'},
+                ).to_response()
+
         loop = goal_loop_service.create_loop(
             project=project,
             agent=agent,
@@ -127,6 +170,7 @@ def create_goal_loop(project_id: int):
             done_definition=done_definition,
             rounds_limit=rounds_limit,
             created_by=current_user.id,
+            director=director,
         )
         return ApiResponse.success(
             data=_loop_with_tasks(loop), message='Goal loop created'
