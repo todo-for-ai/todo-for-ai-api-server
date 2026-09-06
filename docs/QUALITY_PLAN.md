@@ -1,0 +1,67 @@
+# 代码质量提升计划（2026-09-07 夜间马拉松）
+
+目标：高内聚、低耦合；每个被重构的模块单元测试补到覆盖 100% 且全量门禁通过；
+超大文件拆小；逻辑混乱处重构。持续迭代到 2026-09-07 09:00。
+
+## 工作纪律（与并行会话共存）
+- 只动自己拥有的或稳定的文件；他人 WIP（git status 里的未提交改动）一律不碰、
+  不卷入提交（controller 文件用 hunk 过滤提交）。
+- 每个迭代：`pytest tests/unit` 全绿 + 覆盖率证据 + pathspec 定向提交推送 + 本文件迭代日志。
+- "100%" 的度量口径：被重构模块的**行覆盖 100%**（coverage term-missing 无 Missing 行），
+  分支覆盖尽力；纯样板（模型字段透传）不强行凑数，在日志中注明。
+
+## 基线（2026-09-07 04:00）
+
+### 体积 Top（services + api，行数）
+| 文件 | 行数 | 归属 | 风险 |
+| --- | --- | --- | --- |
+| api/project_repo.py | 1016 | 他人 | 高（不动） |
+| api/agents/workflow_analytics.py | 949 | 他人 | 高（不动） |
+| api/agents/_core.py / _shared.py / messaging.py … | 900+ ×5 | 他人 | 高（不动） |
+| services/ai_service.py | 763 | 共享核心 | 中 |
+| services/goal_loop_service.py | 744 | **我** | 迭代 1 |
+| services/agent_runtime_controller.py | 744 | 我+他人 WIP | 迭代 2（hunk 过滤提交） |
+| api/agent_runtime_pull.py | ~600 | 他人/稳定 | 观望 |
+
+### 覆盖率基线
+- `services/goal_loop_service.py`：33 个用例覆盖主干；planner LLM 分支 / watchdog 部分行未覆盖（详见迭代 1 前测量）。
+- `services/agent_runtime_controller.py`：11 用例；auto_assign_task、status/list 未覆盖。
+- `services/workspace_runtime_policy.py`：7 用例，已 100% 行覆盖。
+- 全量覆盖率 JSON：/tmp/cov_baseline.json（跑完回填数字）。
+
+### 耦合热点（低内聚证据）
+1. `goal_loop_service.py` 一个文件混了四件事：**规划器（LLM/scripted 提示词与解析）、
+   推进状态机、看门狗（续航巡检）、派发（角色路由 + 云端联动 + 租约直派）**——典型的低内聚。
+2. `agent_runtime_controller.py` 混了：Pod 生命周期 + 任务派发（auto_assign）+
+   工作区配额读取 + 日志杂音——拆分空间大，但含他人 WIP hunk，需 hunk 过滤提交。
+3. 派发逻辑双轨：goal_loop 的 `_assign_task_to_agent` 与 controller 的 `auto_assign_task`
+   语义重复（历史原因：后者当时有 WIP 不能动）—— reunification 候选，需两者 owner 都在。
+
+## 迭代队列（每项 = 测试先行到 100% → 重构 → 门禁 → 提交 → 日志）
+- [ ] **迭代 1**：拆 `goal_loop_service.py` → `services/goal_loop/` 包：
+  `planning.py`（规划器+提示词+解析）、`state_machine.py`（maybe_advance/_advance_locked/护栏）、
+  `dispatch.py`（pick_executor/assign/云端联动）、`watchdog.py`（watchdog_sweep），
+  `__init__` 保持既有导入路径兼容（现有一切 `from services.goal_loop_service import X` 不改）。
+  测试：现有 36 用例迁移保绿 + 新增覆盖缺口用例至 100% 行覆盖。
+- [ ] **迭代 2**：`agent_runtime_controller.py` → 拆 `services/cloud_runtime/`
+  （pod_lifecycle.py / dispatch.py / quota.py）；用 hunk 过滤提交避开他人 auto_assign WIP；
+  补 auto_assign_task 与 status/list 的测试到 100%。
+- [ ] **迭代 3**：`api/agent_runtime_mgmt.py` 薄化：业务下沉 service，路由只留参数解析
+  （补端点级测试）。
+- [ ] **迭代 4+**：按覆盖率 JSON 找 services/ 下 <80% 覆盖且归属自己的模块继续；
+  或对迭代 1-3 的产物做圈复杂度复查（长函数拆分）。
+
+## 迭代日志
+
+## 迭代日志
+### 迭代 1（2026-09-07 05:00-06:40）拆分 goal_loop_service ✅
+- 前：`services/goal_loop_service.py` 744 行，规划/派发/状态机/看门狗四职责混杂（低内聚）。
+- 后：`services/goal_loop/` 包六模块（constants 17 / query 15 / dispatch 91 / planning 83 /
+  state_machine 178 / watchdog 46 行）+ 52 行兼容门面（既有导入路径零破坏）。
+- 覆盖率：包内 8 文件全部 **100% 行覆盖**（拆分前主文件 52% 量级、LLM/看门狗分支无覆盖）。
+- 测试：新增 `test_goal_loop_modules.py` 19 用例 + 状态机守卫/看门狗分支/派发降级 23 用例，
+  全量 **438 passed**（基线 396）。
+- 顺带移除死分支：watchdog 的"无时间戳"守卫（created_at NOT NULL 约束下不可达）。
+- 经验：monkeypatch 目标必须是符号定义所在的模块（拆包后 `state_machine.call_review`
+  才是状态机实际调用的符号）；SimpleNamespace 替身上的 staticmethod 在 py3.9 不可调用。
+（每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

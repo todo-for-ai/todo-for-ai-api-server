@@ -6,14 +6,17 @@
 """
 
 import json
+import types
 import uuid
 
 import pytest
 
 from app import create_app
-from models import db
+from models import db, GoalLoop, GoalLoopStatus
 
 BASE_URL = "/todo-for-ai/api/v1/projects"
+
+from services.goal_loop import planning as goal_loop_planning
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -230,7 +233,7 @@ class TestPlanBasedLoop:
                 {"title": "补救步骤", "content": "换一种方式重做"},
             ], "reason": "原方案受阻"}
 
-        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        monkeypatch.setattr(goal_loop_planning, "llm_call", fake_llm)
         loop = svc.create_loop(
             project=env["project"], agent=env["agent"],
             title="LLM 计划", goal_text="目标L", created_by=env["user"].id,
@@ -441,7 +444,7 @@ class TestMultiAgentOrchestration:
             captured["user"] = user_prompt
             return {"steps": [{"title": "步骤", "content": "做"}]}
 
-        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        monkeypatch.setattr(goal_loop_planning, "llm_call", fake_llm)
         svc.create_loop(
             project=team["project"], agent=team["executor"],
             title="指挥上下文", goal_text="目标C",
@@ -465,7 +468,7 @@ class TestMultiAgentOrchestration:
                 ]}
             return {"action": "complete", "reason": "完成"}
 
-        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        monkeypatch.setattr(goal_loop_planning, "llm_call", fake_llm)
         loop = svc.create_loop(
             project=team["project"], agent=team["agent"],
             title="岗位路由", goal_text="目标R",
@@ -494,7 +497,7 @@ class TestMultiAgentOrchestration:
                 return {"steps": [{"title": "x", "content": "y", "role": "不存在的岗位"}]}
             return {"action": "complete", "reason": "完成"}
 
-        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        monkeypatch.setattr(goal_loop_planning, "llm_call", fake_llm)
         loop = svc.create_loop(
             project=team["project"], agent=team["agent"],
             title="回退", goal_text="目标F",
@@ -514,7 +517,7 @@ class TestMultiAgentOrchestration:
                 return {"steps": [{"title": "s1", "content": "c1", "role": "测试工程师"}]}
             return {"action": "complete", "reason": "完成"}
 
-        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        monkeypatch.setattr(goal_loop_planning, "llm_call", fake_llm)
         loop = svc.create_loop(
             project=team["project"], agent=team["agent"],
             title="API 执行者", goal_text="目标A",
@@ -589,7 +592,7 @@ class TestMultiDayEndurance:
             captured["user"] = user_prompt
             return {"steps": [{"title": "s", "content": "c"}]}
 
-        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        monkeypatch.setattr(goal_loop_planning, "llm_call", fake_llm)
         loop = svc.create_loop(
             project=env["project"], agent=env["agent"],
             title="预算上下文", goal_text="目标B", created_by=env["user"].id,
@@ -795,7 +798,7 @@ class TestCloudExecutorLinkage:
                 return {"steps": [{"title": "s1", "content": "c1", "role": "测试工程师"}]}
             return {"action": "complete", "reason": "完成"}
 
-        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        monkeypatch.setattr(goal_loop_planning, "llm_call", fake_llm)
 
     def test_managed_runner_executor_gets_pod_ensured(
         self, _isolated_app, team, monkeypatch
@@ -855,3 +858,335 @@ class TestCloudExecutorLinkage:
             created_by=team["user"].id,
         )
         assert calls == []
+
+
+class TestStateMachineGuards:
+    """状态机边界分支：缺循环/并发/停机/受阻等守卫。"""
+
+    def test_maybe_advance_loop_not_found(self, _isolated_app):
+        from services import goal_loop_service as svc
+        assert svc.maybe_advance(987654321)["reason"] == "loop_not_found"
+
+    def test_maybe_advance_already_advancing(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="并发", goal_text="g", created_by=env["user"].id)
+        GoalLoop.query.filter_by(id=loop.id).update({"advancing": 1})
+        db.session.commit()
+        result = svc.maybe_advance(loop.id)
+        assert result["reason"] == "already_advancing"
+
+    def test_maybe_advance_not_running(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="停机", goal_text="g", created_by=env["user"].id)
+        svc.set_status(loop.id, GoalLoopStatus.PAUSED)
+        result = svc.maybe_advance(loop.id)
+        assert result["reason"].startswith("not_running:")
+
+    def test_advance_locked_active_task_exists(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="在途", goal_text="g", created_by=env["user"].id)
+        # 第 1 轮 in_progress → 直接调 _advance_locked 应报 active_task_exists
+        result = svc._advance_locked(loop.id)
+        assert result["reason"] == "active_task_exists"
+
+    def test_maybe_advance_cas_rollback_on_error(self, _isolated_app, env, monkeypatch):
+        """推进中途抛错时，finally 分支释放 advancing 并回滚。"""
+        from services import goal_loop_service as svc
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="CAS", goal_text="g", created_by=env["user"].id)
+
+        def boom(loop_id, trigger_task_id=None):
+            raise RuntimeError("inner boom")
+
+        monkeypatch.setattr("services.goal_loop.state_machine._advance_locked", boom)
+        commits = {"n": 0}
+        real_commit = db.session.commit
+
+        def counting_commit():
+            commits["n"] += 1
+            if commits["n"] >= 2:
+                raise RuntimeError("commit boom")
+            return real_commit()
+
+        monkeypatch.setattr(db.session, "commit", counting_commit)
+        with pytest.raises(RuntimeError, match="inner boom"):
+            svc.maybe_advance(loop.id)
+        monkeypatch.setattr(db.session, "commit", real_commit)
+        GoalLoop.query.filter_by(id=loop.id).update({"advancing": 0})
+        db.session.commit()
+
+    def test_decompose_failure_counts_stall(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from services.goal_loop import planning as planning_mod
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+        monkeypatch.setattr(planning_mod, "llm_call",
+                            lambda loop, s, u: (_ for _ in ()).throw(RuntimeError("llm down")))
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="拆解失败", goal_text="g", created_by=env["user"].id)
+        db.session.expire(loop)
+        assert loop.stall_count == 1
+        assert "decompose_failed" in (loop.last_error or "")
+
+    def test_not_running_after_planner_decompose(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from services.goal_loop import planning as planning_mod
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+
+        def pause_and_plan(loop):
+            GoalLoop.query.filter_by(id=loop.id).update(
+                {"status": GoalLoopStatus.PAUSED})
+            db.session.commit()
+            return [{"title": "s", "content": "c"}]
+
+        monkeypatch.setattr("services.goal_loop.state_machine.call_decompose", pause_and_plan)
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="拆解后暂停", goal_text="g", created_by=env["user"].id)
+        db.session.expire(loop)
+        assert loop.status == GoalLoopStatus.PAUSED
+        assert loop.plan is None
+
+    def test_review_failure_counts_stall(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from services.goal_loop import planning as planning_mod
+        from models import Task
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+        monkeypatch.setattr(planning_mod, "llm_call", lambda loop, s, u: {
+            "steps": [{"title": "s1", "content": "c1"}]})
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="评审失败", goal_text="g", created_by=env["user"].id)
+        monkeypatch.setattr(planning_mod, "call_review",
+                            lambda loop, s: (_ for _ in ()).throw(RuntimeError("review down")))
+        _finish_task(db.session.get(Task, svc.loop_tasks(loop.id)[0].id), "cancelled")
+        db.session.expire(loop)
+        assert loop.stall_count == 1
+        assert "review_failed" in (loop.last_error or "")
+
+    def test_not_running_after_planner_review(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from services.goal_loop import planning as planning_mod
+        from models import Task
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+        monkeypatch.setattr(planning_mod, "llm_call", lambda loop, s, u: {
+            "steps": [{"title": "s1", "content": "c1"}]})
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="评审后暂停", goal_text="g", created_by=env["user"].id)
+
+        def pause_review(loop, last_status):
+            GoalLoop.query.filter_by(id=loop.id).update(
+                {"status": GoalLoopStatus.PAUSED})
+            db.session.commit()
+            return {"action": "complete", "reason": "r"}
+
+        monkeypatch.setattr("services.goal_loop.state_machine.call_review", pause_review)
+        _finish_task(db.session.get(Task, svc.loop_tasks(loop.id)[0].id))
+        db.session.expire(loop)
+        assert loop.status == GoalLoopStatus.PAUSED
+
+    def test_extend_without_valid_steps_counts_stall(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from services.goal_loop import planning as planning_mod
+        from models import Task
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+        monkeypatch.setattr(planning_mod, "llm_call", lambda loop, s, u: (
+            {"steps": [{"title": "s1", "content": "c1"}]}
+            if "拆解为有序" in s else {"action": "extend"}))
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="空扩展", goal_text="g", created_by=env["user"].id)
+        monkeypatch.setattr("services.goal_loop.state_machine.call_review",
+                            lambda loop, s: {"action": "extend"})
+        _finish_task(db.session.get(Task, svc.loop_tasks(loop.id)[0].id), "cancelled")
+        db.session.expire(loop)
+        assert "extend_without_valid_steps" in (loop.last_error or "")
+
+    def test_update_guardrails_unknown_loop(self, _isolated_app):
+        from services import goal_loop_service as svc
+        with pytest.raises(LookupError):
+            svc.update_guardrails(987654321, rounds_limit=5)
+
+    def test_set_status_unknown_loop(self, _isolated_app):
+        from services import goal_loop_service as svc
+        from models import GoalLoopStatus
+        with pytest.raises(LookupError):
+            svc.set_status(987654321, GoalLoopStatus.PAUSED)
+
+    def test_notify_ignores_non_int_loop_tag(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        from models import Task, TaskStatus
+        task = Task(title="t", content="c", project_id=env["project"].id,
+                    owner_id=env["user"].id, is_ai_task=True,
+                    status=TaskStatus.TODO)
+        db.session.add(task)
+        db.session.flush()
+        task.add_tag("goal-loop:not-a-number")
+        db.session.commit()
+        svc.notify_task_finished(task.id)  # 不应抛异常
+
+    def test_notify_swallows_advance_error(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from models import Task, TaskStatus
+        task = Task(title="t", content="c", project_id=env["project"].id,
+                    owner_id=env["user"].id, is_ai_task=True,
+                    status=TaskStatus.TODO)
+        db.session.add(task)
+        db.session.flush()
+        task.add_tag("goal-loop:1")
+        db.session.commit()
+
+        def boom(loop_id, trigger_task_id=None):
+            raise RuntimeError("advance boom")
+
+        monkeypatch.setattr(svc, "maybe_advance", boom)
+        svc.notify_task_finished(task.id)  # 异常被吞掉（rollback 分支）
+
+
+class TestWatchdogBranches:
+    """看门狗巡检分支：竞态暂停 / 无时间戳 / 最近活跃跳过。"""
+
+    def _mk_loop(self, env, title):
+        from services import goal_loop_service as svc
+        return svc.create_loop(project=env["project"], agent=env["agent"],
+                               title=title, goal_text="g", created_by=env["user"].id)
+
+    def test_sweep_skips_loop_paused_in_race(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from services.goal_loop import watchdog as wd
+        loop = self._mk_loop(env, "竞态暂停")
+        real_expire = db.session.expire
+
+        def fake_expire(instance, attribute_names=None):
+            real_expire(instance, attribute_names)
+            if isinstance(instance, GoalLoop):
+                instance.status = GoalLoopStatus.PAUSED
+
+        monkeypatch.setattr(wd.db.session, "expire", fake_expire)
+        result = svc.watchdog_sweep()
+        assert result["checked"] >= 1 and result["stuck_cancelled"] == 0
+
+    def test_sweep_skips_recent_active_task(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        loop = self._mk_loop(env, "最近活跃")
+        result = svc.watchdog_sweep()
+        assert result["stuck_cancelled"] == 0
+        db.session.expire(loop)
+        assert loop.status == GoalLoopStatus.RUNNING
+
+
+class TestCoverageGapLines:
+    """收尾：覆盖拆分模块剩余的降级/回滚分支。"""
+
+    def test_assign_websocket_push_failure_swallowed(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        from models import AgentTaskAttempt, Task, TaskStatus
+        task = Task(title="t", content="c", project_id=env["project"].id,
+                    owner_id=env["user"].id, is_ai_task=True, status=TaskStatus.TODO)
+        db.session.add(task)
+        db.session.commit()
+
+        def boom(agent_id, payload):
+            raise RuntimeError("ws down")
+
+        monkeypatch = getattr(__import__("pytest"), "MonkeyPatch")()
+        monkeypatch.setattr("api.agent_runtime_websocket.push_task_to_agent", boom)
+        try:
+            svc._assign_task_to_agent(task, env["agent"])
+        finally:
+            monkeypatch.undo()
+        assert task.status == TaskStatus.IN_PROGRESS
+        assert AgentTaskAttempt.query.filter_by(task_id=task.id).count() == 1
+
+    def test_advance_locked_not_running_direct(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        from models import GoalLoopStatus
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="直调", goal_text="g", created_by=env["user"].id)
+        svc.set_status(loop.id, GoalLoopStatus.PAUSED)
+        result = svc._advance_locked(loop.id)
+        assert result["reason"] == "not_running"
+
+    def test_ensure_cloud_executor_skips_workspace_mismatch(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        from models import Agent
+        stranger = Agent(name=f"a_{uuid.uuid4().hex[:6]}", workspace_id=env["org"].id + 777,
+                         owner_id=env["user"].id, creator_user_id=env["user"].id,
+                         status="ACTIVE", runner_enabled=True,
+                         execution_mode="managed_runner")
+        db.session.add(stranger)
+        db.session.commit()
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="跨区", goal_text="g", created_by=env["user"].id)
+        # 工作区不一致 → 直接 return，不触发任何集群调用
+        svc._ensure_cloud_executor(loop, stranger)
+
+    def test_ensure_cloud_executor_without_key_warns(self, _isolated_app, env, monkeypatch):
+        import types
+        from services import goal_loop_service as svc
+        from services.goal_loop import dispatch as goal_loop_dispatch
+        import models
+
+        row = types.SimpleNamespace(reveal=lambda: None)  # 解密失败 → 无密钥
+        fake_ak = types.SimpleNamespace()
+        fake_ak.query = types.SimpleNamespace(
+            filter_by=lambda **kw: types.SimpleNamespace(first=lambda: row))
+        monkeypatch.setattr(models, "AgentKey", fake_ak, raising=True)
+
+        executor = env["agent"]
+        executor.execution_mode = "managed_runner"
+        db.session.commit()
+        loop = svc.create_loop(project=env["project"], agent=env["agent"],
+                               title="无钥", goal_text="g", created_by=env["user"].id)
+        svc._ensure_cloud_executor(loop, executor)  # 不应抛异常
+
+    def test_auto_assign_fallback_to_controller(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from models import Task, TaskStatus
+        calls = []
+        controller = types.SimpleNamespace()
+        controller.auto_assign_task = lambda t: calls.append(t.id)
+        import services.agent_runtime_controller as arc
+        monkeypatch.setattr(arc, "AgentRuntimeController", controller)
+
+        task = Task(title="t", content="c", project_id=env["project"].id,
+                    owner_id=env["user"].id, is_ai_task=True, status=TaskStatus.TODO)
+        db.session.add(task)
+        db.session.commit()
+        svc._auto_assign(task, None)
+        assert calls == [task.id]
+
+    def test_auto_assign_fallback_error_rolled_back(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from models import Task, TaskStatus
+        task = Task(title="t", content="c", project_id=env["project"].id,
+                    owner_id=env["user"].id, is_ai_task=True, status=TaskStatus.TODO)
+        db.session.add(task)
+        db.session.commit()
+
+        controller = types.SimpleNamespace()
+        def _boom(t):
+            raise RuntimeError("controller down")
+        controller.auto_assign_task = _boom
+        import services.agent_runtime_controller as arc
+        monkeypatch.setattr(arc, "AgentRuntimeController", controller)
+
+        svc._auto_assign(task, None)  # 异常被吞掉（rollback 分支）
+        db.session.expire(task)
+        assert task.status == TaskStatus.TODO
+
+    def test_notify_rollback_on_advance_error(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        from services.goal_loop import state_machine
+        from models import Task, TaskStatus
+        task = Task(title="t", content="c", project_id=env["project"].id,
+                    owner_id=env["user"].id, is_ai_task=True, status=TaskStatus.TODO)
+        db.session.add(task)
+        db.session.flush()
+        task.add_tag("goal-loop:1")
+        db.session.commit()
+
+        def boom(loop_id, trigger_task_id=None):
+            raise RuntimeError("advance boom")
+
+        monkeypatch.setattr(state_machine, "maybe_advance", boom)
+        svc.notify_task_finished(task.id)  # 异常被吞掉（rollback 分支）
