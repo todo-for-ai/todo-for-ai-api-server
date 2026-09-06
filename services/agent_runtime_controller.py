@@ -5,13 +5,22 @@ K8s Operator 风格的控制器，管理 Agent 容器的生命周期
 """
 
 import asyncio
+import base64
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import uuid4
 
 import kubernetes.client
-from kubernetes.client import V1Pod, V1PodSpec, V1Container, V1ResourceRequirements
+from kubernetes.client import (
+    V1Pod,
+    V1PodSpec,
+    V1Container,
+    V1ResourceRequirements,
+    V1Secret,
+    V1PersistentVolumeClaim,
+    V1PersistentVolumeClaimSpec,
+)
 from kubernetes.client.rest import ApiException
 
 from core.config import Config
@@ -28,8 +37,19 @@ class AgentRuntimeController:
         'anthropic': 'todo4ai/agent-claude:latest',
         'google': 'todo4ai/agent-gemini:latest',
         'ollama': 'todo4ai/agent-ollama:latest',
+        # CLI 引擎（agent-runtime runtimes/cli-agents 镜像，预装 claude/codex/opencode 三 CLI）
+        'claude': 'todo4ai/agent-cli-agents:latest',
+        'codex': 'todo4ai/agent-cli-agents:latest',
+        'opencode': 'todo4ai/agent-cli-agents:latest',
         'custom': 'todo4ai/agent-runtime:latest',
     }
+
+    # 运行时凭据 Secret（per-namespace，key = agent-<id>；AGENT_KEY 以 secretKeyRef 注入，不再落明文）
+    RUNTIME_SECRET_NAME = 'todo4ai-runtime-keys'
+    # 工作区共享卷（协作 Agent 的文件产物通道；ReadWriteMany）
+    SHARED_WORKSPACE_PVC_PREFIX = 'todo4ai-ws'
+    # 单工作区同时运行的 Agent Pod 上限（防成本失控；0 = 不限，可被 Config 覆盖）
+    MAX_PODS_PER_WORKSPACE = 10
 
     # 沙箱资源配置
     SANDBOX_RESOURCES = {
@@ -58,11 +78,11 @@ class AgentRuntimeController:
         try:
             # 尝试加载集群内配置
             kubernetes.config.load_incluster_config()
-            logger.info("controller.k8s_loaded", source="incluster")
+            logger.info("controller.k8s_loaded source=incluster")
         except kubernetes.config.config_exception.ConfigException:
             # 回退到本地配置
             kubernetes.config.load_kube_config()
-            logger.info("controller.k8s_loaded", source="kubeconfig")
+            logger.info("controller.k8s_loaded source=kubeconfig")
 
         self.k8s_client = kubernetes.client.ApiClient()
         self.core_v1 = kubernetes.client.CoreV1Api(self.k8s_client)
@@ -86,6 +106,12 @@ class AgentRuntimeController:
         """
         pod_name = f"agent-{agent.id}-{uuid4().hex[:8]}"
 
+        policy = self._agent_policy(agent)
+        # 凭据与共享卷在 Pod 引用它们之前必须存在（幂等）
+        self.ensure_runtime_secret(agent.id, agent_key)
+        if policy.get('shared_workspace'):
+            self.ensure_workspace_shared_pvc(agent.workspace_id)
+
         # 构建 Pod 配置
         pod = self._build_pod(
             name=pod_name,
@@ -102,10 +128,8 @@ class AgentRuntimeController:
             )
 
             logger.info(
-                "controller.pod_created",
-                pod_name=pod_name,
-                agent_id=agent.id,
-                namespace=self.namespace,
+                "controller.pod_created pod=%s agent_id=%s namespace=%s",
+                pod_name, agent.id, self.namespace,
             )
 
             return {
@@ -118,11 +142,131 @@ class AgentRuntimeController:
 
         except ApiException as e:
             logger.error(
-                "controller.pod_create_failed",
-                pod_name=pod_name,
-                error=str(e),
+                "controller.pod_create_failed pod=%s error=%s", pod_name, e,
             )
             raise RuntimeError(f"Failed to create pod: {e}")
+
+    # ── Phase 1：多 Agent 云端协作的三个接缝（凭据 Secret 化 / 共享工作区卷 / 幂等确保在岗）──
+
+    def _agent_policy(self, agent: Agent) -> dict:
+        """Agent 的沙箱策略 JSON（兼容 None）。"""
+        return agent.sandbox_policy or {}
+
+    def _runtime_secret_field(self, agent_id: int) -> str:
+        return f'agent-{agent_id}'
+
+    def ensure_runtime_secret(self, agent_id: int, agent_key: str) -> str:
+        """确保运行时 Secret 存在且包含该 Agent 的密钥；返回 Secret 名。
+
+        Secret 为 per-namespace 聚合式（todo4ai-runtime-keys），key = agent-<id>。
+        已存在且值一致时不做写操作（幂等）。
+        """
+        secret_name = self.RUNTIME_SECRET_NAME
+        field = self._runtime_secret_field(agent_id)
+        encoded = base64.b64encode((agent_key or '').encode('utf-8')).decode('utf-8')
+        try:
+            secret = self.core_v1.read_namespaced_secret(secret_name, self.namespace)
+            data = dict(secret.data or {})
+            if data.get(field) == encoded:
+                return secret_name
+            data[field] = encoded
+            self.core_v1.patch_namespaced_secret(
+                name=secret_name, namespace=self.namespace, body={'data': data}
+            )
+            logger.info("controller.runtime_secret_patched agent_id=%s", agent_id)
+            return secret_name
+        except ApiException as e:
+            if e.status != 404:
+                raise
+        self.core_v1.create_namespaced_secret(
+            namespace=self.namespace,
+            body=V1Secret(
+                metadata=kubernetes.client.V1ObjectMeta(name=secret_name),
+                type='Opaque',
+                data={field: encoded},
+            ),
+        )
+        logger.info("controller.runtime_secret_created agent_id=%s", agent_id)
+        return secret_name
+
+    def shared_workspace_pvc_name(self, workspace_id: int) -> str:
+        return f'{self.SHARED_WORKSPACE_PVC_PREFIX}-{workspace_id}-shared'
+
+    def ensure_workspace_shared_pvc(self, workspace_id: int) -> str:
+        """确保工作区共享卷存在（协作 Agent 的文件产物通道，ReadWriteMany）。"""
+        pvc_name = self.shared_workspace_pvc_name(workspace_id)
+        try:
+            self.core_v1.read_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+            return pvc_name
+        except ApiException as e:
+            if e.status != 404:
+                raise
+        storage_class = getattr(Config, 'K8S_SHARED_WORKSPACE_STORAGE_CLASS', None)
+        spec_kwargs = {}
+        if storage_class:
+            spec_kwargs['storage_class_name'] = storage_class
+        self.core_v1.create_namespaced_persistent_volume_claim(
+            namespace=self.namespace,
+            body=V1PersistentVolumeClaim(
+                metadata=kubernetes.client.V1ObjectMeta(
+                    name=pvc_name,
+                    labels={'app': 'todo4ai-workspace', 'workspace-id': str(workspace_id)},
+                ),
+                spec=V1PersistentVolumeClaimSpec(
+                    access_modes=['ReadWriteMany'],
+                    resources=V1ResourceRequirements(requests={'storage': '10Gi'}),
+                    **spec_kwargs,
+                ),
+            ),
+        )
+        logger.info("controller.shared_pvc_created workspace_id=%s pvc=%s", workspace_id, pvc_name)
+        return pvc_name
+
+    def _list_workspace_pods(self, workspace_id: int) -> List[V1Pod]:
+        """工作区内全部 Agent Pod（含非 Running，用于配额判断）。"""
+        try:
+            pods = self.core_v1.list_namespaced_pod(
+                namespace=self.namespace,
+                label_selector=f'app=todo4ai-agent,workspace-id={workspace_id}',
+            )
+            return pods.items
+        except ApiException:
+            return []
+
+    def ensure_agent_pod(self, agent: Agent, agent_key: str, sandbox_profile: str = None) -> Dict:
+        """幂等确保 Agent 的云端运行时在岗；编排派发前调用。
+
+        - 已有 Running/Pending Pod：不动作（already_running）；
+        - 工作区在岗 Pod 数达到上限：不创建（workspace_pod_limit，任务留在队列）；
+        - 否则先确保 Secret / 共享卷（按策略），再 spawn。
+        返回 {'status': already_running|created|workspace_pod_limit, ...}。
+        """
+        existing = self.get_agent_pod_status(agent.id)
+        if existing and existing.get('phase') in ('Running', 'Pending'):
+            return {'status': 'already_running', 'pod': existing}
+
+        cap = int(getattr(Config, 'K8S_MAX_PODS_PER_WORKSPACE', 0) or self.MAX_PODS_PER_WORKSPACE)
+        if cap > 0:
+            running = [
+                p for p in self._list_workspace_pods(agent.workspace_id)
+                if p.status and p.status.phase in ('Running', 'Pending')
+            ]
+            if len(running) >= cap:
+                logger.warning(
+                    "controller.workspace_pod_limit workspace_id=%s running=%s cap=%s",
+                    agent.workspace_id, len(running), cap,
+                )
+                return {'status': 'workspace_pod_limit', 'running': len(running), 'cap': cap}
+
+        policy = self._agent_policy(agent)
+        result = self.spawn_agent_pod(
+            agent=agent,
+            agent_key=agent_key,
+            sandbox_profile=sandbox_profile or agent.sandbox_profile or 'standard',
+        )
+        return {'status': 'created', 'pod': result}
 
     def terminate_agent_pod(self, agent_id: int) -> bool:
         """
@@ -138,7 +282,7 @@ class AgentRuntimeController:
         pods = self._find_pods_by_agent(agent_id)
 
         if not pods:
-            logger.warning("controller.no_pods_found", agent_id=agent_id)
+            logger.warning("controller.no_pods_found agent_id=%s", agent_id)
             return False
 
         deleted = False
@@ -153,15 +297,13 @@ class AgentRuntimeController:
                 )
                 deleted = True
                 logger.info(
-                    "controller.pod_deleted",
-                    pod_name=pod.metadata.name,
-                    agent_id=agent_id,
+                    "controller.pod_deleted pod=%s agent_id=%s",
+                    pod.metadata.name, agent_id,
                 )
             except ApiException as e:
                 logger.error(
-                    "controller.pod_delete_failed",
-                    pod_name=pod.metadata.name,
-                    error=str(e),
+                    "controller.pod_delete_failed pod=%s error=%s",
+                    pod.metadata.name, e,
                 )
 
         return deleted
@@ -210,7 +352,7 @@ class AgentRuntimeController:
             return [self._format_pod_status(pod) for pod in pods.items]
 
         except ApiException as e:
-            logger.error("controller.list_pods_failed", error=str(e))
+            logger.error("controller.list_pods_failed error=%s", e)
             return []
 
     def _build_pod(
@@ -233,6 +375,9 @@ class AgentRuntimeController:
 
         # 构建环境变量
         env = self._build_env_vars(agent, agent_key)
+
+        # 协作共享工作区（策略开关）：挂载工作区级 ReadWriteMany PVC，多 Agent 互见文件产物
+        shared_workspace = bool(self._agent_policy(agent).get('shared_workspace'))
 
         # 构建标签
         labels = {
@@ -296,8 +441,13 @@ class AgentRuntimeController:
                             kubernetes.client.V1VolumeMount(
                                 name='cache',
                                 mount_path='/app/.cache'
-                            )
-                        ],
+                            ),
+                        ] + ([
+                            kubernetes.client.V1VolumeMount(
+                                name='shared-workspace',
+                                mount_path='/workspace/shared'
+                            ),
+                        ] if shared_workspace else []),
                         liveness_probe=kubernetes.client.V1Probe(
                             http_get=kubernetes.client.V1HTTPGetAction(
                                 path='/health',
@@ -328,8 +478,15 @@ class AgentRuntimeController:
                         empty_dir=kubernetes.client.V1EmptyDirVolumeSource(
                             size_limit='500Mi'
                         )
-                    )
-                ]
+                    ),
+                ] + ([
+                    kubernetes.client.V1Volume(
+                        name='shared-workspace',
+                        persistent_volume_claim=kubernetes.client.V1PersistentVolumeClaimVolumeSource(
+                            claim_name=self.shared_workspace_pvc_name(agent.workspace_id),
+                        ),
+                    ),
+                ] if shared_workspace else [])
             )
         )
 
@@ -339,10 +496,17 @@ class AgentRuntimeController:
         agent_key: str
     ) -> List[kubernetes.client.V1EnvVar]:
         """构建环境变量"""
+        cli_engine = (self._agent_policy(agent).get('cli_engine') or '').strip().lower()
         env_vars = [
+            # AGENT_KEY 走 Secret（spawn 前由 ensure_runtime_secret 写入），Pod spec 不落明文
             kubernetes.client.V1EnvVar(
                 name='AGENT_KEY',
-                value=agent_key
+                value_from=kubernetes.client.V1EnvVarSource(
+                    secret_key_ref=kubernetes.client.V1SecretKeySelector(
+                        name=self.RUNTIME_SECRET_NAME,
+                        key=self._runtime_secret_field(agent.id),
+                    )
+                ),
             ),
             kubernetes.client.V1EnvVar(
                 name='API_BASE_URL',
@@ -382,6 +546,12 @@ class AgentRuntimeController:
             ),
         ]
 
+        # CLI 引擎选择（claude/codex/opencode/custom），与 cli-agents 镜像配套
+        if cli_engine:
+            env_vars.append(
+                kubernetes.client.V1EnvVar(name='CLI_AGENT_ENGINE', value=cli_engine)
+            )
+
         # 添加 LLM API Key（从 Secret）
         if agent.llm_provider:
             env_vars.append(
@@ -400,7 +570,10 @@ class AgentRuntimeController:
         return env_vars
 
     def _get_runtime_type(self, agent: Agent) -> str:
-        """获取运行时类型"""
+        """获取运行时类型：沙箱策略显式声明的 CLI 引擎优先，否则按 LLM 供应商映射。"""
+        cli_engine = (self._agent_policy(agent).get('cli_engine') or '').strip().lower()
+        if cli_engine in ('claude', 'codex', 'opencode', 'custom'):
+            return cli_engine
         provider = (agent.llm_provider or 'openai').lower()
         if provider in ['openai']:
             return 'openai'
@@ -520,7 +693,7 @@ class AgentRuntimeController:
             }
             push_task_to_agent(agent.id, task_data)
         except Exception as e:
-            logger.warning("websocket.push_failed", error=str(e))
+            logger.warning("websocket.push_failed error=%s", e)
 
 
 # 单例实例

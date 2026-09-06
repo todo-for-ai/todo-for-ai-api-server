@@ -387,7 +387,8 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
     # ── ② 计划有剩余步骤 且 上轮成功（或首轮）：直接物化下一步 ──
     if plan_index < len(plan) and (last_status in (None, 'done')):
         step = plan[plan_index]
-        task = _create_round_task(loop, step)
+        executor = _pick_executor(loop, step)
+        task = _create_round_task(loop, step, executor)
         loop.plan_index = plan_index + 1
         loop.last_task_id = task.id
         loop.stall_count = 0
@@ -395,7 +396,8 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         if loop.started_at is None:
             loop.started_at = _naive_utc_now()
         db.session.commit()
-        _auto_assign(task, _pick_executor(loop, step))
+        _ensure_cloud_executor(loop, executor)
+        _auto_assign(task, executor)
         return {'advanced': True, 'reason': 'task_created', 'task_id': task.id}
 
     # ── ③ 计划耗尽 或 上轮失败：评审 ──
@@ -427,12 +429,14 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         loop.plan_index = max(plan_index, 0)
         loop.plan_revision = (loop.plan_revision or 0) + 1
         step = loop.plan[loop.plan_index]
-        task = _create_round_task(loop, step)
+        executor = _pick_executor(loop, step)
+        task = _create_round_task(loop, step, executor)
         loop.plan_index += 1
         loop.stall_count = 0
         loop.last_error = None
         db.session.commit()
-        _auto_assign(task, _pick_executor(loop, step))
+        _ensure_cloud_executor(loop, executor)
+        _auto_assign(task, executor)
         return {'advanced': True, 'reason': 'plan_extended', 'task_id': task.id}
 
     return _register_stall(loop, f"blocked: {decision.get('reason') or '未给出原因'}")
@@ -539,6 +543,35 @@ def _assign_task_to_agent(task, agent: Agent):
         })
     except Exception:  # noqa: BLE001  WebSocket 未连接时静默（agent 轮询可拉到）
         pass
+
+
+def _ensure_cloud_executor(loop, executor: Agent):
+    """编排↔云端联动：managed_runner 执行者不在岗时按需拉起其 Pod。
+
+    任意失败（无集群配置/无密钥/工作区 Pod 超限）都只降级为 external_pull
+    兜底派发，绝不阻塞循环推进；云端拉起结果记录在日志。
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    try:
+        if not executor or (executor.execution_mode or '') != 'managed_runner':
+            return
+        if executor.workspace_id != loop.workspace_id:
+            return
+        from models import AgentKey
+        key_row = AgentKey.query.filter_by(agent_id=executor.id, is_active=True).first()
+        agent_key = key_row.reveal() if key_row else None
+        if not agent_key:
+            log.warning("goal_loop.cloud_executor_no_key", extra={"agent_id": executor.id})
+            return
+        from services.agent_runtime_controller import get_agent_controller
+        result = get_agent_controller().ensure_agent_pod(executor, agent_key)
+        log.info("goal_loop.cloud_executor_ensured",
+                 extra={"agent_id": executor.id, "result": result.get('status')})
+    except Exception:  # noqa: BLE001
+        log.warning("goal_loop.cloud_executor_ensure_failed", exc_info=True)
+        db.session.rollback()
 
 
 def _auto_assign(task, agent: Agent = None):

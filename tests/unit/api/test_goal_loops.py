@@ -85,6 +85,38 @@ def env(_isolated_app):
     }
 
 
+@pytest.fixture
+def team(env):
+    """在 env 之上追加第二个 Agent（测试工程师角色）作执行者。"""
+    from models import Agent, AgentRoleTemplate
+
+    template = AgentRoleTemplate(
+    workspace_id=None,
+    created_by_user_id=env["user"].id,
+    name=f"qa_{uuid.uuid4().hex[:6]}",
+    display_name="测试工程师",
+    category="qa",
+    is_builtin=True,
+    )
+    db.session.add(template)
+    db.session.flush()
+    executor = Agent(
+    name=f"agent_{uuid.uuid4().hex[:6]}",
+    workspace_id=env["org"].id,
+    owner_id=env["user"].id,
+    creator_user_id=env["user"].id,
+    status="ACTIVE",
+    runner_enabled=True,
+    role_template_id=template.id,
+    )
+    db.session.add(executor)
+    db.session.commit()
+    env["executor"] = executor
+    env["executor_template"] = template
+    return env
+
+
+
 def _finish_task(task, status_value="done"):
     """任务置终态并触发循环钩子（模拟 agent 提交/人工关闭）。"""
     from models import TaskStatus
@@ -348,36 +380,6 @@ class TestAgentRoleBinding:
 
 class TestMultiAgentOrchestration:
     """v3 多 Agent 编排：指挥者拆解评审 + 步骤岗位路由执行者。"""
-
-    @pytest.fixture
-    def team(self, env):
-        """在 env 之上追加第二个 Agent（测试工程师角色）作执行者。"""
-        from models import Agent, AgentRoleTemplate
-
-        template = AgentRoleTemplate(
-            workspace_id=None,
-            created_by_user_id=env["user"].id,
-            name=f"qa_{uuid.uuid4().hex[:6]}",
-            display_name="测试工程师",
-            category="qa",
-            is_builtin=True,
-        )
-        db.session.add(template)
-        db.session.flush()
-        executor = Agent(
-            name=f"agent_{uuid.uuid4().hex[:6]}",
-            workspace_id=env["org"].id,
-            owner_id=env["user"].id,
-            creator_user_id=env["user"].id,
-            status="ACTIVE",
-            runner_enabled=True,
-            role_template_id=template.id,
-        )
-        db.session.add(executor)
-        db.session.commit()
-        env["executor"] = executor
-        env["executor_template"] = template
-        return env
 
     def test_create_with_director_persists_and_returns_director(self, client, team):
         resp = client.post(
@@ -750,3 +752,106 @@ class TestGuardrailUpdates:
             f"{BASE_URL}/goal-loops/{loop_id}", json={"rounds_limit": 10}, headers=headers
         )
         assert resp.status_code == 403
+
+
+class TestCloudExecutorLinkage:
+    """编排↔云端联动：managed_runner 执行者派发前按需拉起 Pod；失败降级不阻塞。"""
+
+    def _install_fake_controller(self, monkeypatch, raise_on_ensure=False):
+        import types
+        calls = []
+
+        class _FakeController:
+            def ensure_agent_pod(self, agent, agent_key):
+                calls.append({"agent_id": agent.id})
+                if raise_on_ensure:
+                    raise RuntimeError("no cluster")
+                return {"status": "created"}
+
+        fake_mod = types.SimpleNamespace(get_agent_controller=lambda: _FakeController())
+        monkeypatch.setattr(
+            "services.agent_runtime_controller.get_agent_controller",
+            fake_mod.get_agent_controller,
+        )
+        return calls
+
+    def _make_key(self, monkeypatch, key_value="agk_cloud"):
+        import types
+        row = types.SimpleNamespace(reveal=lambda: key_value)
+        fake_agent_key = types.SimpleNamespace()
+        fake_agent_key.query = types.SimpleNamespace(
+            filter_by=lambda **kw: types.SimpleNamespace(first=lambda: row)
+        )
+        import models
+        monkeypatch.setattr(models, "AgentKey", fake_agent_key, raising=True)
+        return row
+
+    def _llm_with_role_step(self, monkeypatch):
+        from services import goal_loop_service as svc
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+
+        def fake_llm(loop, system_prompt, user_prompt, **kwargs):
+            if "拆解为有序" in system_prompt:
+                return {"steps": [{"title": "s1", "content": "c1", "role": "测试工程师"}]}
+            return {"action": "complete", "reason": "完成"}
+
+        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+
+    def test_managed_runner_executor_gets_pod_ensured(
+        self, _isolated_app, team, monkeypatch
+    ):
+        from services import goal_loop_service as svc
+        from models import AgentTaskAttempt, Task
+
+        self._llm_with_role_step(monkeypatch)
+        calls = self._install_fake_controller(monkeypatch)
+        self._make_key(monkeypatch)
+        team["executor"].execution_mode = "managed_runner"
+        db.session.commit()
+
+        loop = svc.create_loop(
+            project=team["project"], agent=team["agent"],
+            title="云端联动", goal_text="目标E",
+            created_by=team["user"].id,
+        )
+        assert calls == [{"agent_id": team["executor"].id}]
+        # 任务照常派发给执行者
+        attempt = AgentTaskAttempt.query.filter_by(task_id=svc.loop_tasks(loop.id)[0].id).first()
+        assert attempt is not None and attempt.agent_id == team["executor"].id
+
+    def test_cloud_ensure_failure_degrades_gracefully(
+        self, _isolated_app, team, monkeypatch
+    ):
+        """拉起 Pod 失败（如无集群）→ 任务仍按路由派发，循环不中断。"""
+        from services import goal_loop_service as svc
+        from models import AgentTaskAttempt
+
+        self._llm_with_role_step(monkeypatch)
+        self._install_fake_controller(monkeypatch, raise_on_ensure=True)
+        self._make_key(monkeypatch)
+        team["executor"].execution_mode = "managed_runner"
+        db.session.commit()
+
+        loop = svc.create_loop(
+            project=team["project"], agent=team["agent"],
+            title="降级", goal_text="目标G",
+            created_by=team["user"].id,
+        )
+        attempt = AgentTaskAttempt.query.filter_by(task_id=svc.loop_tasks(loop.id)[0].id).first()
+        assert attempt is not None and attempt.agent_id == team["executor"].id
+
+    def test_external_pull_mode_skips_cloud_linkage(
+        self, _isolated_app, team, monkeypatch
+    ):
+        from services import goal_loop_service as svc
+
+        self._llm_with_role_step(monkeypatch)
+        calls = self._install_fake_controller(monkeypatch)
+        self._make_key(monkeypatch)
+        # executor 保持 external_pull（默认）
+        svc.create_loop(
+            project=team["project"], agent=team["agent"],
+            title="本地模式", goal_text="目标L",
+            created_by=team["user"].id,
+        )
+        assert calls == []
