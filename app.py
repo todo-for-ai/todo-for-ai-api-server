@@ -388,6 +388,14 @@ try:
 except Exception as _e:
     print(f'⚠️ 编排调度器启动失败: {_e}')
 
+# Start the GoalLoop multi-day watchdog if enabled (GOAL_LOOP_WATCHDOG_ENABLED=true)
+try:
+    from core.goal_loop_watchdog import start_goal_loop_watchdog
+    if start_goal_loop_watchdog(app):
+        print('🐕 目标循环看门狗已启动（多日续航巡检）')
+except Exception as _e:
+    print(f'⚠️ 目标循环看门狗启动失败: {_e}')
+
 
 if __name__ == '__main__':
     # 开发服务器

@@ -50,6 +50,7 @@ class GoalLoop(BaseModel):
     status = Column(Enum(GoalLoopStatus), nullable=False, default=GoalLoopStatus.RUNNING, index=True, comment='循环状态')
     advancing = Column(Integer, nullable=False, default=0, comment='推进中标记（CAS 防并发双发任务）')
     rounds_limit = Column(Integer, nullable=False, default=10, comment='最大轮数护栏')
+    time_budget_hours = Column(Integer, nullable=True, comment='时长预算（小时），NULL=不限时；超时后不再推进新轮次')
     stall_limit = Column(Integer, nullable=False, default=2, comment='连续受阻容忍次数')
     stall_count = Column(Integer, nullable=False, default=0, comment='当前连续受阻计数')
 
@@ -82,4 +83,5 @@ class GoalLoop(BaseModel):
         data['plan_index'] = self.plan_index or 0
         data['plan_revision'] = self.plan_revision or 0
         data['director_agent_id'] = self.director_agent_id
+        data['time_budget_hours'] = self.time_budget_hours
         return data

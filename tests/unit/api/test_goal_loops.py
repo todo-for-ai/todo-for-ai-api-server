@@ -526,3 +526,126 @@ class TestMultiAgentOrchestration:
         data = resp.get_json()["data"]
         assert data["tasks"][0]["agent_id"] == team["executor"].id
         assert data["director_agent_id"] is None
+
+
+class TestMultiDayEndurance:
+    """多日续航：时长预算护栏 + 看门狗（卡死轮次处置 / 漏触发自愈）。"""
+
+    def test_create_persists_time_budget_and_stall_limit(self, client, env):
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={
+                "title": "长跑", "goal_text": "连续跑几天攻克目标",
+                "rounds_limit": 500, "time_budget_hours": 72, "stall_limit": 10,
+            },
+            headers=env["headers"],
+        )
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert data["time_budget_hours"] == 72
+        assert data["rounds_limit"] == 500
+
+    def test_create_rejects_out_of_range_guards(self, client, env):
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={"title": "x", "goal_text": "y", "rounds_limit": 5001},
+            headers=env["headers"],
+        )
+        assert resp.status_code == 400
+        resp = client.post(
+            f"{BASE_URL}/{env['project'].id}/goal-loops",
+            json={"title": "x", "goal_text": "y", "time_budget_hours": 1000},
+            headers=env["headers"],
+        )
+        assert resp.status_code == 400
+
+    def _backdate(self, loop, hours):
+        from datetime import datetime, timedelta
+        loop.started_at = datetime.utcnow() - timedelta(hours=hours)
+        db.session.commit()
+
+    def test_time_budget_trips_limit_reached_on_advance(self, client, env):
+        from services import goal_loop_service as svc
+        loop = svc.create_loop(
+            project=env["project"], agent=env["agent"],
+            title="超时", goal_text="目标T", created_by=env["user"].id,
+            time_budget_hours=48,
+        )
+        self._backdate(loop, 72)
+        result = svc.maybe_advance(loop.id)
+        db.session.expire(loop)
+        assert result["reason"] == "time_budget_exhausted"
+        assert loop.status.value == "limit_reached"
+        assert "时长预算" in (loop.last_error or "")
+
+    def test_review_prompt_includes_remaining_budget(self, _isolated_app, env, monkeypatch):
+        from services import goal_loop_service as svc
+        monkeypatch.setenv("GOAL_LOOP_PLANNER", "llm")
+        captured = {}
+
+        def fake_llm(loop, system_prompt, user_prompt, **kwargs):
+            captured["user"] = user_prompt
+            return {"steps": [{"title": "s", "content": "c"}]}
+
+        monkeypatch.setattr(svc, "_llm_call", fake_llm)
+        loop = svc.create_loop(
+            project=env["project"], agent=env["agent"],
+            title="预算上下文", goal_text="目标B", created_by=env["user"].id,
+            time_budget_hours=24,
+        )
+        # 拆解发生在开跑前 → 显示「时长预算（尚未开跑）」变体；开跑后为「剩余时间预算」
+        assert "时长预算：24 小时" in captured["user"]
+
+    def test_watchdog_cancels_stuck_round_and_counts_stall(self, _isolated_app, env, monkeypatch):
+        from datetime import datetime, timedelta
+        from services import goal_loop_service as svc
+        from models import Task
+        monkeypatch.setenv("GOAL_LOOP_STUCK_TASK_HOURS", "6")
+        loop = svc.create_loop(
+            project=env["project"], agent=env["agent"],
+            title="卡死", goal_text="目标K", created_by=env["user"].id,
+        )
+        task = db.session.get(Task, svc.loop_tasks(loop.id)[0].id)
+        task.updated_at = datetime.utcnow() - timedelta(hours=10)
+        db.session.commit()
+
+        result = svc.watchdog_sweep()
+        db.session.expire(loop)
+        db.session.expire(task)
+        assert result["stuck_cancelled"] == 1
+        assert task.status.value == "cancelled"
+        # scripted 评审对失败轮 blocked → 受阻计数 1（未达默认 stall_limit=2，仍在运行）
+        assert loop.stall_count == 1
+        assert loop.status.value == "running"
+
+    def test_watchdog_kicks_missed_trigger(self, _isolated_app, env, monkeypatch):
+        """模拟服务重启丢触发：轮次任务已终态但循环没推进 → sweep 幂等补推进。"""
+        from services import goal_loop_service as svc
+        from models import Task, TaskStatus
+        monkeypatch.setenv("GOAL_LOOP_STUCK_TASK_HOURS", "6")
+        loop = svc.create_loop(
+            project=env["project"], agent=env["agent"],
+            title="漏触发", goal_text="目标M", created_by=env["user"].id,
+        )
+        task = db.session.get(Task, svc.loop_tasks(loop.id)[0].id)
+        task.status = TaskStatus.DONE
+        db.session.commit()
+        # 不调用 notify_task_finished，直接 sweep
+        result = svc.watchdog_sweep()
+        assert result["kicked"] >= 1
+        db.session.expire(loop)
+        assert len(svc.loop_tasks(loop.id)) == 2
+
+    def test_watchdog_finishes_time_exhausted_loop(self, _isolated_app, env):
+        from services import goal_loop_service as svc
+        loop = svc.create_loop(
+            project=env["project"], agent=env["agent"],
+            title="巡检超时", goal_text="目标W", created_by=env["user"].id,
+            time_budget_hours=24,
+        )
+        self._backdate(loop, 30)
+        result = svc.watchdog_sweep()
+        db.session.expire(loop)
+        assert result["time_exhausted"] == 1
+        assert loop.status.value == "limit_reached"
+        assert "时长预算" in (loop.last_error or "")

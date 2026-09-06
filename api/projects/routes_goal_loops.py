@@ -114,12 +114,24 @@ def create_goal_loop(project_id: int):
         goal_text = (data.get('goal_text') or '').strip()
         done_definition = (data.get('done_definition') or '').strip()
         rounds_limit = data.get('rounds_limit') or 10
+        time_budget_hours = data.get('time_budget_hours')
+        stall_limit = data.get('stall_limit')
         agent_id = data.get('agent_id')
 
         if not title:
             return ApiResponse.error('title is required', 400).to_response()
         if not goal_text:
             return ApiResponse.error('goal_text is required', 400).to_response()
+        # 长跑护栏上限校验（服务层再做钳制）
+        try:
+            if rounds_limit is not None and not (1 <= int(rounds_limit) <= 2000):
+                return ApiResponse.error('rounds_limit must be within 1..2000', 400).to_response()
+            if time_budget_hours not in (None, '', 0) and not (1 <= int(time_budget_hours) <= 720):
+                return ApiResponse.error('time_budget_hours must be within 1..720 (30 days)', 400).to_response()
+            if stall_limit not in (None, '', 0) and not (1 <= int(stall_limit) <= 50):
+                return ApiResponse.error('stall_limit must be within 1..50', 400).to_response()
+        except (TypeError, ValueError):
+            return ApiResponse.error('rounds_limit/time_budget_hours/stall_limit must be integers', 400).to_response()
 
         agent = None
         if agent_id:
@@ -171,6 +183,8 @@ def create_goal_loop(project_id: int):
             rounds_limit=rounds_limit,
             created_by=current_user.id,
             director=director,
+            time_budget_hours=time_budget_hours,
+            stall_limit=stall_limit,
         )
         return ApiResponse.success(
             data=_loop_with_tasks(loop), message='Goal loop created'

@@ -29,10 +29,38 @@ ACTIVE_TASK_STATUSES = {TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVI
 
 DEFAULT_ROUNDS_LIMIT = 10
 DEFAULT_STALL_LIMIT = 2
+MAX_ROUNDS_LIMIT = 2000
+DEFAULT_STUCK_TASK_HOURS = 6
 
 
 def _naive_utc_now():
     return datetime.utcnow()
+
+
+def _stuck_task_hours() -> float:
+    """看门狗判定轮次卡死的小时数（GOAL_LOOP_STUCK_TASK_HOURS）。"""
+    try:
+        return float(os.getenv('GOAL_LOOP_STUCK_TASK_HOURS', '') or DEFAULT_STUCK_TASK_HOURS)
+    except ValueError:
+        return DEFAULT_STUCK_TASK_HOURS
+
+
+def _time_budget_exceeded(loop) -> bool:
+    if not loop.time_budget_hours or not loop.started_at:
+        return False
+    elapsed = _naive_utc_now() - loop.started_at
+    return elapsed.total_seconds() >= loop.time_budget_hours * 3600
+
+
+def _budget_line(loop) -> str:
+    """给规划器/评审器的剩余时间预算上下文。"""
+    if not loop.time_budget_hours:
+        return ''
+    if not loop.started_at:
+        return f'时长预算：{loop.time_budget_hours} 小时（尚未开跑）\n'
+    elapsed = (_naive_utc_now() - loop.started_at).total_seconds() / 3600.0
+    remaining = max(0.0, loop.time_budget_hours - elapsed)
+    return f'剩余时间预算：{remaining:.1f}/{loop.time_budget_hours} 小时\n'
 
 
 # ── 查询助手 ──
@@ -200,6 +228,7 @@ def _decompose(loop) -> list:
     user_prompt = (
         f'{role_line}'
         f'{roles_line}'
+        f'{_budget_line(loop)}'
         f'目标：{loop.goal_text}\n'
         f'完成标准：{loop.done_definition or "（未明确，由你判断）"}\n'
         f'轮数上限：{loop.rounds_limit}'
@@ -228,6 +257,7 @@ def _review(loop, last_status: str) -> dict:
     user_prompt = (
         f'{role_line}'
         f'{roles_line}'
+        f'{_budget_line(loop)}'
         f'目标：{loop.goal_text}\n'
         f'完成标准：{loop.done_definition or "（未明确，由你判断）"}\n'
         f'已执行轮数：{rounds_done(loop.id)}/{loop.rounds_limit}\n'
@@ -311,6 +341,11 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         _finish(loop, GoalLoopStatus.LIMIT_REACHED,
                 last_error=f'轮数上限 {loop.rounds_limit} 已耗尽，目标未宣告完成')
         return {'advanced': False, 'reason': 'rounds_limit'}
+
+    if _time_budget_exceeded(loop):
+        _finish(loop, GoalLoopStatus.LIMIT_REACHED,
+                last_error=f'时长预算 {loop.time_budget_hours} 小时已耗尽，目标未宣告完成')
+        return {'advanced': False, 'reason': 'time_budget_exhausted'}
 
     loop_tasks_all = loop_tasks(loop.id)
     active = [t for t in loop_tasks_all if t.status in ACTIVE_TASK_STATUSES]
@@ -511,7 +546,15 @@ def _auto_assign(task, agent: Agent = None):
 
 def create_loop(*, project: Project, agent: Agent, title: str, goal_text: str,
                 done_definition: str = None, rounds_limit: int = DEFAULT_ROUNDS_LIMIT,
-                created_by: int = None, director: Agent = None) -> GoalLoop:
+                created_by: int = None, director: Agent = None,
+                time_budget_hours: int = None, stall_limit: int = DEFAULT_STALL_LIMIT) -> GoalLoop:
+    def _clamp(value, lo, hi, default):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(lo, min(hi, value))
+
     loop = GoalLoop(
         workspace_id=project.organization_id,
         project_id=project.id,
@@ -521,8 +564,9 @@ def create_loop(*, project: Project, agent: Agent, title: str, goal_text: str,
         goal_text=goal_text,
         done_definition=(done_definition or '').strip() or None,
         status=GoalLoopStatus.RUNNING,
-        rounds_limit=max(1, int(rounds_limit or DEFAULT_ROUNDS_LIMIT)),
-        stall_limit=DEFAULT_STALL_LIMIT,
+        rounds_limit=_clamp(rounds_limit, 1, MAX_ROUNDS_LIMIT, DEFAULT_ROUNDS_LIMIT),
+        time_budget_hours=_clamp(time_budget_hours, 1, 24 * 30, None) if time_budget_hours else None,
+        stall_limit=_clamp(stall_limit, 1, 50, DEFAULT_STALL_LIMIT),
         created_by=created_by,
     )
     db.session.add(loop)
@@ -564,3 +608,75 @@ def set_status(loop_id: int, status: GoalLoopStatus) -> GoalLoop:
         loop.finished_at = _naive_utc_now()
     db.session.commit()
     return loop
+
+
+# ── 多日续航看门狗 ──
+
+def _abandon_task_runtime(task_id: int, reason: str):
+    """作废任务在途的运行时凭证（租约/attempt），避免 runtime 继续持有。"""
+    from models import AgentTaskAttempt, AgentTaskAttemptState, AgentTaskLease
+    AgentTaskLease.query.filter_by(task_id=task_id, active=True).update({'active': False})
+    AgentTaskAttempt.query.filter(
+        AgentTaskAttempt.task_id == task_id,
+        AgentTaskAttempt.state == AgentTaskAttemptState.ACTIVE,
+    ).update({'state': AgentTaskAttemptState.ABORTED, 'failure_code': reason[:64]})
+
+
+def watchdog_sweep(limit=200) -> dict:
+    """多日续航巡检（幂等，供定时任务/手动 kick 调用）。
+
+    ① 时长预算耗尽的 RUNNING 循环 → 终态 LIMIT_REACHED；
+    ② 卡死轮次：活跃任务超过 N 小时无活动（agent 掉线/租约失效）→ 任务置
+       cancelled 并作废在途租约 → 走既有评审兜底（blocked → 受阻计数）；
+    ③ 漏触发自愈：RUNNING 且无活跃任务（如重启丢失触发）→ 幂等推进
+       （maybe_advance 自带 CAS 与护栏，重复调用安全）。
+    """
+    now = _naive_utc_now()
+    stuck_hours = _stuck_task_hours()
+    result = {'checked': 0, 'time_exhausted': 0, 'stuck_cancelled': 0, 'kicked': 0}
+
+    loops = (
+        GoalLoop.query.filter(GoalLoop.status == GoalLoopStatus.RUNNING)
+        .order_by(GoalLoop.id)
+        .limit(limit)
+        .all()
+    )
+    for loop in loops:
+        result['checked'] += 1
+        db.session.expire(loop)
+        if loop.status != GoalLoopStatus.RUNNING:
+            continue
+
+        # ① 时长预算
+        if _time_budget_exceeded(loop):
+            _finish(loop, GoalLoopStatus.LIMIT_REACHED,
+                    last_error=f'时长预算 {loop.time_budget_hours} 小时已耗尽，目标未宣告完成')
+            result['time_exhausted'] += 1
+            continue
+
+        tasks = loop_tasks(loop.id)
+        active = [t for t in tasks if t.status in ACTIVE_TASK_STATUSES]
+
+        if active:
+            # ② 卡死轮次：最老活跃任务超过阈值小时无活动
+            stamps = [t.updated_at or t.created_at for t in active]
+            stamps = [s for s in stamps if s is not None]
+            if not stamps:
+                continue
+            idle_hours = (now - min(stamps)).total_seconds() / 3600.0
+            if idle_hours < stuck_hours:
+                continue
+            for t in active:
+                _abandon_task_runtime(t.id, 'WATCHDOG_STUCK')
+                t.status = TaskStatus.CANCELLED
+            db.session.commit()
+            result['stuck_cancelled'] += len(active)
+            for t in active:
+                notify_task_finished(t.id)
+            continue
+
+        # ③ 漏触发自愈（无活跃任务时幂等推进）
+        kick = maybe_advance(loop.id)
+        if kick.get('advanced'):
+            result['kicked'] += 1
+    return result
