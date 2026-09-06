@@ -95,4 +95,5 @@
 ---
 
 ## 4. 变更记录
+- 2026-09-07 v2：**Phase 2 交付**——工作区运行时配额（workspace_runtime_settings 表 + GET/PUT API + 控制器接入）、空闲 Pod 自动回收（recycle_idle_pods 挂入看门狗调度）、kind 真集群 E2E（deploy/k8s/ 部署清单 + scripts/e2e_cloud_runtime.py：spawn→pull→commit→空闲回收→terminate 九步断言全过）。真集群 E2E 当场抓出并修复三个问题：RuntimeClass "gvisor" 硬编码（kind 上直接 403）、imagePullPolicy Always 破坏本地镜像、spawn 409 分支 ApiResponse.error 位置参数 TypeError。
 - 2026-09-06 v1：初稿；Phase 1（F1-F4）随本文同批落地。

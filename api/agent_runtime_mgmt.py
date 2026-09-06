@@ -50,7 +50,7 @@ def spawn_agent_runtime(workspace_id, agent_id):
         return ApiResponse.error(
             'Agent runtime already exists',
             409,
-            {'existing': existing_status}
+            error_details={'existing': existing_status}
         ).to_response()
 
     # 获取或创建 Agent Key
@@ -208,3 +208,71 @@ def list_runtime_pods(workspace_id):
         'pods': pods,
         'total': len(pods),
     }).to_response()
+
+
+# ── 工作区运行时配额与回收策略（Phase 2）──
+
+@agent_runtime_mgmt_bp.route(
+    '/workspaces/<int:workspace_id>/runtime/settings',
+    methods=['GET']
+)
+@unified_auth_required
+def get_workspace_runtime_settings(workspace_id):
+    """查看工作区运行时配额（在岗 Pod 上限 / 空闲回收阈值）。"""
+    from models import Organization
+    from services.workspace_runtime_policy import get_workspace_runtime_setting
+
+    user = get_current_user()
+    workspace = db.session.get(Organization, workspace_id)
+    if not workspace:
+        return ApiResponse.not_found('Workspace not found').to_response()
+    from api.agent_common import ensure_workspace_access
+    err = ensure_workspace_access(user, workspace)
+    if err:
+        return err
+
+    controller = get_agent_controller()
+    setting = get_workspace_runtime_setting(controller, workspace_id)
+    return ApiResponse.success({'settings': setting}).to_response()
+
+
+@agent_runtime_mgmt_bp.route(
+    '/workspaces/<int:workspace_id>/runtime/settings',
+    methods=['PUT']
+)
+@unified_auth_required
+def update_workspace_runtime_settings(workspace_id):
+    """设置工作区运行时配额：max_pods / idle_timeout_minutes（0=不限/不回收）。"""
+    from models import Organization
+    from services.workspace_runtime_policy import (
+        get_workspace_runtime_setting,
+        set_workspace_runtime_setting,
+    )
+
+    user = get_current_user()
+    workspace = db.session.get(Organization, workspace_id)
+    if not workspace:
+        return ApiResponse.not_found('Workspace not found').to_response()
+    from api.agent_common import ensure_workspace_access
+    err = ensure_workspace_access(user, workspace)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    max_pods = data.get('max_pods')
+    idle_timeout = data.get('idle_timeout_minutes')
+    try:
+        if max_pods is not None and not (0 <= int(max_pods) <= 100):
+            return ApiResponse.error('max_pods must be within 0..100', 400).to_response()
+        if idle_timeout is not None and not (0 <= int(idle_timeout) <= 10080):
+            return ApiResponse.error('idle_timeout_minutes must be within 0..10080', 400).to_response()
+    except (TypeError, ValueError):
+        return ApiResponse.error('max_pods/idle_timeout_minutes must be integers', 400).to_response()
+
+    set_workspace_runtime_setting(
+        workspace_id,
+        max_pods=max_pods,
+        idle_timeout_minutes=idle_timeout,
+    )
+    setting = get_workspace_runtime_setting(get_agent_controller(), workspace_id)
+    return ApiResponse.success({'settings': setting}).to_response()

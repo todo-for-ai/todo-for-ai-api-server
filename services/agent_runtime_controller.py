@@ -50,6 +50,8 @@ class AgentRuntimeController:
     SHARED_WORKSPACE_PVC_PREFIX = 'todo4ai-ws'
     # 单工作区同时运行的 Agent Pod 上限（防成本失控；0 = 不限，可被 Config 覆盖）
     MAX_PODS_PER_WORKSPACE = 10
+    # Agent Pod 空闲回收阈值（分钟；0 = 不回收，可被 Config/工作区设置覆盖）
+    POD_IDLE_TIMEOUT_MINUTES = 30
 
     # 沙箱资源配置
     SANDBOX_RESOURCES = {
@@ -247,7 +249,9 @@ class AgentRuntimeController:
         if existing and existing.get('phase') in ('Running', 'Pending'):
             return {'status': 'already_running', 'pod': existing}
 
-        cap = int(getattr(Config, 'K8S_MAX_PODS_PER_WORKSPACE', 0) or self.MAX_PODS_PER_WORKSPACE)
+        # 工作区配额：DB 设置 > Config > 类默认（services/workspace_runtime_policy.py）
+        from services.workspace_runtime_policy import get_workspace_runtime_setting
+        cap = get_workspace_runtime_setting(self, agent.workspace_id)['max_pods']
         if cap > 0:
             running = [
                 p for p in self._list_workspace_pods(agent.workspace_id)
@@ -387,6 +391,13 @@ class AgentRuntimeController:
             'runtime-type': runtime_type,
         }
 
+        # 运行时环境适配（沙箱/镜像拉取策略因集群而异，均可被环境变量覆盖：
+        # K8S_AGENT_RUNTIME_CLASS（如 gvisor）/ K8S_IMAGE_PULL_POLICY（Always））
+        runtime_class = os.getenv('K8S_AGENT_RUNTIME_CLASS') or getattr(
+            Config, 'K8S_AGENT_RUNTIME_CLASS', None)
+        image_pull_policy = os.getenv('K8S_IMAGE_PULL_POLICY') or getattr(
+            Config, 'K8S_IMAGE_PULL_POLICY', 'IfNotPresent')
+
         # 创建 Pod
         return V1Pod(
             api_version='v1',
@@ -400,7 +411,7 @@ class AgentRuntimeController:
                 }
             ),
             spec=V1PodSpec(
-                runtime_class_name='gvisor',  # 使用 gVisor 沙箱
+                runtime_class_name=runtime_class,
                 restart_policy='OnFailure',
                 termination_grace_period_seconds=30,
                 security_context=kubernetes.client.V1PodSecurityContext(
@@ -414,7 +425,7 @@ class AgentRuntimeController:
                     V1Container(
                         name='agent-runtime',
                         image=image,
-                        image_pull_policy='Always',
+                        image_pull_policy=image_pull_policy,
                         env=env,
                         resources=V1ResourceRequirements(
                             requests=resources['requests'],
@@ -596,6 +607,17 @@ class AgentRuntimeController:
             pods = self.core_v1.list_namespaced_pod(
                 namespace=self.namespace,
                 label_selector=f'app=todo4ai-agent,agent-id={agent_id}'
+            )
+            return pods.items
+        except ApiException:
+            return []
+
+    def _list_all_agent_pods(self) -> List[V1Pod]:
+        """命名空间内全部 Agent Pod（空闲回收巡检用）"""
+        try:
+            pods = self.core_v1.list_namespaced_pod(
+                namespace=self.namespace,
+                label_selector='app=todo4ai-agent'
             )
             return pods.items
         except ApiException:

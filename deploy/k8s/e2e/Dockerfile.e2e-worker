@@ -1,0 +1,27 @@
+# E2E worker 镜像：runtime 拉取协议 + custom CLI 引擎（仅用于真集群 E2E 验证）
+# 构建上下文 = agent-runtime 仓库根（本地验证用，含未提交的 cli_engines 亦可）
+#
+#   docker build -f deploy/k8s/e2e/Dockerfile.e2e-worker \
+#     -t todo4ai/e2e-worker:latest ../agent-runtime
+FROM python:3.11-slim
+
+WORKDIR /app/src
+
+# 运行时完整依赖（与 agent-runtime requirements.txt 一致）
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+COPY src/ /app/src/
+
+# runtime 双布局：src 作为 top-level（python -m runtime.main 从 /app/src 运行）
+ENV PYTHONPATH=/app/src \
+    PYTHONUNBUFFERED=1 \
+    CLI_AGENT_ENGINE=custom \
+    CUSTOM_COMMAND="echo E2E-cloud-work:{prompt}" \
+    OPENCLAW_MOCK=true
+
+WORKDIR /app/src
+
+# 运行参数全部来自环境变量（AGENT_KEY / API_BASE_URL / CLI_AGENT_ENGINE /
+# CUSTOM_COMMAND 由控制器 Secret 与 Config 注入）
+CMD ["python", "-m", "runtime.main"]

@@ -35,11 +35,21 @@ def _watchdog_loop(app, interval):
         try:
             with app.app_context():
                 result = watchdog_sweep()
+                summary = dict(result)
+                # 云端空闲 Pod 回收（无集群配置时内部静默跳过）
+                try:
+                    from services.workspace_runtime_policy import recycle_idle_pods
+                    from services.agent_runtime_controller import get_agent_controller
+                    recycle = recycle_idle_pods(get_agent_controller())
+                    summary['pods_checked'] = recycle.get('checked', 0)
+                    summary['pods_recycled'] = recycle.get('recycled', 0)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[GOAL_LOOP_WATCHDOG] Pod recycle skipped: %s", e)
                 global _last_run
                 from datetime import datetime
                 _last_run = {
                     'finished_at': datetime.utcnow().isoformat(),
-                    'summary': result,
+                    'summary': summary,
                 }
                 if any(result[k] for k in ('time_exhausted', 'stuck_cancelled', 'kicked')):
                     logger.info("[GOAL_LOOP_WATCHDOG] %s", result)

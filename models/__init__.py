@@ -64,6 +64,7 @@ from .notification_delivery import NotificationDelivery, NotificationDeliverySta
 from .notification_event import NotificationEvent
 from .user_notification import UserNotification
 from .agent_role_template import AgentRoleTemplate, AgentRoleTemplateStatus
+from .workspace_runtime_setting import WorkspaceRuntimeSetting
 from .agent_team import AgentTeam, AgentTeamStatus, AgentTeamMember, AgentTeamMemberRole
 from .agent_team_project import AgentTeamProject
 from .team_task_orchestration import (
@@ -218,6 +219,7 @@ __all__ = [
     'NotificationEvent',
     'UserNotification',
     'AgentRoleTemplate',
+    'WorkspaceRuntimeSetting',
     'AgentRoleTemplateStatus',
     'AgentTeam',
     'AgentTeamStatus',

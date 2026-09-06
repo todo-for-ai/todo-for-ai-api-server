@@ -1,0 +1,37 @@
+# api-server 以 in-cluster 方式运行时所需的最小权限；
+# 本机开发（kubeconfig）时，kube 用户需具备同等权限。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: todo4ai-controller
+  namespace: todo4ai-agents
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: todo4ai-controller
+  namespace: todo4ai-agents
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: todo4ai-controller
+  namespace: todo4ai-agents
+subjects:
+  - kind: ServiceAccount
+    name: todo4ai-controller
+    namespace: todo4ai-agents
+roleRef:
+  kind: Role
+  name: todo4ai-controller
+  apiGroup: rbac.authorization.k8s.io
