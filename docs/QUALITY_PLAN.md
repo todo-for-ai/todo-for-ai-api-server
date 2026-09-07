@@ -294,13 +294,15 @@
 
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
-**门禁**：全量单测 396（基线）→ **871 passed**（17 个迭代全部绿灯后）。
+**门禁**：全量单测 396（基线）→ **950 passed**（19 个迭代全部绿灯后）。
 
-**第二轮（迭代 14-17）补充**：knowledge_curation / review_gate /
+**第二轮（迭代 14-19）补充**：knowledge_curation / review_gate /
 failure_recovery / deploy_check / jwt_refresh / interaction_contract /
-mcp_shared / github_app / sso / budget_service 全部收口至 100%（约 122 个
-新用例）。剩余已知未满覆盖：skill_profile 95.3%、insight_actions 96.4%、
-marketplace 96.2%（差距 <5%，低优先）；他人 WIP 区不测。
+mcp_shared / github_app / sso / budget_service / skill_profile /
+insight_actions / marketplace 全部收口至 100%；auth API 43% → 99%
+（缺 1 行死行）。合计约 190 个新用例。剩余大缺口文件均为他人 WIP
+（api/agents/*）或巨型路由模块（openai_compatible / context_rules /
+custom_prompts / agent_teams 等，各 200-450 语句），留待后续轮次。
 
 **覆盖率终值（coverage JSON 度量，services+api 合计 45% → 52.26%）**：
 本夜触碰的全部 39 个模块 **100% 行覆盖**，唯一例外
