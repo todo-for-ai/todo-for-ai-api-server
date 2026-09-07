@@ -86,13 +86,11 @@ def list_context_rules():
                 ContextRule.content.like(search_term)
             )
         
-        # 排序
+        # 排序（注意：模型无 rule_type 列，历史版本此处 500）
         if args['sort_by'] == 'name':
             order_column = ContextRule.name
         elif args['sort_by'] == 'priority':
             order_column = ContextRule.priority
-        elif args['sort_by'] == 'rule_type':
-            order_column = ContextRule.rule_type
         elif args['sort_by'] == 'updated_at':
             order_column = ContextRule.updated_at
         else:
@@ -465,19 +463,25 @@ def get_global_context_rules():
         if cached is not None:
             return ApiResponse.success(cached, "Global context rules retrieved successfully").to_response()
 
-        # 构建查询 - 获取全局规则（is_global=True 或 project_id为空且is_public=True）
+        # 全局规则 = project_id 为空（is_global 的真实含义）。
+        # 注意：ContextRule.is_global 是 Python property，不能用于 SQL 过滤
+        # （原写法 ContextRule.is_global == True 恒为 False，导致本人全局规则
+        # 永远查不出来）。可见性 = 本人 或 已公开。
         query = ContextRule.query.filter(
-            db.or_(
-                ContextRule.is_global == True,
-                db.and_(
-                    ContextRule.project_id.is_(None),
-                    ContextRule.is_public == True
-                )
+            db.and_(
+                ContextRule.project_id.is_(None),
+                db.or_(
+                    ContextRule.is_public == True,
+                    ContextRule.user_id == current_user.id,
+                ),
             )
         )
 
-        # 只显示激活的规则
-        if args.get('is_active') is not False:
+        # 默认只显示激活的规则；显式 is_active=false 时包含未激活
+        # （原写法从 get_request_args 取值，该字典无此键 → 过滤永远生效，
+        #  is_active=false 参数形同虚设）
+        is_active_param = request.args.get('is_active')
+        if is_active_param is None or is_active_param.lower() != 'false':
             query = query.filter(ContextRule.is_active == True)
 
         # 排序

@@ -292,6 +292,23 @@
   按计划纪律注明不强凑）。**注意本仓库 `.env` 会把 DOCKER_ENV 等灌入
   os.environ，分支类测试必须显式 delenv/setenv 固定环境**。
 
+### 迭代 20（2026-09-08 16:50-18:00）context_rules API 17% → 100% ✅
+- `api/context_rules.py`（292 语句，12 端点 + 双级缓存）此前 17% 覆盖、
+  零专项测试。新增 `tests/unit/api/test_context_rules_api.py` 46 用例：
+  列表全部分支（项目权限 403/scope/布尔过滤/搜索/四种排序/分页/项目信息
+  批量装配）、创建校验矩阵、单查/更新/删除属主校验与异常兜底、
+  activate/deactivate、build-context、规则广场与复制四分支、全局规则
+  （缓存回放写法：删库后二次请求仍 200）、merged/preview。
+- **修了 3 个真 bug（全部无测试掩护）**：
+  1. `/global` 用 `ContextRule.is_global == True` 过滤——`is_global` 是
+     Python property 而非列，SQL 里恒 False → 本人全局规则永远查不出来；
+     改为 `project_id IS NULL` + 可见性（本人或已公开）；
+  2. `?is_active=false` 参数形同虚设——`get_request_args` 根本不含该键，
+     过滤永远生效；改为从 `request.args` 直读；
+  3. `sort_by=rule_type` 引用模型不存在的列 → 列表页排序 500；移除死排序键。
+- 覆盖率 **100%**（291/291）。坑：`validate_json_request` 对空 dict `{}`
+  一律 400（`if not data`），"全可选字段"的端点也必须带至少一个字段。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **950 passed**（19 个迭代全部绿灯后）。
