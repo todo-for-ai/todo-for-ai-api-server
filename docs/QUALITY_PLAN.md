@@ -68,7 +68,7 @@
   RuntimeClass/挂载）与 K8s 客户端生命周期管理混杂。
 - 后：抽出纯函数模块 `services/cloud_runtime/manifests.py`（48 行：RUNTIME_IMAGES/
   SANDBOX_RESOURCES/agent_policy/runtime_type/network_mode/build_env_vars/build_pod），
-  控制器 744 → **417 行**，类属性改为别名 + 薄委托，外部行为零变化。
+  控制器 744 → **500 行**（-244；声明式构造全部移出）。
 - 覆盖率：`manifests.py` **100% 行覆盖**（补 google/gemini→google、ollama/local→ollama、
   未知供应商→custom 的运行时映射缺口用例）；`cloud_runtime/__init__.py` 100%。
 - 测试：控制器用例 11 → 12，全量门禁 **439 passed**（上一迭代 438）。
@@ -78,4 +78,52 @@
 - 经验：拆分后的提交物 = 暂存区快照，与跑门禁的工作树仅差他人 WIP hunk 时，
   需确认没有测试真实走进该 hunk 的内部路径（此处 auto_assign_task 在测试里全部被打桩），
   门禁结论才可外推到提交物。
+
+### 迭代 3（2026-09-07 22:00-23:30）agent_runtime_mgmt 薄化 + 隐性 500 修复 ✅
+- 前：`api/agent_runtime_mgmt.py` 279 行，spawn/terminate/status/list/settings 的
+  业务流程（幂等护栏、AgentKey 解密/生成、执行模式落库、配额校验）全写在路由里，
+  且端点级测试为零（整文件覆盖 63%）。
+- 后：业务下沉 `services/cloud_runtime/management.py`（75 行，类型化异常
+  RuntimeManagementError 家族 + spawn_runtime/terminate_runtime/runtime_status/
+  list_runtime_pods/get_update_runtime_settings），路由层 279 → 160 行只剩
+  "找资源 → 鉴权 → 调服务 → 异常映射 HTTP"。
+- **顺带修复隐性 bug**：原 status/list 路由调用的 `user.has_workspace_access()`
+  在整个代码库不存在（必然 AttributeError → 线上 500），因为从未被测试覆盖而潜伏；
+  改为真实存在的 `ensure_workspace_access` 链路。409 响应契约
+  （`error_details.existing`）在重构中原样保留并被测试钉住。
+- 覆盖率：`api/agent_runtime_mgmt.py` 与 `services/cloud_runtime/management.py`
+  均 **100% 行覆盖**；新增 `tests/unit/api/test_agent_runtime_mgmt.py` 27 用例
+  （全端点 401/403/404/409/400/500 分支 + 密钥复用/降级 + 配额校验边界）。
+- 门禁：全量 463 passed + 1 个既有测试的过期 patch 目标修正
+  （`api.agent_runtime_mgmt.get_agent_controller` → `services.cloud_runtime.management.get_agent_controller`，
+  patch 目标跟随符号搬家）。
+
+### 迭代 4（2026-09-07 22:40-23:00）看门狗调度器循环补测 25% → 100% ✅
+- `core/goal_loop_watchdog.py`（56 行）此前仅门控分支被顺带覆盖，主循环
+  （sweep + Pod 回收汇总 + 异常吞噬）、启停幂等、间隔解析全部 0 覆盖。
+- 新增 `tests/unit/core/test_goal_loop_watchdog.py` 14 用例：门控真值表、
+  间隔下限 30s/非法回退、双段假 Event 同步驱动循环恰好一轮（回收计数落
+  last_run、回收失败不杀循环、sweep 异常吞噬）、启动幂等/停止后可重启/
+  停止在首个 wait 即打断（不真等 3600s）。
+- 覆盖率：**100% 行覆盖**（56/56）。纯补测，源码零改动。
+
+### 迭代 5（2026-09-07 23:00-23:50）goal_loops 路由缺口补测 75% → 100% ✅
+- `api/projects/routes_goal_loops.py`（194 行）的 GET 列表端点、kick 端点、
+  以及 title/goal_text/stall_limit 校验、NO_ACTIVE_AGENT、各类 404/403 与
+  服务层异常 → handle_api_error 的分支此前未覆盖。
+- 新增 `tests/unit/api/test_goal_loops_routes_gaps.py` 29 用例，与既有
+  test_goal_loops.py 合并后该文件 **100% 行覆盖**（194/194）。
+- 经验：补缺口测试时"路由的 except 兜底"必须有真实到达异常的路径
+  （列表 500 用例先要有循环存在才会走进取任务的异常点）。
+
+### 迭代 6（2026-09-08 00:00-00:30）controller 生命周期补测 56% → 83%（其余为他人 WIP 区）✅
+- `services/agent_runtime_controller.py`（500 行）Pod 生命周期函数此前仅 56% 语句覆盖：
+  `_init_k8s_client` 两条初始化路径、shared_workspace PVC 确保、Secret/PVC 非 404 重抛、
+  `terminate_agent_pod`（无 Pod/删除成功/删除失败）、`get_agent_pod_status` 真实路径、
+  `_format_pod_status`（含 start_time/conditions 缺省）、list/find 的 ApiException 容错——
+  全部补测。
+- 新增 18 用例（文件内 12 → 30），除 auto_assign_task 区（409-500 行，**并行会话 WIP，
+  按 hunk 纪律不动不测**）外全部行覆盖：83% 语句覆盖，剩余缺失行 100% 落在他人 WIP 函数内。
+- 覆盖率口径说明：该文件的"100%"以待本会话拥有且可改动区域计；auto_assign_task 的
+  org_id 语义修复归原作者，等其提交后再补测收口。
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
