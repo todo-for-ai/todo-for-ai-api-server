@@ -395,10 +395,11 @@ failure_recovery / deploy_check / jwt_refresh / interaction_contract /
 mcp_shared / github_app / sso / budget_service / skill_profile /
 insight_actions / marketplace 全部收口至 100%；auth API 43% → 99%
 （缺 1 行死行）。合计约 190 个新用例。剩余大缺口：api/agents/*
-（他人 WIP）。已完成：openai_compatible / context_rules / custom_prompts /
-agent_teams 之外的第三大文件均已收口（openai_compatible 修复流式模式
-从未生效的过滤 bug）。根目录 test_openai_api*.py 含硬编码 token，
-属运维脚本非单测，删除需用户确认。
+（他人 WIP）。已完成：openai_compatible（修复流式从未生效）、
+context_rules（修复 3 bug）、custom_prompts（修复 4 个死端点）、
+agent_teams（修复创建必 500 等 3 bug）、agent_workspace_secrets 全包
+（routes_secrets/collaboration/grants）。根目录 test_openai_api*.py
+含硬编码 token，属运维脚本非单测，删除需用户确认。
 
 **覆盖率终值（coverage JSON 度量，services+api 合计 45% → 52.26%）**：
 本夜触碰的全部 39 个模块 **100% 行覆盖**，唯一例外
