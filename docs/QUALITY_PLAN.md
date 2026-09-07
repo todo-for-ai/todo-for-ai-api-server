@@ -372,6 +372,20 @@
 - 同包 routes_collaboration.py（447 行）与 routes_grants.py（297 行）留待
   迭代 25。
 
+### 迭代 25（2026-09-09 01:50-03:30）workspace_secrets 协作与授权路由收口 ✅
+- `routes_collaboration.py` 92% → **100%**（211 语句；协作拓扑聚合：
+  出/入边、协作者统计排序、project 过滤、include_inactive 语义——share
+  保留但已吊销 secret 的边仍跳过、悬空 secret_id 的幽灵 share 跳过）
+- `routes_grants.py` 92% → **99%**（155 语句缺 1 行；授权链：创建默认值
+  leased=1 天 100 次/persistent=30 天不限、task 归属工作区校验、
+  attempt 长度、同 agent 拒绝、目标 404/停用 400、状态过滤与
+  include_expired/include_inactive、吊销 409）
+- routes_grants 唯一未覆盖行 255（`return manage_err`）为覆盖率归属异常：
+  同文件同模式已覆盖 8 处，且测试断言了该端点的 403（实测 403 来自
+  unified_auth 层）——按计划纪律注明，不强凑。
+- 新增 `tests/unit/api/test_workspace_secrets_collaboration_grants.py`
+  61 用例。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **1169 passed**（23 个迭代全部绿灯后）。
