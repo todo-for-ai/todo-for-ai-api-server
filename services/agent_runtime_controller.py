@@ -25,24 +25,15 @@ from kubernetes.client.rest import ApiException
 
 from core.config import Config
 from models.agent import Agent
+from services.cloud_runtime import manifests
 from utils.logger import logger
 
 
 class AgentRuntimeController:
     """Agent 运行时控制器"""
 
-    # 运行时镜像映射
-    RUNTIME_IMAGES = {
-        'openai': 'todo4ai/agent-openai:latest',
-        'anthropic': 'todo4ai/agent-claude:latest',
-        'google': 'todo4ai/agent-gemini:latest',
-        'ollama': 'todo4ai/agent-ollama:latest',
-        # CLI 引擎（agent-runtime runtimes/cli-agents 镜像，预装 claude/codex/opencode 三 CLI）
-        'claude': 'todo4ai/agent-cli-agents:latest',
-        'codex': 'todo4ai/agent-cli-agents:latest',
-        'opencode': 'todo4ai/agent-cli-agents:latest',
-        'custom': 'todo4ai/agent-runtime:latest',
-    }
+    # 运行时镜像映射（定义移至 services/cloud_runtime/manifests.py）
+    RUNTIME_IMAGES = manifests.RUNTIME_IMAGES
 
     # 运行时凭据 Secret（per-namespace，key = agent-<id>；AGENT_KEY 以 secretKeyRef 注入，不再落明文）
     RUNTIME_SECRET_NAME = 'todo4ai-runtime-keys'
@@ -53,21 +44,8 @@ class AgentRuntimeController:
     # Agent Pod 空闲回收阈值（分钟；0 = 不回收，可被 Config/工作区设置覆盖）
     POD_IDLE_TIMEOUT_MINUTES = 30
 
-    # 沙箱资源配置
-    SANDBOX_RESOURCES = {
-        'minimal': {
-            'requests': {'cpu': '100m', 'memory': '128Mi'},
-            'limits': {'cpu': '500m', 'memory': '512Mi'},
-        },
-        'standard': {
-            'requests': {'cpu': '500m', 'memory': '512Mi'},
-            'limits': {'cpu': '2', 'memory': '2Gi'},
-        },
-        'performance': {
-            'requests': {'cpu': '2', 'memory': '4Gi'},
-            'limits': {'cpu': '4', 'memory': '8Gi'},
-        },
-    }
+    # 沙箱资源配置（定义移至 services/cloud_runtime/manifests.py）
+    SANDBOX_RESOURCES = manifests.SANDBOX_RESOURCES
 
     def __init__(self):
         self.namespace = getattr(Config, 'K8S_AGENT_NAMESPACE', None) or 'todo4ai-agents'
@@ -151,11 +129,10 @@ class AgentRuntimeController:
     # ── Phase 1：多 Agent 云端协作的三个接缝（凭据 Secret 化 / 共享工作区卷 / 幂等确保在岗）──
 
     def _agent_policy(self, agent: Agent) -> dict:
-        """Agent 的沙箱策略 JSON（兼容 None）。"""
-        return agent.sandbox_policy or {}
+        return manifests.agent_policy(agent)
 
     def _runtime_secret_field(self, agent_id: int) -> str:
-        return f'agent-{agent_id}'
+        return manifests.runtime_secret_field(agent_id)
 
     def ensure_runtime_secret(self, agent_id: int, agent_key: str) -> str:
         """确保运行时 Secret 存在且包含该 Agent 的密钥；返回 Secret 名。
@@ -163,6 +140,8 @@ class AgentRuntimeController:
         Secret 为 per-namespace 聚合式（todo4ai-runtime-keys），key = agent-<id>。
         已存在且值一致时不做写操作（幂等）。
         """
+        import base64
+
         secret_name = self.RUNTIME_SECRET_NAME
         field = self._runtime_secret_field(agent_id)
         encoded = base64.b64encode((agent_key or '').encode('utf-8')).decode('utf-8')
@@ -182,7 +161,7 @@ class AgentRuntimeController:
                 raise
         self.core_v1.create_namespaced_secret(
             namespace=self.namespace,
-            body=V1Secret(
+            body=kubernetes.client.V1Secret(
                 metadata=kubernetes.client.V1ObjectMeta(name=secret_name),
                 type='Opaque',
                 data={field: encoded},
@@ -211,19 +190,20 @@ class AgentRuntimeController:
             spec_kwargs['storage_class_name'] = storage_class
         self.core_v1.create_namespaced_persistent_volume_claim(
             namespace=self.namespace,
-            body=V1PersistentVolumeClaim(
+            body=kubernetes.client.V1PersistentVolumeClaim(
                 metadata=kubernetes.client.V1ObjectMeta(
                     name=pvc_name,
                     labels={'app': 'todo4ai-workspace', 'workspace-id': str(workspace_id)},
                 ),
-                spec=V1PersistentVolumeClaimSpec(
+                spec=kubernetes.client.V1PersistentVolumeClaimSpec(
                     access_modes=['ReadWriteMany'],
                     resources=V1ResourceRequirements(requests={'storage': '10Gi'}),
                     **spec_kwargs,
                 ),
             ),
         )
-        logger.info("controller.shared_pvc_created workspace_id=%s pvc=%s", workspace_id, pvc_name)
+        logger.info("controller.shared_pvc_created workspace_id=%s pvc=%s",
+                    workspace_id, pvc_name)
         return pvc_name
 
     def _list_workspace_pods(self, workspace_id: int) -> List[V1Pod]:
@@ -359,247 +339,23 @@ class AgentRuntimeController:
             logger.error("controller.list_pods_failed error=%s", e)
             return []
 
-    def _build_pod(
-        self,
-        name: str,
-        agent: Agent,
-        agent_key: str,
-        sandbox_profile: str
-    ) -> V1Pod:
-        """构建 Pod 配置"""
-        # 确定镜像
-        runtime_type = self._get_runtime_type(agent)
-        image = self.RUNTIME_IMAGES.get(runtime_type, self.RUNTIME_IMAGES['custom'])
-
-        # 确定资源
-        resources = self.SANDBOX_RESOURCES.get(
-            sandbox_profile,
-            self.SANDBOX_RESOURCES['standard']
+    def _build_pod(self, name: str, agent: Agent, agent_key: str,
+                   sandbox_profile: str) -> V1Pod:
+        """构建 Agent Pod 清单（声明式部分见 services/cloud_runtime/manifests.py）。"""
+        return manifests.build_pod(
+            name=name, agent=agent, secret_name=self.RUNTIME_SECRET_NAME,
+            sandbox_profile=sandbox_profile,
         )
 
-        # 构建环境变量
-        env = self._build_env_vars(agent, agent_key)
-
-        # 协作共享工作区（策略开关）：挂载工作区级 ReadWriteMany PVC，多 Agent 互见文件产物
-        shared_workspace = bool(self._agent_policy(agent).get('shared_workspace'))
-
-        # 构建标签
-        labels = {
-            'app': 'todo4ai-agent',
-            'agent-id': str(agent.id),
-            'workspace-id': str(agent.workspace_id),
-            'runtime-type': runtime_type,
-        }
-
-        # 运行时环境适配（沙箱/镜像拉取策略因集群而异，均可被环境变量覆盖：
-        # K8S_AGENT_RUNTIME_CLASS（如 gvisor）/ K8S_IMAGE_PULL_POLICY（Always））
-        runtime_class = os.getenv('K8S_AGENT_RUNTIME_CLASS') or getattr(
-            Config, 'K8S_AGENT_RUNTIME_CLASS', None)
-        image_pull_policy = os.getenv('K8S_IMAGE_PULL_POLICY') or getattr(
-            Config, 'K8S_IMAGE_PULL_POLICY', 'IfNotPresent')
-
-        # 创建 Pod
-        return V1Pod(
-            api_version='v1',
-            kind='Pod',
-            metadata=kubernetes.client.V1ObjectMeta(
-                name=name,
-                labels=labels,
-                annotations={
-                    'todo4ai.io/agent-name': agent.name,
-                    'todo4ai.io/created-at': datetime.utcnow().isoformat(),
-                }
-            ),
-            spec=V1PodSpec(
-                runtime_class_name=runtime_class,
-                restart_policy='OnFailure',
-                termination_grace_period_seconds=30,
-                security_context=kubernetes.client.V1PodSecurityContext(
-                    run_as_non_root=True,
-                    run_as_user=1000,
-                    seccomp_profile=kubernetes.client.V1SeccompProfile(
-                        type='RuntimeDefault'
-                    )
-                ),
-                containers=[
-                    V1Container(
-                        name='agent-runtime',
-                        image=image,
-                        image_pull_policy=image_pull_policy,
-                        env=env,
-                        resources=V1ResourceRequirements(
-                            requests=resources['requests'],
-                            limits=resources['limits']
-                        ),
-                        ports=[
-                            kubernetes.client.V1ContainerPort(
-                                container_port=8080,
-                                name='metrics'
-                            )
-                        ],
-                        security_context=kubernetes.client.V1SecurityContext(
-                            allow_privilege_escalation=False,
-                            read_only_root_filesystem=True,
-                            capabilities=kubernetes.client.V1Capabilities(
-                                drop=['ALL']
-                            )
-                        ),
-                        volume_mounts=[
-                            kubernetes.client.V1VolumeMount(
-                                name='tmp',
-                                mount_path='/tmp'
-                            ),
-                            kubernetes.client.V1VolumeMount(
-                                name='cache',
-                                mount_path='/app/.cache'
-                            ),
-                        ] + ([
-                            kubernetes.client.V1VolumeMount(
-                                name='shared-workspace',
-                                mount_path='/workspace/shared'
-                            ),
-                        ] if shared_workspace else []),
-                        liveness_probe=kubernetes.client.V1Probe(
-                            http_get=kubernetes.client.V1HTTPGetAction(
-                                path='/health',
-                                port=8080
-                            ),
-                            initial_delay_seconds=10,
-                            period_seconds=30
-                        ),
-                        readiness_probe=kubernetes.client.V1Probe(
-                            http_get=kubernetes.client.V1HTTPGetAction(
-                                path='/ready',
-                                port=8080
-                            ),
-                            initial_delay_seconds=5,
-                            period_seconds=10
-                        )
-                    )
-                ],
-                volumes=[
-                    kubernetes.client.V1Volume(
-                        name='tmp',
-                        empty_dir=kubernetes.client.V1EmptyDirVolumeSource(
-                            size_limit='1Gi'
-                        )
-                    ),
-                    kubernetes.client.V1Volume(
-                        name='cache',
-                        empty_dir=kubernetes.client.V1EmptyDirVolumeSource(
-                            size_limit='500Mi'
-                        )
-                    ),
-                ] + ([
-                    kubernetes.client.V1Volume(
-                        name='shared-workspace',
-                        persistent_volume_claim=kubernetes.client.V1PersistentVolumeClaimVolumeSource(
-                            claim_name=self.shared_workspace_pvc_name(agent.workspace_id),
-                        ),
-                    ),
-                ] if shared_workspace else [])
-            )
-        )
-
-    def _build_env_vars(
-        self,
-        agent: Agent,
-        agent_key: str
-    ) -> List[kubernetes.client.V1EnvVar]:
-        """构建环境变量"""
-        cli_engine = (self._agent_policy(agent).get('cli_engine') or '').strip().lower()
-        env_vars = [
-            # AGENT_KEY 走 Secret（spawn 前由 ensure_runtime_secret 写入），Pod spec 不落明文
-            kubernetes.client.V1EnvVar(
-                name='AGENT_KEY',
-                value_from=kubernetes.client.V1EnvVarSource(
-                    secret_key_ref=kubernetes.client.V1SecretKeySelector(
-                        name=self.RUNTIME_SECRET_NAME,
-                        key=self._runtime_secret_field(agent.id),
-                    )
-                ),
-            ),
-            kubernetes.client.V1EnvVar(
-                name='API_BASE_URL',
-                value=getattr(Config, 'API_BASE_URL', None) or 'https://api.todo-for-ai.com/todo-for-ai/api/v1'
-            ),
-            kubernetes.client.V1EnvVar(
-                name='LLM_PROVIDER',
-                value=agent.llm_provider or 'openai'
-            ),
-            kubernetes.client.V1EnvVar(
-                name='LLM_MODEL',
-                value=agent.llm_model or 'gpt-4'
-            ),
-            kubernetes.client.V1EnvVar(
-                name='SANDBOX_MODE',
-                value=agent.sandbox_profile or 'standard'
-            ),
-            kubernetes.client.V1EnvVar(
-                name='SANDBOX_NETWORK_MODE',
-                value=self._get_network_mode(agent)
-            ),
-            kubernetes.client.V1EnvVar(
-                name='MAX_CONCURRENT_TASKS',
-                value=str(agent.max_concurrency or 1)
-            ),
-            kubernetes.client.V1EnvVar(
-                name='TASK_TIMEOUT_SECONDS',
-                value=str(agent.timeout_seconds or 1800)
-            ),
-            kubernetes.client.V1EnvVar(
-                name='HEARTBEAT_INTERVAL_SECONDS',
-                value=str(agent.heartbeat_interval_seconds or 20)
-            ),
-            kubernetes.client.V1EnvVar(
-                name='LOG_LEVEL',
-                value='INFO'
-            ),
-        ]
-
-        # CLI 引擎选择（claude/codex/opencode/custom），与 cli-agents 镜像配套
-        if cli_engine:
-            env_vars.append(
-                kubernetes.client.V1EnvVar(name='CLI_AGENT_ENGINE', value=cli_engine)
-            )
-
-        # 添加 LLM API Key（从 Secret）
-        if agent.llm_provider:
-            env_vars.append(
-                kubernetes.client.V1EnvVar(
-                    name='LLM_API_KEY',
-                    value_from=kubernetes.client.V1EnvVarSource(
-                        secret_key_ref=kubernetes.client.V1SecretKeySelector(
-                            name=f'agent-llm-keys',
-                            key=agent.llm_provider,
-                            optional=True
-                        )
-                    )
-                )
-            )
-
-        return env_vars
+    def _build_env_vars(self, agent: Agent, agent_key: str) -> List:
+        """环境变量（AGENT_KEY 走 SecretKeyRef，见 manifests.build_env_vars）。"""
+        return manifests.build_env_vars(agent)
 
     def _get_runtime_type(self, agent: Agent) -> str:
-        """获取运行时类型：沙箱策略显式声明的 CLI 引擎优先，否则按 LLM 供应商映射。"""
-        cli_engine = (self._agent_policy(agent).get('cli_engine') or '').strip().lower()
-        if cli_engine in ('claude', 'codex', 'opencode', 'custom'):
-            return cli_engine
-        provider = (agent.llm_provider or 'openai').lower()
-        if provider in ['openai']:
-            return 'openai'
-        elif provider in ['anthropic', 'claude']:
-            return 'anthropic'
-        elif provider in ['google', 'gemini']:
-            return 'google'
-        elif provider in ['ollama', 'local']:
-            return 'ollama'
-        return 'custom'
+        return manifests.runtime_type(agent)
 
     def _get_network_mode(self, agent: Agent) -> str:
-        """获取网络模式"""
-        policy = agent.sandbox_policy or {}
-        return policy.get('network_mode', 'isolated')
+        return manifests.network_mode(agent)
 
     def _find_pods_by_agent(self, agent_id: int) -> List[V1Pod]:
         """根据 Agent ID 查找 Pods"""
@@ -654,14 +410,28 @@ class AgentRuntimeController:
         so the runtime can pull the task without waiting for WebSocket push.
         """
         from models import Agent, AgentTaskAttempt, AgentTaskLease, TaskStatus, db
+        from models.project import Project
         from api.agent_common import generate_id, now_utc
         from datetime import timedelta
 
-        agent = Agent.query.filter_by(
-            workspace_id=task.owner_id,
-            runner_enabled=True,
-            status='ACTIVE'
-        ).first()
+        # owner_id 是用户 ID、workspace_id 是组织 ID，二者属不同 ID 空间；
+        # 任务的工作区归属以其所属项目的 organization_id 为准。
+        org_id = None
+        if task.project_id:
+            org_id = db.session.get(Project, task.project_id).organization_id
+        agent = None
+        if org_id is not None:
+            agent = Agent.query.filter_by(
+                workspace_id=org_id,
+                runner_enabled=True,
+                status='ACTIVE'
+            ).first()
+        if agent is None:
+            agent = Agent.query.filter_by(
+                workspace_id=task.owner_id,
+                runner_enabled=True,
+                status='ACTIVE'
+            ).first()
         if not agent:
             return
 

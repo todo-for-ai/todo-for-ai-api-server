@@ -396,6 +396,13 @@ try:
 except Exception as _e:
     print(f'⚠️ 目标循环看门狗启动失败: {_e}')
 
+# 云端 Agent Pod 回源地址（Pod → 平台 API）：默认公网地址，
+# 本地/内网部署用 API_BASE_URL 环境变量覆盖（如 http://host.docker.internal:50110/...）
+if os.getenv('API_BASE_URL'):
+    from core.config import Config as _runtime_config
+    _runtime_config.API_BASE_URL = os.getenv('API_BASE_URL')
+    print(f'☁️ 云端 Agent 回源地址: {_runtime_config.API_BASE_URL}')
+
 
 if __name__ == '__main__':
     # 开发服务器

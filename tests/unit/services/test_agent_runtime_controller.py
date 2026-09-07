@@ -28,6 +28,24 @@ def _env_map(env_vars):
     return {item.name: item for item in env_vars}
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _app_ctx():
+    """ensure_agent_pod 会读取工作区配额（DB），需要应用上下文。"""
+    from app import create_app
+    from models import db
+    app = create_app("testing")
+    app.config.update({"TESTING": True,
+                       "SQLALCHEMY_DATABASE_URI": "sqlite:///:memory:",
+                       "SQLALCHEMY_ENGINE_OPTIONS": {}})
+    ctx = app.app_context()
+    ctx.push()
+    db.create_all()
+    yield app
+    db.session.remove()
+    db.drop_all()
+    ctx.pop()
+
+
 @pytest.fixture
 def controller():
     """Build a controller instance without touching real kubeconfig."""
@@ -45,7 +63,7 @@ def test_build_env_vars_falls_back_to_default_api_base_url(controller):
     """Agent runtime env injection should not fail when Config.API_BASE_URL is missing."""
     agent = _make_agent(llm_provider="openai")
 
-    with patch("services.agent_runtime_controller.Config", new=SimpleNamespace()):
+    with patch("services.cloud_runtime.manifests.Config", new=SimpleNamespace()):
         env_vars = controller._build_env_vars(agent=agent, agent_key="agk_test_123")
 
     env_vars_by_name = _env_map(env_vars)
@@ -84,6 +102,17 @@ def test_runtime_type_prefers_cli_engine_policy(controller):
     assert controller._get_runtime_type(_make_agent()) == "openai"
 
 
+def test_runtime_type_provider_mapping(controller):
+    """无 CLI 引擎策略时按 LLM 供应商映射，未知供应商回落 custom。"""
+    assert controller._get_runtime_type(_make_agent(llm_provider="Google")) == "google"
+    assert controller._get_runtime_type(_make_agent(llm_provider="gemini")) == "google"
+    assert controller._get_runtime_type(_make_agent(llm_provider="Ollama")) == "ollama"
+    assert controller._get_runtime_type(_make_agent(llm_provider="local")) == "ollama"
+    assert controller._get_runtime_type(_make_agent(llm_provider="mistral")) == "custom"
+    # provider 缺失时默认 openai
+    assert controller._get_runtime_type(_make_agent(llm_provider=None)) == "openai"
+
+
 def _secret_404(controller):
     controller.core_v1.read_namespaced_secret.side_effect = ApiException(status=404)
 
@@ -101,7 +130,7 @@ def test_spawn_agent_pod_calls_k8s_and_returns_pod_metadata(controller):
         "services.agent_runtime_controller.uuid4",
         return_value=SimpleNamespace(hex="12345678abcdef00"),
     ), patch(
-        "services.agent_runtime_controller.Config",
+        "services.cloud_runtime.manifests.Config",
         new=SimpleNamespace(API_BASE_URL="http://api.internal/todo-for-ai/api/v1"),
     ):
         result = controller.spawn_agent_pod(
@@ -252,7 +281,7 @@ def test_spawn_agent_pod_raises_runtime_error_on_k8s_failure(controller):
     )
 
     with patch(
-        "services.agent_runtime_controller.Config",
+        "services.cloud_runtime.manifests.Config",
         new=SimpleNamespace(API_BASE_URL="http://api.internal/todo-for-ai/api/v1"),
     ), patch("services.agent_runtime_controller.logger.error"):
         with pytest.raises(RuntimeError, match="Failed to create pod"):

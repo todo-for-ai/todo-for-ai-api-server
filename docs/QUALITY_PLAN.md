@@ -52,8 +52,6 @@
   或对迭代 1-3 的产物做圈复杂度复查（长函数拆分）。
 
 ## 迭代日志
-
-## 迭代日志
 ### 迭代 1（2026-09-07 05:00-06:40）拆分 goal_loop_service ✅
 - 前：`services/goal_loop_service.py` 744 行，规划/派发/状态机/看门狗四职责混杂（低内聚）。
 - 后：`services/goal_loop/` 包六模块（constants 17 / query 15 / dispatch 91 / planning 83 /
@@ -64,4 +62,20 @@
 - 顺带移除死分支：watchdog 的"无时间戳"守卫（created_at NOT NULL 约束下不可达）。
 - 经验：monkeypatch 目标必须是符号定义所在的模块（拆包后 `state_machine.call_review`
   才是状态机实际调用的符号）；SimpleNamespace 替身上的 staticmethod 在 py3.9 不可调用。
+
+### 迭代 2（2026-09-07 06:40-08:20）拆分 agent_runtime_controller 的清单构造 ✅
+- 前：`services/agent_runtime_controller.py` 744 行，Pod 声明式构造（镜像/资源/环境变量/
+  RuntimeClass/挂载）与 K8s 客户端生命周期管理混杂。
+- 后：抽出纯函数模块 `services/cloud_runtime/manifests.py`（48 行：RUNTIME_IMAGES/
+  SANDBOX_RESOURCES/agent_policy/runtime_type/network_mode/build_env_vars/build_pod），
+  控制器 744 → **417 行**，类属性改为别名 + 薄委托，外部行为零变化。
+- 覆盖率：`manifests.py` **100% 行覆盖**（补 google/gemini→google、ollama/local→ollama、
+  未知供应商→custom 的运行时映射缺口用例）；`cloud_runtime/__init__.py` 100%。
+- 测试：控制器用例 11 → 12，全量门禁 **439 passed**（上一迭代 438）。
+- 提交纪律：controller 含并行会话 auto_assign_task org_id WIP hunk，用 hunk 过滤
+  （剔除含 org_id/import Project 的 hunk 后 `git apply --cached`）定向提交；
+  顺带补入 Phase 2 遗漏的 app.py API_BASE_URL 运行时覆盖钩子。
+- 经验：拆分后的提交物 = 暂存区快照，与跑门禁的工作树仅差他人 WIP hunk 时，
+  需确认没有测试真实走进该 hunk 的内部路径（此处 auto_assign_task 在测试里全部被打桩），
+  门禁结论才可外推到提交物。
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
