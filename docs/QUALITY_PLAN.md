@@ -250,6 +250,19 @@
   upsert secret 加密与 installed 标记）
 - 新增 41 用例，2 个测试文件。
 
+### 迭代 17（2026-09-08 12:10-13:50）sso + budget_service 收口 → 100% ✅
+- `services/budget_service.py` 93.3% → **100%**（9 用例：月度/未知周期、
+  无成员工作区 token 用量回 0、agent 范围在时长/并发两资源上的过滤、
+  未知资源 not_tracked、超限事件缺 task_id 拒绝、非请求上下文审计降级）
+- `services/sso.py` 91.5% → **100%**（16 用例：账号映射名回退链（用户名
+  格式 sso_<name>_<rand> 钉住）、OIDC code 兑换（httpx 兼容假客户端）、
+  无 access_token 拒绝、login_oidc 全链路签发 JWT、SAML state 的
+  workspace/request_id 校验、authorize_url 拼接、自建 httpx.Client 的
+  finally close、upsert 的 secret 加密）
+- 新增 25 用例，2 个测试文件。**发现一处不可达分支**：`_token_usage` 的
+  "无成员回 0"路径在 organizations.owner_id NOT NULL 约束下无法通过真实
+  组织触达，以不存在工作区（org=None）等价覆盖。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **728 passed**（13 个迭代全部绿灯后）。
