@@ -175,4 +175,22 @@
   app 的 db.session 是**两个库**——夹具必须用与被测代码相同的 session 自建数据，
   否则"独跑绿、类内跑挂"。
 
+### 迭代 10（2026-09-08 04:40-05:20）agent_batch_ops 0 → 100% 覆盖 ✅
+- `services/agent_batch_ops.py`（405 行）此前零测试：CSV/JSON 导出、JSON 导入
+  （create/update 模式）、批量轮换/改状态/删除全部无回归保护。
+- 评估后**不拆文件**：单一 AgentBatchOperations 类、职责内聚（Agent 批量操作域），
+  拆了反而破坏内聚；按纪律"补测到 100%"即可。
+- 新增 `tests/unit/services/test_agent_batch_ops.py` 18 用例。覆盖率 **100%**
+  （133/133 语句）。门禁 683 passed（上一迭代 665）。
+- 钉住的行为怪点（留档）：`export_agents_to_json(include_secrets=True)` 参数
+  当前是 no-op（文档字符串已注明不含明文，但参数有误导性）。
+
+### 迭代 11（2026-09-08 05:30-06:10）secret_analytics 0 → 100% 覆盖 + 修可移植性 bug ✅
+- `services/secret_analytics.py`（267 行，SecretUsageAnalyzer 分析器）零测试。
+- **测试抓出真 bug**：`get_usage_trends` 里 `r.date.isoformat()`——`func.date()`
+  在 MySQL 返回 date、在 SQLite 返回 str，后者直接 AttributeError。
+  该模块在 SQLite 环境（含全部单测）整体不可用。已改为类型归一处理。
+- 新增 `tests/unit/services/test_secret_analytics.py` 12 用例（趋势填充/异常
+  检测高中低档/热力图/Top 调用者/报告汇总/工作区统计/单例）。覆盖率 **100%**
+  （72/72 语句）。
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

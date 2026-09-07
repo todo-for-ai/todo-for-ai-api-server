@@ -53,7 +53,11 @@ class SecretUsageAnalyzer:
 
         # 填充缺失日期
         trends = []
-        date_map = {r.date.isoformat(): r.count for r in results}
+        # func.date() 在不同后端返回类型不同（MySQL=date、SQLite=str），统一转字符串
+        date_map = {}
+        for r in results:
+            key = r.date.isoformat() if hasattr(r.date, 'isoformat') else str(r.date)
+            date_map[key] = r.count
 
         for i in range(days):
             date = (datetime.utcnow() - timedelta(days=days - i - 1)).date()
