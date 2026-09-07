@@ -239,6 +239,17 @@
   自指目标、SLA 边界、敏感级、置信度区间、resolver 一致性）
 - 新增 46 用例，2 个测试文件。两模块均为纯函数/轻依赖，无需拆分。
 
+### 迭代 16（2026-09-08 10:40-11:40）MCP 共享工具 + GitHub App 缺口收口 ✅
+- `api/mcp/_shared.py` 0% → **100%**（161 行；19 用例：内存频率限制（超限
+  429/按用户分桶/过期清理）、API Token 认证装饰器三档 401 与 g 注入、
+  XSS 清洗行为钉子（html.escape 先于标签移除）、整数校验）
+- `services/github_app.py` 79.2% → **100%（并集）**（22 用例：encrypt/decrypt
+  的 v1 前缀与 legacy 回退、真实 RSA 的 App JWT 三段结构与 660s 有效窗、
+  installation token 请求/过期解析/默认 10 分钟、缓存命中与 5 分钟刷新边距、
+  manifest 兑换、按配置取 token 的两档拒绝、webhook secret 三级回退、
+  upsert secret 加密与 installed 标记）
+- 新增 41 用例，2 个测试文件。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **728 passed**（13 个迭代全部绿灯后）。
