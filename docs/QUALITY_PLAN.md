@@ -345,15 +345,17 @@
 
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
-**门禁**：全量单测 396（基线）→ **950 passed**（19 个迭代全部绿灯后）。
+**门禁**：全量单测 396（基线）→ **1129 passed**（22 个迭代全部绿灯后）。
 
 **第二轮（迭代 14-19）补充**：knowledge_curation / review_gate /
 failure_recovery / deploy_check / jwt_refresh / interaction_contract /
 mcp_shared / github_app / sso / budget_service / skill_profile /
 insight_actions / marketplace 全部收口至 100%；auth API 43% → 99%
-（缺 1 行死行）。合计约 190 个新用例。剩余大缺口文件均为他人 WIP
-（api/agents/*）或巨型路由模块（openai_compatible / context_rules /
-custom_prompts / agent_teams 等，各 200-450 语句），留待后续轮次。
+（缺 1 行死行）。合计约 190 个新用例。剩余大缺口：api/agents/*
+（他人 WIP）。已完成：openai_compatible / context_rules / custom_prompts /
+agent_teams 之外的第三大文件均已收口（openai_compatible 修复流式模式
+从未生效的过滤 bug）。根目录 test_openai_api*.py 含硬编码 token，
+属运维脚本非单测，删除需用户确认。
 
 **覆盖率终值（coverage JSON 度量，services+api 合计 45% → 52.26%）**：
 本夜触碰的全部 39 个模块 **100% 行覆盖**，唯一例外
