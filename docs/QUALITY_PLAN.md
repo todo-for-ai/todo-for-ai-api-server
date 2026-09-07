@@ -206,4 +206,37 @@
   ACTIVE/汇总与空工作区/updated_at 心跳回退语义）。覆盖率 **100%**（65/65）。
 - 语义钉子：新建 Agent 无租约时会被 updated_at 回退判为 online——测试已按此
   行为断言（若产品上希望"从未干活即 unknown"，属行为变更，另立迭代）。
+
+## 收尾总览（2026-09-08 07:40）
+
+**门禁**：全量单测 396（基线）→ **706 passed**（12 个迭代全部绿灯后）。
+
+**覆盖率终值（coverage JSON 度量，services+api 合计 45% → 52.26%）**：
+本夜触碰的全部 39 个模块 **100% 行覆盖**，唯一例外
+`services/agent_runtime_controller.py` 84.4%——缺失行 100% 落在并行会话
+WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）。
+
+**大文件拆分（4 次拆包，全部保持导入路径兼容）**：
+- goal_loop_service 744 行 → services/goal_loop/ 包（六模块 + 门面）
+- ai_service 763 行 → services/ai/ 包（六模块 + 门面），call() 280 行拆六阶段
+- redis_cache_service 543 行 → services/cache/ 包（四模块 + 门面）
+- connectors 459 行 → services/connectors/ 包（按 provider 七模块）
+
+**顺手修掉的真 bug（全部无测试掩护的存量）**：
+1. agent_runtime_mgmt：status/list 路由调用不存在的 `has_workspace_access`
+   → 必然 500（迭代 3）
+2. agent_health：查询 AgentTaskLease 不存在的三列 → 健康端点自上线必然 500
+   （迭代 12）
+3. secret_analytics：`func.date()` 跨库返回类型不一致 → SQLite 全路径崩溃
+   （迭代 11）
+4. connectors：同一 default_project_id 解析块重复 5 次 → 收敛到 common
+   （迭代 9）
+
+**移交项**：
+- `auto_assign_task` org_id 修复归并行会话；其提交后补测收口至 100%。
+- `services/cache/`（原 redis_cache_service）全库零引用——建议用户裁决是否删除。
+- `agent_batch_ops.export_agents_to_json(include_secrets=True)` 参数为 no-op，
+  语义应澄清（澄清属行为变更，未擅动）。
+- 迭代 12 的"新建 Agent 无租约判 online"语义如需改为 unknown，属产品决策。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
