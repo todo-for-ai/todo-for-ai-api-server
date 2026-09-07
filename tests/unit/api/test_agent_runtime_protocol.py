@@ -370,7 +370,7 @@ class TestAgentRuntimeProtocol:
             "created_at": datetime.utcnow().isoformat(),
         }
 
-        with patch("api.agent_runtime_mgmt.get_agent_controller", return_value=fake_controller):
+        with patch("services.cloud_runtime.management.get_agent_controller", return_value=fake_controller):
             resp = client.post(
                 f"{BASE_URL}/workspaces/{org.id}/agents/{agent.id}/runtime/spawn",
                 json={"sandbox_profile": "standard"},
