@@ -357,6 +357,21 @@
 - 覆盖率 **100%**（310/310）。重复的"工作区 404 / 越权 403"守卫行用
   参数化（13 端点 × 2 场景）一次性收口。
 
+### 迭代 24（2026-09-09 00:30-01:40）workspace_secrets 路由 17% → 100% ✅
+- `api/agent_workspace_secrets/routes_secrets.py`（227 语句，7 端点：机密
+  列表/创建/reveal/共享 reveal/rotate/revoke/shares 列表）此前 17% 覆盖、
+  零专项测试。新增 `tests/unit/api/test_workspace_secrets_api.py` 39 用例。
+- 覆盖：列表（share 计数/include_shared 共享来源过滤——吊销与自共享跳过、
+  幽灵 owner 归一 None）、创建校验矩阵（必填/空值/类型/scope/project 归属/
+  非整型/重名 409）、reveal（解密回显+usage 计数/已吊销 400）、共享 reveal
+  （无授权 404/过期 404/非 read 403/已吊销 400/成功含所有方）、rotate
+  （哈希密文轮换/已吊销 400）、revoke（连带吊销 share+grant）、shares 列表
+  （include_inactive/is_expired 计算）、13 端点守卫（agent 404/外人 403/
+  secret 404）参数化。
+- 覆盖率 **100%**（227/227）。
+- 同包 routes_collaboration.py（447 行）与 routes_grants.py（297 行）留待
+  迭代 25。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **1169 passed**（23 个迭代全部绿灯后）。
