@@ -263,6 +263,18 @@
   "无成员回 0"路径在 organizations.owner_id NOT NULL 约束下无法通过真实
   组织触达，以不存在工作区（org=None）等价覆盖。
 
+### 迭代 18（2026-09-08 14:00-15:00）skill_profile / insight_actions / marketplace 收口 → 100% ✅
+- `services/skill_profile.py` 95.3% → **100%**（未知经验类型计正向、
+  重建/遗忘对不存在 Agent 拒绝、遗忘写墓碑快照、打分加成与 20 分 cap、
+  空匹配词/无画像回 0）
+- `services/insight_actions.py` 96.4% → **100%**（知识覆盖统计跳过已禁用
+  Agent、导师不自配、无空闲领域跳过、limit 凑满提前返回——以构造覆盖表
+  驱动，摆脱对真实经验数据的依赖）
+- `services/marketplace.py` 96.2% → **100%**（create_agent 缺名/重名拒绝）
+- 新增 9 用例，1 个测试文件。mcp_manager.py / mcp_server_methods.py 为
+  进程管理/MCP 运行时脚本（前者 subprocess 管理脚本，后者依赖 mcp 包异步
+  运行时），不属于单测目标，留档说明。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **871 passed**（17 个迭代全部绿灯后）。
