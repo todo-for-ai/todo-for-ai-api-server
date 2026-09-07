@@ -290,3 +290,172 @@ def test_spawn_agent_pod_raises_runtime_error_on_k8s_failure(controller):
                 agent_key="agk_runtime_abc",
                 sandbox_profile="standard",
             )
+
+
+# ── 迭代 6：Pod 生命周期其余函数补测（auto_assign_task 属他人 WIP，不在范围内）──
+
+_UNSET = object()
+
+
+def _pod_mock(agent_id="11", workspace_id="22", phase="Running",
+              start_time=_UNSET, conditions=None):
+    from datetime import datetime
+    if start_time is _UNSET:
+        start_time = datetime(2026, 9, 7, 12, 0, 0)
+    metadata = SimpleNamespace(
+        name=f"agent-{agent_id}-abc",
+        uid=f"uid-{agent_id}",
+        labels={
+            "agent-id": agent_id,
+            "workspace-id": workspace_id,
+            "runtime-type": "claude",
+        },
+    )
+    status = SimpleNamespace(
+        phase=phase,
+        pod_ip="10.0.0.5",
+        host_ip="192.168.1.2",
+        start_time=start_time,
+        conditions=conditions,
+    )
+    return SimpleNamespace(metadata=metadata, status=status)
+
+
+class TestInitK8sClient:
+    def test_prefers_incluster_config(self):
+        from services.agent_runtime_controller import AgentRuntimeController
+
+        with patch("kubernetes.config.load_incluster_config") as in_cluster, \
+                patch("kubernetes.config.load_kube_config") as kube_config, \
+                patch("kubernetes.client.ApiClient"), \
+                patch("kubernetes.client.CoreV1Api"):
+            instance = AgentRuntimeController()
+        in_cluster.assert_called_once()
+        kube_config.assert_not_called()
+        assert instance.core_v1 is not None
+
+    def test_falls_back_to_kubeconfig(self):
+        from kubernetes.config.config_exception import ConfigException
+
+        from services.agent_runtime_controller import AgentRuntimeController
+
+        with patch("kubernetes.config.load_incluster_config",
+                   side_effect=ConfigException("no incluster")), \
+                patch("kubernetes.config.load_kube_config") as kube_config, \
+                patch("kubernetes.client.ApiClient"), \
+                patch("kubernetes.client.CoreV1Api"):
+            AgentRuntimeController()
+        kube_config.assert_called_once()
+
+
+class TestSecretAndPvcGuards:
+    def test_spawn_ensures_shared_pvc_when_policy_enabled(self, controller):
+        controller.get_agent_pod_status = MagicMock(return_value=None)
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(items=[])
+        controller.ensure_workspace_shared_pvc = MagicMock()
+        agent = _make_agent(
+            sandbox_policy={"network_mode": "isolated", "shared_workspace": True})
+
+        with patch("services.cloud_runtime.manifests.Config", new=SimpleNamespace()):
+            controller.ensure_agent_pod(agent, "agk_x")
+        controller.ensure_workspace_shared_pvc.assert_called_once_with(22)
+
+    def test_runtime_secret_reraises_non_404(self, controller):
+        controller.core_v1.read_namespaced_secret.side_effect = ApiException(status=500)
+        with pytest.raises(ApiException):
+            controller.ensure_runtime_secret(11, "agk_x")
+
+    def test_shared_pvc_reraises_non_404(self, controller):
+        controller.core_v1.read_namespaced_persistent_volume_claim.side_effect = \
+            ApiException(status=409)
+        with pytest.raises(ApiException):
+            controller.ensure_workspace_shared_pvc(22)
+
+    def test_shared_pvc_uses_storage_class_when_configured(self, controller):
+        controller.core_v1.read_namespaced_persistent_volume_claim.side_effect = \
+            ApiException(status=404)
+        with patch("services.agent_runtime_controller.Config", new=SimpleNamespace(
+                K8S_SHARED_WORKSPACE_STORAGE_CLASS="fast-ssd")):
+            controller.ensure_workspace_shared_pvc(22)
+        body = controller.core_v1.create_namespaced_persistent_volume_claim\
+            .call_args.kwargs["body"]
+        assert body.spec.storage_class_name == "fast-ssd"
+
+
+class TestTerminate:
+    def test_returns_false_when_no_pods(self, controller):
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(items=[])
+        assert controller.terminate_agent_pod(11) is False
+
+    def test_deletes_all_pods_and_reports_true(self, controller):
+        pods = [_pod_mock(), _pod_mock()]
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(items=pods)
+        assert controller.terminate_agent_pod(11) is True
+        assert controller.core_v1.delete_namespaced_pod.call_count == 2
+
+    def test_delete_failure_keeps_false(self, controller):
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(
+            items=[_pod_mock()])
+        controller.core_v1.delete_namespaced_pod.side_effect = ApiException(status=500)
+        assert controller.terminate_agent_pod(11) is False
+
+
+class TestStatusAndFormatting:
+    def test_status_none_without_pods(self, controller):
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(items=[])
+        assert controller.get_agent_pod_status(11) is None
+
+    def test_status_formats_first_pod(self, controller):
+        from datetime import datetime
+        cond = SimpleNamespace(type="Ready", status="True", reason=None)
+        pod = _pod_mock(start_time=datetime(2026, 9, 7, 8, 30, 0),
+                        conditions=[cond])
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(items=[pod])
+        status = controller.get_agent_pod_status(11)
+        assert status["pod_name"] == "agent-11-abc"
+        assert status["agent_id"] == 11
+        assert status["workspace_id"] == 22
+        assert status["runtime_type"] == "claude"
+        assert status["phase"] == "Running"
+        assert status["start_time"] == "2026-09-07T08:30:00"
+        assert status["conditions"] == [{"type": "Ready", "status": "True",
+                                         "reason": None}]
+
+    def test_format_handles_missing_start_time_and_conditions(self, controller):
+        pod = _pod_mock(start_time=None, conditions=None)
+        status = controller._format_pod_status(pod)
+        assert status["start_time"] is None
+        assert status["conditions"] == []
+
+    def test_list_agent_pods_filters_by_workspace(self, controller):
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(
+            items=[_pod_mock()])
+        pods = controller.list_agent_pods(workspace_id=22)
+        assert len(pods) == 1
+        selector = controller.core_v1.list_namespaced_pod.call_args.kwargs[
+            "label_selector"]
+        assert "workspace-id=22" in selector
+
+    def test_list_agent_pods_survives_api_error(self, controller):
+        controller.core_v1.list_namespaced_pod.side_effect = ApiException(status=500)
+        with patch("services.agent_runtime_controller.logger.error"):
+            assert controller.list_agent_pods(workspace_id=22) == []
+
+    def test_find_pods_survives_api_error(self, controller):
+        controller.core_v1.list_namespaced_pod.side_effect = ApiException(status=500)
+        assert controller._find_pods_by_agent(11) == []
+
+    def test_list_all_pods_paths(self, controller):
+        controller.core_v1.list_namespaced_pod.return_value = MagicMock(
+            items=[_pod_mock()])
+        assert len(controller._list_all_agent_pods()) == 1
+        controller.core_v1.list_namespaced_pod.side_effect = ApiException(status=500)
+        assert controller._list_all_agent_pods() == []
+
+    def test_list_workspace_pods_survives_api_error(self, controller):
+        controller.core_v1.list_namespaced_pod.side_effect = ApiException(status=500)
+        assert controller._list_workspace_pods(22) == []
+
+    def test_network_mode_delegates_to_manifests(self, controller):
+        agent = _make_agent(sandbox_policy={"network_mode": "bridge"})
+        assert controller._get_network_mode(agent) == "bridge"
