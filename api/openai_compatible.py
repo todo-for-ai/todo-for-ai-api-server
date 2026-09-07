@@ -599,7 +599,16 @@ def chat_completions():
 
     try:
         # 1. 获取并验证请求数据
-        data = validate_json_request(required_fields=['messages', 'model'])
+        # （optional_fields 必须列全，否则过滤会丢弃 stream/temperature 等
+        #   客户端参数——历史版本此处缺省导致流式模式从未生效）
+        data = validate_json_request(
+            required_fields=['messages', 'model'],
+            optional_fields=[
+                'temperature', 'max_tokens', 'stream', 'top_p',
+                'presence_penalty', 'frequency_penalty', 'stop', 'n',
+                'seed', 'response_format', 'tools', 'tool_choice', 'user',
+            ],
+        )
         if isinstance(data, tuple):
             return data
 
@@ -735,7 +744,10 @@ def create_embeddings():
     兼容 OpenAI /v1/embeddings
     """
     try:
-        data = validate_json_request(required_fields=['input'])
+        data = validate_json_request(
+            required_fields=['input'],
+            optional_fields=['model'],
+        )
         if isinstance(data, tuple):
             return data
 

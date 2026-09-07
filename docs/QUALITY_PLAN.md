@@ -323,6 +323,26 @@
      该键，同迭代 20 的模式）——改为 request.args 直读并保留"默认只列激活"。
 - 覆盖率 **100%**（267/267 语句，47 用例）。
 
+### 迭代 22（2026-09-08 20:00-22:00）openai_compatible 15% → 100% + 修 2 个从未工作过的能力 ✅
+- `api/openai_compatible.py`（876 行 422 语句，OpenAI 协议兼容面：
+  三档认证装饰器 / 双级缓存管理器 / chat 校验与流式 / embeddings /
+  usage / 缓存管理端点）此前 15% 覆盖、零单测（根目录两个
+  test_openai_api*.py 是打真实服务器的运维脚本，pytest 不收集；
+  其一还硬编码了 API token，留档提醒）。
+- **修了 2 个真 bug**：
+  1. `/chat/completions` 的 `validate_json_request` 未列 optional_fields →
+     过滤器把 stream/temperature/max_tokens/top_p 等全部丢弃——
+     **流式模式从未生效**（客户端要流式也拿到非流式响应），采样参数
+     从未到达 LLM；已列全 optional_fields；
+  2. `/embeddings` 同因过滤丢掉 `model` → 恒用默认模型；已补。
+- 新增 `tests/unit/api/test_openai_compatible_api.py` 72 用例：认证三档
+  与降级链（8 用例）、缓存管理器（13：双级读写/过期回填/锁生命周期/
+  双重检查/失效广播/异常容错）、chat 校验矩阵（约 20 参数分支）、
+  chat 端到端（缓存命中/失败透传/流式分块/[DONE]/系统提示词剥离/
+  response_format 透传/异常 500）、embeddings、usage 聚合、cache 管理
+  端点权限。覆盖率 **100%**（422/422）。
+- 根目录 test_openai_api*.py 硬编码 token 属安全问题，删除需用户确认。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **950 passed**（19 个迭代全部绿灯后）。
