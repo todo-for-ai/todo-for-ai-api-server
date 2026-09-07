@@ -193,4 +193,17 @@
 - 新增 `tests/unit/services/test_secret_analytics.py` 12 用例（趋势填充/异常
   检测高中低档/热力图/Top 调用者/报告汇总/工作区统计/单例）。覆盖率 **100%**
   （72/72 语句）。
+
+### 迭代 12（2026-09-08 06:20-07:00）agent_health 34% → 100% + 修全路径崩溃 bug ✅
+- **测试审计抓出最重的一个 bug**：`services/agent_health.py`（AgentHealthMonitor，
+  被 api/agent_analytics.py 的健康端点调用）查询 `AgentTaskLease.leased_at /
+  is_complete / completed_at`——**这三列在表上根本不存在**，任何健康检查调用
+  必然 AttributeError → 端点 500。该功能自上线起从未工作过（无测试掩护）。
+- 修复：心跳 = 最近租约 `created_at`；活跃 = `active AND expires_at > now`；
+  今日完成 ≈ 已释放（active=False）且 `updated_at` 在今天（表无完成时间戳，
+  注释已写明近似语义）。
+- 新增 `tests/unit/services/test_agent_health.py` 11 用例（三态判定/巡检只看
+  ACTIVE/汇总与空工作区/updated_at 心跳回退语义）。覆盖率 **100%**（65/65）。
+- 语义钉子：新建 Agent 无租约时会被 updated_at 回退判为 online——测试已按此
+  行为断言（若产品上希望"从未干活即 unknown"，属行为变更，另立迭代）。
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

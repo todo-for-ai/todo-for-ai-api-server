@@ -86,15 +86,15 @@ class AgentHealthMonitor:
 
     def _get_last_heartbeat(self, agent_id: int) -> Optional[datetime]:
         """获取最后心跳时间"""
-        # 从任务租赁记录推断
+        # 从任务租赁记录推断（表上无 leased_at，created_at 即租约创建时间）
         latest_lease = AgentTaskLease.query.filter_by(
             agent_id=agent_id
         ).order_by(
-            AgentTaskLease.leased_at.desc()
+            AgentTaskLease.created_at.desc()
         ).first()
 
         if latest_lease:
-            return latest_lease.leased_at
+            return latest_lease.created_at
 
         # 或者从 Agent 更新时间推断
         agent = Agent.query.get(agent_id)
@@ -105,18 +105,22 @@ class AgentHealthMonitor:
 
     def _get_task_stats(self, agent_id: int) -> Dict:
         """获取任务统计"""
-        # 活跃租赁数（正在处理）
-        active_leases = AgentTaskLease.query.filter_by(
-            agent_id=agent_id,
-            is_complete=False
+        now = datetime.utcnow()
+
+        # 活跃租赁数（正在处理：active 且未过期）
+        active_leases = AgentTaskLease.query.filter(
+            AgentTaskLease.agent_id == agent_id,
+            AgentTaskLease.active == True,  # noqa: E712
+            AgentTaskLease.expires_at > now,
         ).count()
 
-        # 今日完成任务数
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0)
+        # 今日完成任务数：表上无完成时间戳，以"已释放（active=False）且
+        # 最近更新在今天"近似（updated_at 由 BaseModel 在写时刷新）
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         completed_today = AgentTaskLease.query.filter(
             AgentTaskLease.agent_id == agent_id,
-            AgentTaskLease.is_complete == True,
-            AgentTaskLease.completed_at >= today_start
+            AgentTaskLease.active == False,  # noqa: E712
+            AgentTaskLease.updated_at >= today_start
         ).count()
 
         return {
