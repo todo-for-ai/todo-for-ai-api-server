@@ -359,7 +359,7 @@
 
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
-**门禁**：全量单测 396（基线）→ **1129 passed**（22 个迭代全部绿灯后）。
+**门禁**：全量单测 396（基线）→ **1169 passed**（23 个迭代全部绿灯后）。
 
 **第二轮（迭代 14-19）补充**：knowledge_curation / review_gate /
 failure_recovery / deploy_check / jwt_refresh / interaction_contract /
