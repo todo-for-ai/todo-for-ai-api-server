@@ -343,6 +343,20 @@
   端点权限。覆盖率 **100%**（422/422）。
 - 根目录 test_openai_api*.py 硬编码 token 属安全问题，删除需用户确认。
 
+### 迭代 23（2026-09-08 22:10-23:20）agent_teams API 35% → 100% + 修 3 个真 bug ✅
+- `api/agent_teams.py`（310 语句，13 端点：团队 CRUD + 成员管理 + 团队项目
+  关联）此前 35% 覆盖、零专项测试。新增
+  `tests/unit/api/test_agent_teams_api.py` 40 用例（真实鉴权链：owner+JWT）。
+- **修了 3 个真 bug**：
+  1. **create_team 从未成功过**：`name` 同时显式传入又在 `**team_data`
+     里重复 → TypeError → 创建团队接口必然 500；
+  2. `?status=` 过滤按 value（'archived'）与按 name 落库的枚举比较 →
+     永不命中（记忆中的 Enum name/value 坑再现）；
+  3. add_team_member 的白名单只有 agent_id → role/responsibility/config
+     被静默丢弃（validate_json_request 白名单模式第 3 次踩中）。
+- 覆盖率 **100%**（310/310）。重复的"工作区 404 / 越权 403"守卫行用
+  参数化（13 端点 × 2 场景）一次性收口。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **1129 passed**（22 个迭代全部绿灯后）。

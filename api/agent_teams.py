@@ -46,7 +46,12 @@ def list_teams(workspace_id):
 
     status_filter = request.args.get('status')
     if status_filter:
-        query = query.filter(AgentTeam.status == status_filter)
+        # Enum 按 name 落库；API 传入的是小写 value，需先转枚举再比较
+        try:
+            status_enum = AgentTeamStatus(status_filter)
+        except ValueError:
+            status_enum = status_filter
+        query = query.filter(AgentTeam.status == status_enum)
     else:
         query = query.filter(AgentTeam.status != AgentTeamStatus.ARCHIVED)
 
@@ -93,7 +98,10 @@ def create_team(workspace_id):
     if access_err:
         return access_err
 
-    data = validate_json_request(required_fields=['name'])
+    data = validate_json_request(
+        required_fields=['name'],
+        optional_fields=TEAM_EDITABLE_FIELDS + [],
+    )
     if isinstance(data, tuple):
         return data
 
@@ -106,6 +114,8 @@ def create_team(workspace_id):
         return ApiResponse.error('Team with this name already exists', 409).to_response()
 
     team_data = _filter_team_editable_fields(data)
+    # name 已显式传入，从可编辑字段中剔除避免重复 kwarg
+    team_data.pop('name', None)
 
     team = AgentTeam(
         workspace_id=workspace_id,
@@ -299,7 +309,11 @@ def add_team_member(workspace_id, team_id):
     if not team:
         return ApiResponse.not_found('Team not found').to_response()
 
-    data = validate_json_request(required_fields=['agent_id'])
+    # optional_fields 必须列全，否则白名单过滤会丢弃 role/responsibility/config
+    data = validate_json_request(
+        required_fields=['agent_id'],
+        optional_fields=['role', 'responsibility', 'config'],
+    )
     if isinstance(data, tuple):
         return data
 
