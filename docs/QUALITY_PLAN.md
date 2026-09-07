@@ -207,6 +207,15 @@
 - 语义钉子：新建 Agent 无租约时会被 updated_at 回退判为 online——测试已按此
   行为断言（若产品上希望"从未干活即 unknown"，属行为变更，另立迭代）。
 
+### 迭代 13（2026-09-08 07:30-08:10）github_client 39.8% → 100% ✅
+- `services/github_client.py`（93 语句，P1.1 代码平面对 GitHub 的写操作最小面）
+  仅被 api/project_repo.py 间接使用，此前无专项测试。
+- 新增 `tests/unit/services/test_github_client.py` 22 用例：请求封装（URL 拼接/
+  204/非 JSON 体/错误体映射/网络异常 502）、分支 ensure 语义、PR 建查列合、
+  resolve_token 三级凭证优先级（App installation → 绑定 token → GITHUB_TOKEN，
+  逐级静默回退）。
+- 覆盖率 **100%**（93/93 语句）。结构内聚，无需拆分。
+
 ## 收尾总览（2026-09-08 07:40）
 
 **门禁**：全量单测 396（基线）→ **706 passed**（12 个迭代全部绿灯后）。
