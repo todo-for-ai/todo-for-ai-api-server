@@ -309,6 +309,20 @@
 - 覆盖率 **100%**（291/291）。坑：`validate_json_request` 对空 dict `{}`
   一律 400（`if not data`），"全可选字段"的端点也必须带至少一个字段。
 
+### 迭代 21（2026-09-08 18:10-19:30）custom_prompts API 修复三处从未工作过的端点 + 收口 100% ✅
+- `api/custom_prompts.py`（537 行 15 端点）零专项测试。新增
+  `tests/unit/api/test_custom_prompts_api.py` 47 用例后揭出 **4 个真 bug**：
+  1. **export 端点从未工作过**：`'export_time': db.func.now()` 把 SQL 函数
+     对象塞进 JSON 响应 → jsonify 必炸（测试客户端 status_code=0）；
+  2. **preview 端点同病**：`'preview_generated_at': db.func.now()` 同样必炸；
+     均改为 `datetime.utcnow().isoformat()`；
+  3. **全部 13 处 `handle_api_error(e, "中文消息")`**——第二参数是
+     status_code 形参，传字符串导致错误响应状态码为 0（非法 HTTP 响应），
+     全模块错误路径从未正确返回；统一改回 `handle_api_error(e)`；
+  4. `?prompt_type` / `?is_active` 过滤参数形同虚设（get_request_args 不含
+     该键，同迭代 20 的模式）——改为 request.args 直读并保留"默认只列激活"。
+- 覆盖率 **100%**（267/267 语句，47 用例）。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **950 passed**（19 个迭代全部绿灯后）。

@@ -2,6 +2,8 @@
 自定义提示词API端点
 """
 
+from datetime import datetime
+
 from flask import Blueprint, request
 from models import db, CustomPrompt, PromptType
 from .base import ApiResponse, paginate_query, validate_json_request, get_request_args, APIException, handle_api_error
@@ -17,14 +19,17 @@ def get_custom_prompts():
     """获取用户的自定义提示词列表"""
     try:
         current_user = get_current_user()
-        args = get_request_args()
 
-        # 获取查询参数
-        prompt_type = args.get('prompt_type')  # 'project' 或 'task_button'
-        is_active = args.get('is_active', True)  # 默认只返回激活的
+        # 获取查询参数（get_request_args 不含以下键，需从 request.args 直读）
+        prompt_type = request.args.get('prompt_type')  # 'project' 或 'task_button'
+        is_active_param = request.args.get('is_active')
 
-        # 构建查询
+        # 构建查询（默认只返回激活的；显式 is_active=false 返回未激活）
         query = CustomPrompt.query.filter(CustomPrompt.user_id == current_user.id)
+        if is_active_param is None or is_active_param.lower() == 'true':
+            query = query.filter(CustomPrompt.is_active == True)
+        elif is_active_param.lower() == 'false':
+            query = query.filter(CustomPrompt.is_active == False)
         
         if prompt_type:
             try:
@@ -33,15 +38,12 @@ def get_custom_prompts():
             except ValueError:
                 return ApiResponse.error("Invalid prompt_type. Must be 'project' or 'task_button'", 400).to_response()
         
-        if is_active is not None:
-            query = query.filter(CustomPrompt.is_active == is_active)
-        
         # 排序：按order_index升序，然后按创建时间降序
         query = query.order_by(CustomPrompt.order_index.asc(), CustomPrompt.created_at.desc())
         
         # 手动分页
-        page = args['page']
-        per_page = min(args['per_page'], 100)  # 限制最大每页数量
+        page = request.args.get('page', 1, type=int)
+        per_page = min(request.args.get('per_page', 20, type=int), 100)  # 限制最大每页数量
 
         # 执行分页查询
         pagination = query.paginate(
@@ -67,7 +69,7 @@ def get_custom_prompts():
         return ApiResponse.success(result, "Custom prompts retrieved successfully").to_response()
         
     except Exception as e:
-        return handle_api_error(e, "Failed to retrieve custom prompts")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('', methods=['POST'])
@@ -137,7 +139,7 @@ def create_custom_prompt():
         
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e, "Failed to create custom prompt")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/<int:prompt_id>', methods=['GET'])
@@ -158,7 +160,7 @@ def get_custom_prompt(prompt_id):
         return ApiResponse.success(prompt.to_dict(), "Custom prompt retrieved successfully").to_response()
         
     except Exception as e:
-        return handle_api_error(e, "Failed to retrieve custom prompt")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/<int:prompt_id>', methods=['PUT'])
@@ -221,7 +223,7 @@ def update_custom_prompt(prompt_id):
         
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e, "Failed to update custom prompt")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/<int:prompt_id>', methods=['DELETE'])
@@ -251,7 +253,7 @@ def delete_custom_prompt(prompt_id):
         
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e, "Failed to delete custom prompt")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/project-prompts', methods=['GET'])
@@ -260,9 +262,8 @@ def get_project_prompts():
     """获取用户的项目提示词列表"""
     try:
         current_user = get_current_user()
-        args = get_request_args()
-        
-        is_active = args.get('is_active', True)
+        is_active_param = request.args.get('is_active')
+        is_active = True if is_active_param is None else is_active_param.lower() == 'true'
         prompts = CustomPrompt.get_user_project_prompts(current_user.id, is_active)
         
         result = [prompt.to_dict() for prompt in prompts]
@@ -270,7 +271,7 @@ def get_project_prompts():
         return ApiResponse.success(result, "Project prompts retrieved successfully").to_response()
         
     except Exception as e:
-        return handle_api_error(e, "Failed to retrieve project prompts")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/task-button-prompts', methods=['GET'])
@@ -279,9 +280,8 @@ def get_task_button_prompts():
     """获取用户的任务按钮提示词列表"""
     try:
         current_user = get_current_user()
-        args = get_request_args()
-        
-        is_active = args.get('is_active', True)
+        is_active_param = request.args.get('is_active')
+        is_active = True if is_active_param is None else is_active_param.lower() == 'true'
         prompts = CustomPrompt.get_user_task_button_prompts(current_user.id, is_active)
         
         result = [prompt.to_dict() for prompt in prompts]
@@ -289,7 +289,7 @@ def get_task_button_prompts():
         return ApiResponse.success(result, "Task button prompts retrieved successfully").to_response()
         
     except Exception as e:
-        return handle_api_error(e, "Failed to retrieve task button prompts")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/task-buttons/reorder', methods=['PUT'])
@@ -323,7 +323,7 @@ def reorder_task_button_prompts():
 
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e, "Failed to reorder task button prompts")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/project-prompts/<int:prompt_id>/preview', methods=['POST'])
@@ -359,13 +359,13 @@ def preview_project_prompt(prompt_id):
             'raw_content': prompt.content,
             'rendered_content': prompt.content,  # TODO: 实际渲染
             'project_id': project_id,
-            'preview_generated_at': db.func.now()
+            'preview_generated_at': datetime.utcnow().isoformat()
         }
 
         return ApiResponse.success(preview_data, "Project prompt preview generated successfully").to_response()
 
     except Exception as e:
-        return handle_api_error(e, "Failed to preview project prompt")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/initialize-defaults', methods=['POST'])
@@ -398,7 +398,7 @@ def initialize_user_defaults():
 
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e, "Failed to initialize default prompts")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/reset-to-defaults', methods=['POST'])
@@ -428,7 +428,7 @@ def reset_to_defaults():
 
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e, "Failed to reset prompts to defaults")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/export', methods=['GET'])
@@ -442,14 +442,14 @@ def export_custom_prompts():
 
         export_data = {
             'user_id': current_user.id,
-            'export_time': db.func.now(),
+            'export_time': datetime.utcnow().isoformat(),
             'prompts': [prompt.to_dict() for prompt in prompts]
         }
 
         return ApiResponse.success(export_data, "Custom prompts exported successfully").to_response()
 
     except Exception as e:
-        return handle_api_error(e, "Failed to export custom prompts")
+        return handle_api_error(e)
 
 
 @custom_prompts_bp.route('/import', methods=['POST'])
@@ -534,4 +534,4 @@ def import_custom_prompts():
 
     except Exception as e:
         db.session.rollback()
-        return handle_api_error(e, "Failed to import custom prompts")
+        return handle_api_error(e)
