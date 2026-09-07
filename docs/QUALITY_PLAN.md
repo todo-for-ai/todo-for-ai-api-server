@@ -159,4 +159,20 @@
   装饰器 key 构造）。
 - 建议（留档）：该服务全库无人 import——若后续确认不再接线，整包可删
   （删除前需用户确认）。
+
+### 迭代 9（2026-09-08 03:20-04:30）拆分 connectors.py 459 行 → connectors/ 包（按 provider）✅
+- 前：`services/connectors.py` 459 行混了三平台（Jira/GitLab/Linear）×（验签 +
+  issue 应用 + 评论应用 + ingest 分发）+ 配置存取 + 共享工具；同一
+  "default_project_id 解析 + 校验"块在文件里重复 5 次；专项测试为零。
+- 后：`services/connectors/` 包：store（配置存取）/ verify（三平台验签）/
+  common（resolve_project 消灭 5 处重复 + find_task + emit_sync_event）/
+  jira / gitlab / linear；`__init__` 兼容旧导入路径（api/connectors.py 的
+  9 个符号导入零改动）。
+- 覆盖率：包内 7 文件全部 **100% 行覆盖**；新增
+  `tests/unit/services/test_connectors_split.py` 27 用例（三平台建任务/状态
+  映射/评论追加/未导入评论跳过/缺项目报错/未启用与未知事件分支/outbox 落库）。
+- 坑（再次验证）：conftest 的 db_session 绑定它自己的 app/内存库，与测试自建
+  app 的 db.session 是**两个库**——夹具必须用与被测代码相同的 session 自建数据，
+  否则"独跑绿、类内跑挂"。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
