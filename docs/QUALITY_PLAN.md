@@ -126,4 +126,37 @@
   按 hunk 纪律不动不测**）外全部行覆盖：83% 语句覆盖，剩余缺失行 100% 落在他人 WIP 函数内。
 - 覆盖率口径说明：该文件的"100%"以待本会话拥有且可改动区域计；auto_assign_task 的
   org_id 语义修复归原作者，等其提交后再补测收口。
+
+### 迭代 7（2026-09-08 00:40-01:40）拆分 ai_service 763 行 → ai/ 包七模块 ✅
+- 前：`services/ai_service.py` 763 行混了六件事：容错配置（DB+缓存）、错误码/上下文、
+  限流器、双级缓存、审计落库、LLM 调用编排；`LLMService.call()` 单方法 280 行
+  （限流/缓存/请求/响应解析/HTTP 错误分类/五类异常处理全部内联）。
+- 后：`services/ai/` 包：config 27 / errors 38 / rate_limiter 48 / response_cache 70 /
+  audit_logger 38 / llm_service 182 行 + 20 行兼容门面；`call()` 重构为编排器，
+  拆出 `_guard_rate_limit`/`_guard_cache`/`_apply_http_error`/`_handle_success`/
+  `_execute_chat`/`_error_result` 六个可独立测试的阶段方法，外部行为逐字段钉住不变。
+- 覆盖率：包内 8 文件全部 **100% 行覆盖**（此前整文件 0 专项测试）；新增
+  `tests/unit/services/test_ai_infra.py` 63 用例（含限流滑窗、Redis 回填/失效、
+  审计失败重排、429/401/400 各变体/连接与读取超时/网络异常等端到端分支）。
+- 门禁：全量 638 passed（上一迭代 523）。
+- **测试污染教训**：全量门禁下早前 api 测试会把 core.redis_client 单例连上本地
+  真实 Redis——AIResponseCache 的"内存过期"用例独跑绿、全量挂（L2 真写真读）。
+  测试内 patch core.redis_client.get_json/set_json 为进程内假实现后收敛。
+- 经验：mock session 要从 `_get_session` 注入（实例属性替换），否则配置版本检测
+  会用真实 Session 覆盖掉 mock，测试悄悄打到真网络；"拆包不改变行为"靠
+  先钉行为（"Bad request: Bad request"这类怪文案也原样保留）再动刀。
+
+### 迭代 8（2026-09-08 02:00-03:00）拆分 redis_cache_service 543 行 → cache/ 包 ✅
+- 前：`services/redis_cache_service.py` 543 行混了四件事：分布式锁（SET NX EX +
+  Lua 释放 + 自动续期线程）、L1 进程内 LRU 缓存、L1+L2 编排（防击穿双重检查/
+  批量/模式失效/统计）、cached 装饰器；且**全库零引用**（从未接线的基础设施），
+  专项测试为零。
+- 后：`services/cache/` 包：constants 4 / lock 56 / local 52 / core 158 行 +
+  23 行兼容门面（单例与符号身份保持）。
+- 覆盖率：包内 5 文件全部 **100% 行覆盖**；新增
+  `tests/unit/services/test_cache_service.py` 52 用例（假 Redis/假线程驱动：
+  锁的阻塞超时与续期循环、LRU 淘汰与过期清理、双重检查命中路径、扫描失效、
+  装饰器 key 构造）。
+- 建议（留档）：该服务全库无人 import——若后续确认不再接线，整包可删
+  （删除前需用户确认）。
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
