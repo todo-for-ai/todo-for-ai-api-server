@@ -275,6 +275,23 @@
   进程管理/MCP 运行时脚本（前者 subprocess 管理脚本，后者依赖 mcp 包异步
   运行时），不属于单测目标，留档说明。
 
+### 迭代 19（2026-09-08 15:10-16:40）auth API 43% → 99% ✅
+- `api/auth.py`（334 语句，认证核心面）此前 43% 覆盖、0 专项测试文件。
+- 新增 `tests/unit/api/test_auth_surface.py` 67 用例：
+  - 纯助手：回环地址归一、回跳地址七分支、query 参数保留
+  - 访客登录：首建/复用/token 生成失败 500
+  - OAuth：github/google 入口与回调的成功链路、authorize/token 交换失败、
+    中间产物（userinfo/建户/发 token）逐级失败、异常兜底 500
+  - 账号面：logout/me 读写（preferences 合并与类型拒绝）、verify、refresh
+    （无 token/未知用户/非整型身份/生成失败）
+  - 管理面：用户列表 admin 门禁 + search/status/role 过滤、用户详情三视角
+    （self/admin/共享组织公开档案含角色键）、状态管理五分支
+  - 组织角色键收集：owner 短路、非成员空、角色定义去重归一、legacy 回退
+- 结果 **99%**（334 语句缺 1 行）：`_collect_user_org_role_keys` 末行
+  `return []` 在 member.role NOT NULL + default=MEMBER 约束下不可达（死行，
+  按计划纪律注明不强凑）。**注意本仓库 `.env` 会把 DOCKER_ENV 等灌入
+  os.environ，分支类测试必须显式 delenv/setenv 固定环境**。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **871 passed**（17 个迭代全部绿灯后）。
