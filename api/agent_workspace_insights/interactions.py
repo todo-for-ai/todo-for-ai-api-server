@@ -87,14 +87,12 @@ def list_agent_interactions(workspace_id: int, agent_id: int):
             )
         )
 
-    # 时间范围筛选
-    if from_date:
-        interaction_query = interaction_query.filter(func.max(TaskLog.created_at) >= from_date)
-    if to_date:
-        interaction_query = interaction_query.filter(func.max(TaskLog.created_at) <= to_date)
-
-    # 使用 HAVING 筛选聚合结果
+    # 时间范围筛选（聚合列不能进 WHERE，统一走 HAVING）
     having_clauses = []
+    if from_date:
+        having_clauses.append(func.max(TaskLog.created_at) >= from_date)
+    if to_date:
+        having_clauses.append(func.max(TaskLog.created_at) <= to_date)
     if min_interactions is not None:
         having_clauses.append(func.count(TaskLog.id) >= min_interactions)
     if max_interactions is not None:

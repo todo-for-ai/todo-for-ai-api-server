@@ -475,4 +475,35 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 教训：解耦/搬移类重构必须同时删旧文件——grep 引用数为零不等于
   "没接线是故意的"，要先查 git log 确认是否为搬移残留。
 
+### 迭代 28（2026-09-09）agent_workspace_insights 包：拆双胞胎 + 整包 100% ✅
+- **修最重存量 bug：interactions 端点 from/to 时间过滤把聚合函数写进
+  WHERE**（`filter(func.max(TaskLog.created_at) >= from)`）——分组查询里
+  SQLite 抛 "misuse of aggregate: max()"，MySQL 同样拒绝；**带时间参数
+  的请求自上线起必然 500**。改为与其他聚合过滤一致的 HAVING。
+- **拆双胞胎**：activity.py（352 行）与 workspace_activities.py（413 行）
+  是约 90% 同构的五源聚合循环（run/attempt/task_event/task_log/audit），
+  仅 agent 归属口径不同。抽出共享 `activity_collectors.py`
+  （ActivityScope 参数化 + 五个收集器 + 富化 + 过滤切页汇总），两个
+  路由文件各瘦身为 27 行纯鉴权+分发薄壳；净删约 700 行重复。
+- 新增 `tests/unit/api/test_agent_workspace_insights_api.py` 57 用例：
+  - agent 活动端点：五源装配、失败/中止级别判定、audit risk_score 级别
+    回退（60/25/5 → error/warn/info）、全量过滤矩阵（source/level/
+    event_type/task/project/run/attempt/actor/q/min_max_risk）、时间窗、
+    分页与 scan_limit 钳制、task_title/project_name 回填（含仅 project
+    payload 的 run）
+  - 工作区活动端点：跨 agent 聚合 + agent_name 档案回填、agent_id 过滤、
+    审计行无 agent 关联跳过（含 actor_id 不可解析）、target/actor 回推、
+    全五源一次到位的 summary 断言
+  - 活动事件端点：游标编解码 + 非法游标 400 + 游标翻页不重不漏、
+    limit 钳制、全过滤参数、agent/task/project 实体富化
+  - agent 任务/项目/交互三维统计：触达集合（attempt∪log）、提交率、
+    活跃度分数上界与久远衰减下界、HAVING 区间、排序字段回退、
+    display_name 回退链
+  - shared 辅助直测 + 审计降级查询（unknown column 降级 / 其他错误上抛）
+- 覆盖率：包内 9 文件全部 **100%**（拆分前 6-20%）；门禁
+  **1452 passed**（27 迭代后 1395）。
+- 经验：matcher 类纯函数（`_activity_item_matches` 12 个过滤维度）在
+  端点测试里很难自然命中全部分支，直接来一组单维真值表直测最省；
+  双胞胎文件合并前先用端到端断言钉死可观察输出，再合并，测试一行不用改。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
