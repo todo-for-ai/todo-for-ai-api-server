@@ -534,4 +534,30 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   的触发方式；`Query.get()`/expire 语义（expire 丢弃未 flush 修改）
   反复成为测试自身失败的来源，断言前先 commit。
 
+### 迭代 30（2026-09-09）ai_task_split：三个上线级 bug 修复 + 100% ✅
+- **Bug 1（最重）**：拆分主端点默认 atomic 分支用
+  `with db.session.begin():`——请求内先查父任务已开启事务，
+  SQLAlchemy 2.0 直接抛 InvalidRequestError 被外层 except 吃掉，
+  **AI 拆分成功路径上线起必 500**。修复：删除伪原子包装，依赖请求级
+  单一事务 + 失败统一 rollback 的天然全有或全无语义（原 atomic 分支
+  与非 atomic 分支本就做同样的事）。
+- **Bug 2**：`Task.tags.contains(['parent_task:X'])` 把整个单元素
+  JSON 数组当 LIKE 子串——多标签行永远匹配不上。**子任务列表/删除/
+  重排序/剩余计数四处查询在生产 MySQL 上同样全坏**（真实子任务有
+  3 个标签）。修复：改引号定界 LIKE（`%"parent_task:X"%`，闭口引号
+  防 parent_task:1 误中 12，SQLite/MySQL 通用）。
+- **Bug 3**：delete_subtask 父任务无 tags 时 `remaining` 未赋值 →
+  NameError → 500。修复：前置初始化 `remaining = 0`。
+- 新增 `tests/unit/api/test_ai_task_split_api.py` 42 用例：输入清洗/
+  子任务校验矩阵（标题截断、优先级回退、预估时间钳制、依赖整数化）、
+  LLM JSON 四级降级解析、主端点全分支（429 限流映射、解析失败、
+  空子任务、成功链路含父任务标签置换与 auto-assign 联动、缓存参数
+  透传、数量钳制、401/SQLAlchemyError/兜底 500）、子任务列表元数据
+  解析与排序、删除（无标签父任务回归钉子）、重排序校验矩阵。
+- 覆盖率 16.1% → **100%**；门禁 **1538 passed**（29 迭代后 1496）。
+- 经验：`JSON 列.contains(list)` 不是 JSON 包含判断而是整段数组文本
+  LIKE——凡是"按 JSON 数组中的一个成员查行"都要用引号定界 LIKE 或
+  方言原生函数；写"防御性"包装前先确认 SQLAlchemy 事务模型
+  （Session.begin() 在活动事务上必抛，2.0 无隐式 autocommit）。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

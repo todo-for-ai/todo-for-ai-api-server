@@ -191,7 +191,6 @@ def split_task(task_id):
         data = request.get_json() or {}
         num_subtasks = data.get('num_subtasks', DEFAULT_SUBTASKS)
         use_cache = data.get('use_cache', True)
-        atomic = data.get('atomic', True)
 
         # 4. 验证参数
         if not isinstance(num_subtasks, int):
@@ -269,17 +268,12 @@ def split_task(task_id):
         created_subtasks = []
 
         try:
-            if atomic:
-                # 原子操作：使用事务
-                with db.session.begin():
-                    created_subtasks = _create_subtasks(
-                        parent_task, validated_subtasks, user_id
-                    )
-            else:
-                # 非原子操作：逐条创建
-                created_subtasks = _create_subtasks(
-                    parent_task, validated_subtasks, user_id
-                )
+            # 整个请求本就运行在单一事务内（进入时已查询父任务，
+            # Session.begin() 在活动事务上会直接 InvalidRequestError），
+            # 失败路径统一 rollback，天然具备全有或全无语义
+            created_subtasks = _create_subtasks(
+                parent_task, validated_subtasks, user_id
+            )
 
             # 13. 更新父任务状态
             if not parent_task.tags:
@@ -385,8 +379,11 @@ def get_subtasks(task_id):
             return ApiResponse.not_found('Task not found').to_response()
 
         # 2. 获取子任务
+        # 注意：JSON 列的 .contains(list) 会把整个单元素数组当 LIKE 子串，
+        # 多标签行永远匹配不上；改用带引号定界的子串匹配，
+        # 闭口引号保证 parent_task:1 不会误中 parent_task:12
         subtasks = Task.query.filter(
-            Task.tags.contains([f"parent_task:{task_id}"])
+            Task.tags.like(f'%\"parent_task:{task_id}\"%')
         ).order_by(Task.created_at.asc()).all()
 
         # 3. 构建响应
@@ -437,10 +434,10 @@ def delete_subtask(task_id, subtask_id):
     删除子任务
     """
     try:
-        # 1. 获取子任务
+        # 1. 获取子任务（引号定界，见 get_subtasks 内注释）
         subtask = Task.query.filter(
             Task.id == subtask_id,
-            Task.tags.contains([f"parent_task:{task_id}"])
+            Task.tags.like(f'%\"parent_task:{task_id}\"%')
         ).first()
 
         if not subtask:
@@ -458,9 +455,10 @@ def delete_subtask(task_id, subtask_id):
 
         # 4. 更新父任务标签
         parent_task = Task.query.get(task_id)
+        remaining = 0
         if parent_task and parent_task.tags:
             remaining = Task.query.filter(
-                Task.tags.contains([f"parent_task:{task_id}"])
+                Task.tags.like(f'%\"parent_task:{task_id}\"%')
             ).count()
 
             parent_task.tags = [
@@ -502,9 +500,9 @@ def reorder_subtasks(task_id):
         if not isinstance(orders, list):
             return ApiResponse.error('orders must be a list', 400).to_response()
 
-        # 获取子任务
+        # 获取子任务（引号定界，见 get_subtasks 内注释）
         subtasks = Task.query.filter(
-            Task.tags.contains([f"parent_task:{task_id}"])
+            Task.tags.like(f'%\"parent_task:{task_id}\"%')
         ).all()
 
         if len(orders) != len(subtasks):
