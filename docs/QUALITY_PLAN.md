@@ -560,4 +560,35 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   方言原生函数；写"防御性"包装前先确认 SQLAlchemy 事务模型
   （Session.begin() 在活动事务上必抛，2.0 无隐式 autocommit）。
 
+### 迭代 31（2026-09-09）dashboard + system_settings 收口 ✅
+- **修 ollama 连接测试守卫矛盾**：`test_llm_api_connection` 入口
+  `if not api_base or not api_key` 无差别要求 key，但 ollama 分支
+  注释明说"通常不需要 API key"——**无 key 的 ollama 配置永远无法
+  测试连接**。改为 `not api_key and provider != 'ollama'`。
+- **删死代码**：`_empty_project_stats` / `_empty_task_stats`
+  两个零引用助手。
+- **coverage 盲行疑云排排查记录**：`_get_consecutive_active_days`
+  的 `else: break` 语义上必然执行（间断用例断言通过）却始终不被
+  coverage 记录——CPython 3.9 peephole 会把 `while True` 中以
+  break 为唯一语句的分支做条件跳转重定向，行事件不再触发。重构为
+  `for _ in range(365)` 有界循环 + `return` 早退（return 不受该
+  优化影响），行覆盖与结构双改善。
+- 新增 `tests/unit/api/test_dashboard_and_system_settings_api.py`
+  52 用例：双层缓存（redis + 进程内回退 + stale 降级）、后台异步
+  刷新去重与 in-flight 清理、owned/participated 双范围统计、大数据
+  集降级、组织角色解析（owner 优先于成员行/优先级序/自定义 key/
+  空 key 回退）、组织 Agent 7 天窗口统计、热力图/摘要缓存、连续
+  活跃天数（间断/上限 365/查询异常）、系统设置管理员门禁矩阵、
+  LLM 配置加密读写（部分更新保留旧密钥、非管理员掩码）、通用设置
+  get/set、五 provider 连接测试与超时/连接错误/未知异常矩阵、
+  全部 500 兜底分支。
+- 覆盖率：dashboard 19.6% → **100%**，system_settings 18.6% →
+  **100%**；门禁 **1590 passed**（30 迭代后 1538）。
+- 教训：断言通过但某行始终不被 coverage 记录时，先怀疑 3.9 字节码
+  优化（break 重定向/死代码消除）而非测试没跑到——用 dis 或
+  coverage API 直接验证执行行集合，再决定改结构还是改测试。
+  另：仪表盘蓝图挂在 `/dashboard` 子前缀、系统设置在
+  `/system-settings` 子前缀（路由里 route('') 是相对路径），写
+  端点测试前先查 app.py 的 url_prefix。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

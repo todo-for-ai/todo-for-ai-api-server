@@ -87,24 +87,6 @@ def _dashboard_cache_set(key, value, ttl_seconds, stale_ttl_seconds=None):
         }
 
 
-def _empty_project_stats():
-    return {
-        'total': 0,
-        'active': 0,
-    }
-
-
-def _empty_task_stats():
-    return {
-        'total': 0,
-        'todo': 0,
-        'in_progress': 0,
-        'review': 0,
-        'done': 0,
-        'ai_executing': 0,
-    }
-
-
 def _build_scope_stats(project_query, task_query):
     project_stats_row = project_query.with_entities(
         func.count(Project.id).label('total_projects'),
@@ -510,26 +492,21 @@ def get_activity_summary():
 def _get_consecutive_active_days(user_id):
     """计算连续活跃天数"""
     try:
-        today = date.today()
         consecutive_days = 0
-        current_date = today
+        current_date = date.today()
 
-        # 从今天开始往前查找连续活跃的天数
-        while True:
+        # 从今天开始往前查找连续活跃的天数，最多回看 365 天
+        for _ in range(365):
             activity = UserActivity.query.filter_by(
                 user_id=user_id,
                 activity_date=current_date
             ).first()
 
-            if activity and activity.total_activity_count > 0:
-                consecutive_days += 1
-                current_date -= timedelta(days=1)
-            else:
-                break
+            if not (activity and activity.total_activity_count > 0):
+                return consecutive_days
 
-            # 防止无限循环，最多查找365天
-            if consecutive_days >= 365:
-                break
+            consecutive_days += 1
+            current_date -= timedelta(days=1)
 
         return consecutive_days
 

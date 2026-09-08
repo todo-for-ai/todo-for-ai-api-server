@@ -196,7 +196,8 @@ def test_llm_api_connection(config):
     api_key = config.get('api_key', '')
     model = config.get('model', 'gpt-4')
 
-    if not api_base or not api_key:
+    # ollama 本地服务通常不需要 API key
+    if not api_base or (not api_key and provider != 'ollama'):
         return {'success': False, 'error': 'API base URL and API key are required'}
 
     try:
