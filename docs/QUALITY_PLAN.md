@@ -757,4 +757,31 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   handlers（14-25%）、api-client methods（0%）、server.ts、http.ts
   余量——后续迭代继续。
 
+
+### 迭代 39（2026-09-09）跨仓：mcp api-client 方法层 + handlers + TodoApiClient 类 ✅
+- 新增 3 个测试文件共 46 用例：
+  - `api-client-sweep.test.ts`（20）：magic-proxy 全量扫 14 个模块
+    约 245 个导出方法（记录型 axios 桩上触发 happy path）+ 5 个代表
+    方法精确断言（mcp/call payload、create_task 默认值、compactParams
+    剥空字段、error 响应抛错）
+  - `handlers-sweep.test.ts`（7）：handlerMap 全部工具（9 域）逐个
+    magic 触发 + get_task_by_id 透传/错误传播/toToolResponse 整形
+  - `todo-api-client.test.ts`（16）：vi.mock axios 下 TodoApiClient
+    构造（baseURL 归一/鉴权头/元数据拦截器/响应拦截器三分类日志）、
+    executeWithRetry 重试矩阵（网络与 5xx 重试、耗尽抛错、4xx 与
+    非 Axios 立即抛、fake timers 推进）、unwrapApiData/compactParams、
+    委托方法透传与类级 magic 扫描
+- mcp 覆盖率：总行 33.55%→**90.46%**、函数 1.63%→**97.68%**、
+  api-client 方法层 0→**100%**、handlers 14-25%→**90.14%**、
+  api-client.ts 类 0→**95.25% 行 / 99.61% 函数**。
+- mcp 门禁 `npm test` **102 passed**（38 迭代后 59）。
+- mcp 提交 341c769，主仓 ref 待推。
+- 经验：①大批量薄包装函数用"魔法对象 + 记录桩"全量扫 + 少量精确
+  断言背书，覆盖率收益极高；②in 操作符检查（`'error' in result`）
+  会被 magic has()=true 误触，魔法对象 has() 必须返回 false；
+  ③fake timers 下"重试耗尽后拒绝"的用例要先挂 rejects 断言再推
+  时间，否则出现短暂 unhandled rejection。
+- mcp 剩余：handlers 分支覆盖 21%（深层整形分支）、部分 api-client
+  模块分支、server.ts/index.ts——后续迭代按需继续。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
