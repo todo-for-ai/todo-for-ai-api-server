@@ -640,4 +640,25 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   改写名字类入参（重名校验依赖精确匹配）；③hash() 有随机化，禁止
   用作测试 id 生成。
 
+### 迭代 34（2026-09-09）小模块清扫：task_labels + review + delegation + agent_performance ✅
+- 新增 `tests/unit/api/test_small_route_modules_api.py` 22 用例，
+  四模块 17-22% → **100%**（task_labels 128 / routes_review 50 /
+  routes_delegation 73 / agent_performance 42 语句）：
+  - 任务标签：内置标签种子幂等、项目过滤（404/403）、名称归一小写、
+    重名 409、停用复活、内置/他人写保护、软删除、4 端点 500 兜底与
+    非 JSON 400
+  - 任务评审：REVIEW 队列过滤与分页、approve→DONE（完成率 100 +
+    completed_at）、reject→IN_PROGRESS（feedback_content 追加带
+    分隔符与旧反馈共存）、缺 decision/非法 decision/非 REVIEW 400
+  - 任务委派：agent 委派（assignees JSON 去重追加、状态流转、
+    auto-assign 与 WebSocket/房间推送三路副作用打桩断言、**副作用
+    全挂也不阻断委派**）、回收（剥离 agent 型 assignee、保留人类、
+    名单拼接）、可委派列表（仅 ACTIVE、按名称排序、capability_tags）
+  - Agent 绩效：审计事件聚合（task_complete/error/failure 分类、
+    duration 均值剔除非正值）、成功/错误率、7 天日活、除零保护、
+    跨工作区 agent 404
+- 门禁 **1669 passed**（33 迭代后 1647）。
+- 经验：小模块合批清扫效率高——四个模块共用一套 env 夹具一次写完；
+  委派端点的"副作用失败不阻断"是隐式契约，用三路 raise 打桩钉住。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
