@@ -613,4 +613,31 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   统一按 value 形式（全库 SQLAlchemy Enum 按 name 落库、按 value
   查询的既有约定）。
 
+### 迭代 33（2026-09-09）pins + api_tokens 收口 ✅
+- 新增 `tests/unit/api/test_pins_api.py`（19 用例）与
+  `tests/unit/api/test_api_tokens_api.py`（16 用例），两模块
+  21.6%/21.1% → **100%**：
+  - pins：双层缓存（redis+回退，TTL 20s，过期 miss/新鲜命中）、
+    Pin/取消/复活（上限 10 豁免已 Pin 项目）、重排序校验与未知项目
+    跳过、stats/task-counts（缓存命中、pending 三状态聚合）、仅可
+    Pin 自有项目、invalidate_user_caches 联动、全部 6 端点 500 兜底
+  - api_tokens：CRUD（列表脱敏、重名仅查 active、raw token 仅创建
+    返回、过期设置/清空、物理删除）、reveal（损坏密文 400、停用/
+    他人 404）、verify（无效/过期 401、usage_count 自增）、全部
+    6 端点 500 兜底
+- **行为钉子**：pins 的 unpin/reorder 只调 invalidate_user_caches，
+  不清 pins 自身缓存——20s TTL 内提供有界旧读（属设计取舍，测试
+  钉住；如需强一致应由用户裁决改为写时失效）。
+- **删死代码 3 处**：`api_tokens.require_api_token_auth` 装饰器
+  （全库零引用，MCP 用 api/mcp/auth.py 同名实现）、
+  `UserProjectPin.get_user_pins` / `UserProjectPin.reorder_pins`
+  （路由各自内联实现）。
+- 门禁 **1647 passed**（32 迭代后 1612）。
+- 经验：①`unified_auth` 对任何 Bearer 头一律先尝试 API token 认证
+  再退回 JWT——patch ApiToken 的 query/verify_token 会把认证链炸穿
+  并在端点 try 之外冒泡，500 兜底测试应 patch 端点 try 内部的依赖
+  （如 session.commit，且要先造数据再 patch）；②测试助手不要悄悄
+  改写名字类入参（重名校验依赖精确匹配）；③hash() 有随机化，禁止
+  用作测试 id 生成。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

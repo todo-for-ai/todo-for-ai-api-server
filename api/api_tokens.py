@@ -3,7 +3,6 @@ API Token管理接口
 """
 
 from flask import Blueprint, request, g
-from functools import wraps
 import secrets
 import hashlib
 from datetime import datetime, timedelta
@@ -13,31 +12,6 @@ from core.auth import unified_auth_required, get_current_user
 from .base import ApiResponse
 
 api_tokens_bp = Blueprint('api_tokens', __name__)
-
-
-def require_api_token_auth(f):
-    """API Token认证装饰器"""
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # 从请求头获取token
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return ApiResponse.error('Missing or invalid authorization header', 401).to_response()
-        
-        token = auth_header.split(' ')[1]
-        
-        # 验证token
-        api_token = ApiToken.verify_token(token)
-        if not api_token:
-            return ApiResponse.error('Invalid or expired token', 401).to_response()
-        
-        # 将token信息添加到g对象
-        g.api_token = api_token
-        g.current_user = api_token.user
-        
-        return f(*args, **kwargs)
-    
-    return decorated_function
 
 
 @api_tokens_bp.route('', methods=['GET'])
