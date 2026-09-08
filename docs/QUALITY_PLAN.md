@@ -386,6 +386,26 @@
 - 新增 `tests/unit/api/test_workspace_secrets_collaboration_grants.py`
   61 用例。
 
+### 迭代 26（2026-09-09 02:00-03:10）全局丢参模式排查（AST 扫描 + 修复）✅
+- 用 AST 脚本全量扫描 api/ 下 validate_json_request 白名单丢参与
+  get_request_args 死参数两类模式（排除他人 WIP），确认 **6 处白名单
+  丢参 + 1 处死过滤**：
+  1. `agent_role_templates.create_template` 丢 parent_template_id
+     （市场安装去重依赖该字段）
+  2. `agent_role_templates.instantiate_template` 丢 14 个 Agent 字段
+     （system_prompt/llm_model 等全部被过滤）
+  3. `agent_team_orchestration.start_orchestration` 丢
+     participating_agent_ids/config/output_aggregator/subtasks
+  4. `agent_teams.add_team_project` 丢 role/config（迭代 23 漏网）
+  5. `ai_task_assistant.task_assistant` 丢 project_context/stream/use_cache
+  6. `ai_task_assistant.enhance_task` 丢 description/use_cache
+  7. `agents/experiences` 三端点 9 个死过滤参数（get_request_args 不含）
+- 全部修复（validate 补列 optional_fields；experiences 改 request.args
+  直读；orchestration 连带补 AgentTeamStatus/AgentStatus/Project 导入）。
+- 新增 `tests/unit/api/test_param_whitelist_sweep.py` 9 用例作回归钉子。
+- 经验：`validate_json_request` 的白名单若用模块常量拼接（BinOp），
+  AST 审计需跟随常量解析，否则误报"create_agent 丢 29 字段"。
+
 ## 收尾总览（2026-09-08 07:40 起，迭代 13 后更新）
 
 **门禁**：全量单测 396（基线）→ **1169 passed**（23 个迭代全部绿灯后）。

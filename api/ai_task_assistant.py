@@ -205,7 +205,10 @@ def task_assistant():
     """
     try:
         # 1. 获取并验证请求数据
-        data = validate_json_request(required_fields=['description'])
+        data = validate_json_request(
+            required_fields=['description'],
+            optional_fields=['project_context', 'stream', 'use_cache'],
+        )
         if isinstance(data, tuple):
             return data
 
@@ -321,7 +324,10 @@ def enhance_task():
     """
     try:
         # 1. 获取并验证请求数据
-        data = validate_json_request(required_fields=['title'])
+        data = validate_json_request(
+            required_fields=['title'],
+            optional_fields=['description', 'use_cache'],
+        )
         if isinstance(data, tuple):
             return data
 

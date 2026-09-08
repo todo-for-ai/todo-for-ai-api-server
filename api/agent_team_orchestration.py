@@ -9,10 +9,14 @@ from datetime import datetime
 
 from models import (
     db, TeamTaskOrchestration, OrchestrationStrategy, OrchestrationStatus,
-    TeamSubtask, SubtaskStatus, AgentTeam, Agent, Task, TaskStatus
+    TeamSubtask, SubtaskStatus, AgentTeam, AgentTeamStatus, Agent,
+    AgentStatus, Project, Task, TaskStatus
 )
 from core.auth import unified_auth_required, get_current_user
-from api.agent_common import agent_session_required, write_agent_audit
+from api.agent_common import (agent_session_required,
+                              ensure_workspace_access,
+                              get_workspace_or_404,
+                              write_agent_audit)
 from api.base import ApiResponse, validate_json_request
 
 
@@ -43,7 +47,11 @@ def start_orchestration(workspace_id, task_id):
     if not task:
         return ApiResponse.not_found('Task not found').to_response()
 
-    data = validate_json_request(required_fields=['team_id', 'strategy'])
+    data = validate_json_request(
+        required_fields=['team_id', 'strategy'],
+        optional_fields=['participating_agent_ids', 'subtasks',
+                         'config', 'output_aggregator'],
+    )
     if isinstance(data, tuple):
         return data
 
@@ -54,7 +62,7 @@ def start_orchestration(workspace_id, task_id):
     team = AgentTeam.query.filter_by(
         id=team_id,
         workspace_id=workspace_id,
-        status='active'
+        status=AgentTeamStatus.ACTIVE
     ).first()
 
     if not team:

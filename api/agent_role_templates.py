@@ -177,7 +177,10 @@ def create_template(workspace_id):
     if access_err:
         return access_err
 
-    data = validate_json_request(required_fields=['name', 'display_name'])
+    data = validate_json_request(
+        required_fields=['name', 'display_name'],
+        optional_fields=['parent_template_id'],
+    )
     if isinstance(data, tuple):
         return data
 
@@ -351,7 +354,15 @@ def instantiate_template(workspace_id, template_id):
     if not template:
         return ApiResponse.not_found('Template not found').to_response()
 
-    data = validate_json_request(required_fields=['name'])
+    data = validate_json_request(
+        required_fields=['name'],
+        optional_fields=[
+            'display_name', 'description', 'avatar_url', 'capability_tags',
+            'system_prompt', 'soul_markdown', 'response_style', 'tool_policy',
+            'memory_policy', 'handoff_policy', 'llm_provider', 'llm_model',
+            'temperature', 'reasoning_mode',
+        ],
+    )
     if isinstance(data, tuple):
         return data
 

@@ -574,7 +574,10 @@ def add_team_project(workspace_id, team_id):
     if not team:
         return ApiResponse.not_found('Team not found').to_response()
 
-    data = validate_json_request(required_fields=['project_id'])
+    data = validate_json_request(
+        required_fields=['project_id'],
+        optional_fields=['role', 'config'],
+    )
     if isinstance(data, tuple):
         return data
 

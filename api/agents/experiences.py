@@ -42,25 +42,25 @@ def list_agent_experiences(agent_id):
     if not agent:
         return ApiResponse.not_found("Agent not found").to_response()
 
-    args = get_request_args()
+    # 这些过滤键不在 get_request_args 固定字典中，需从 request.args 直读
     query = AgentExperience.query.filter_by(agent_id=agent_id, is_valid=True)
 
     # Optional filters
-    experience_type = args.get("experience_type")
+    experience_type = request.args.get("experience_type")
     if experience_type:
         query = query.filter_by(experience_type=experience_type)
-    domain = args.get("domain")
+    domain = request.args.get("domain")
     if domain:
         query = query.filter_by(domain=domain)
-    task_type = args.get("task_type")
+    task_type = request.args.get("task_type")
     if task_type:
         query = query.filter_by(task_type=task_type)
-    is_shared = args.get("is_shared")
+    is_shared = request.args.get("is_shared")
     if is_shared is not None:
         query = query.filter_by(is_shared=is_shared.lower() == "true")
 
     query = query.order_by(AgentExperience.confidence.desc(), AgentExperience.created_at.desc())
-    return paginate_query(query, "experiences")
+    return paginate_query(query, 1, 50)
 
 
 @agents_bp.route("/<int:agent_id>/experiences", methods=["POST"])
@@ -178,10 +178,9 @@ def recommend_experiences(agent_id):
     if not agent:
         return ApiResponse.not_found("Agent not found").to_response()
 
-    args = get_request_args()
-    domain = args.get("domain")
-    task_type = args.get("task_type")
-    capabilities = args.get("capabilities", "").split(",") if args.get("capabilities") else None
+    domain = request.args.get("domain")
+    task_type = request.args.get("task_type")
+    capabilities = request.args.get("capabilities", "").split(",") if request.args.get("capabilities") else None
 
     experiences = AgentExperience.find_relevant_experiences(
         agent_id=agent_id,
@@ -262,22 +261,21 @@ def list_shared_experiences(agent_id):
     if not agent:
         return ApiResponse.not_found("Agent not found").to_response()
 
-    args = get_request_args()
     query = AgentExperience.query.filter(
         AgentExperience.is_shared == True,
         AgentExperience.is_valid == True,
         AgentExperience.agent_id != agent_id,  # Exclude own experiences
     )
 
-    domain = args.get("domain")
+    domain = request.args.get("domain")
     if domain:
         query = query.filter_by(domain=domain)
-    task_type = args.get("task_type")
+    task_type = request.args.get("task_type")
     if task_type:
         query = query.filter_by(task_type=task_type)
 
     query = query.order_by(AgentExperience.confidence.desc(), AgentExperience.created_at.desc())
-    return paginate_query(query, "experiences")
+    return paginate_query(query, 1, 50)
 
 
 @agents_bp.route("/<int:agent_id>/experiences/auto-extract", methods=["POST"])
