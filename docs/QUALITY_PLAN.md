@@ -661,4 +661,27 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 经验：小模块合批清扫效率高——四个模块共用一套 env 夹具一次写完；
   委派端点的"副作用失败不阻断"是隐式契约，用三路 raise 打桩钉住。
 
+### 迭代 35（2026-09-09）api/tasks 包收尾：attachments + batch + agent_chat ✅
+- 新增 `tests/unit/api/test_tasks_remaining_api.py` 26 用例，三模块
+  22%/29%/33% → **100%**（94 + 83 + 24 语句）：
+  - 附件：上传落盘（扩展名白名单/空文件名/content_length 预检/
+    落盘后 getsize 超限回滚文件并 400 双分支）、下载 as_attachment
+    往返、删除连物理文件、列表、他人项目 403、任务 404、附件 404、
+    list/delete/download/upload 四路 500 兜底；注：附件响应刻意
+    不含 file_path（安全设计），落盘断言走 DB 行
+  - 批量：状态/优先级/负责人/删除四路批量（不存在 id 忽略、计数
+    返回）、缺参与 400、MAX_BATCH_SIZE 超限 400（patch 常量=2 避免造
+    100 条数据）、dependencies GET/PUT 与 404
+  - Agent 聊天：agent 会话认证 401 矩阵（缺头/无效令牌/非活跃）、
+    content 必填、parent_id 同任务校验（跨任务 404）、TaskLog 落库
+    （actor=agent、parent 关联）、房间推送 task_comment
+- 观察项（未擅动）：批量四端点无项目级权限校验——任何登录用户可按
+  id 批量改/删任意任务，与 pins 等模块的 owner 校验风格不一致；
+  是否收紧属产品决策，已在测试注释标注。
+- 门禁 **1695 passed**（34 迭代后 1669）。
+- 经验：①multipart 上传的 content_length 恒大于纯 body——想测
+  "落盘后超限"分支必须放行预检、单独 patch os.path.getsize，且注意
+  20MB 阈值的量级；②批量硬删后身份映射残留过期实例，session.get
+  会抛 ObjectDeletedError，改用 query 确认或先快照 id。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
