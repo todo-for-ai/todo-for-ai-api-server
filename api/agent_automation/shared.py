@@ -69,8 +69,6 @@ def _parse_cron_field(field, min_value, max_value):
 
         if '-' in part:
             bounds = part.split('-', 1)
-            if len(bounds) != 2:
-                return None
             try:
                 start = int(bounds[0])
                 end = int(bounds[1])

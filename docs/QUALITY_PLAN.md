@@ -446,7 +446,33 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - `auto_assign_task` org_id 修复归并行会话；其提交后补测收口至 100%。
 - `services/cache/`（原 redis_cache_service）全库零引用——建议用户裁决是否删除。
 - `agent_batch_ops.export_agents_to_json(include_secrets=True)` 参数为 no-op，
-  语义应澄清（澄清属行为变更，未擅动）。
+  语义应澄清（属行为变更，未擅动）。
 - 迭代 12 的"新建 Agent 无租约判 online"语义如需改为 unknown，属产品决策。
+
+### 迭代 27（2026-09-09）agent_automation 包 + channels.py 收口 ✅
+- **删死文件 `api/agent_automation/routes_channels.py`（260 行）**：
+  c742464（4 月）把渠道路由解耦到独立的 `api/channels.py` 时，
+  只删了 `__init__.py` 里的一行 import，忘了删旧文件——留下一个
+  与在册实现逐行等价的死副本，零引用、0% 覆盖。危险在于它
+  会误导后续维护（本轮审查第一结论差点是"端点没注册，接回去"，
+  接回去就会与 channels_bp 产生重复 URL 规则）。
+- `api/agent_automation/shared.py` 删除不可达守卫（`split('-', 1)`
+  恒返回 2 元素，`len(bounds) != 2` 分支永不触发）。
+- 新增 `tests/unit/api/test_agent_automation_api.py` 97 用例，覆盖：
+  - 触发器 CRUD 全分支（task_event/cron 分派、重名 409、窗口钳制、
+    Patch 类型不匹配字段忽略语义、删除=停用）
+  - Runner 配置（执行模式/沙箱策略清洗含域名归一、版本双自增）
+  - 运行列表与详情（状态过滤、分页 has_prev/has_next、排序）
+  - 通知渠道全端点（user/org/project 三 scope 的读/写权限矩阵：
+    owner/member/stranger 三视角、webhook 头清洗+掩码、feishu/
+    dingtalk Patch 保 secret、effective-channels 三级回退与事件过滤、
+    无组织项目跳过 org 层）
+  - shared 辅助（cron 解析全分支、`0 0 31 2 *` 扫满一年放弃、
+    dow 周日=0 映射、布尔/整数归一矩阵、幂等键稳定性）
+  - 路由真实注册断言（channels_bp + agent_automation 双蓝图）
+- 覆盖率：包内 6 文件 + api/channels.py 全部 **100%**（此前包整体
+  12-30%、channels.py 23%）。
+- 教训：解耦/搬移类重构必须同时删旧文件——grep 引用数为零不等于
+  "没接线是故意的"，要先查 git log 确认是否为搬移残留。
 
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
