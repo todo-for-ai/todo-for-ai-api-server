@@ -506,4 +506,32 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   端点测试里很难自然命中全部分支，直接来一组单维真值表直测最省；
   双胞胎文件合并前先用端到端断言钉死可观察输出，再合并，测试一行不用改。
 
+### 迭代 29（2026-09-09）organizations 包收口 ✅
+- 新增 `tests/unit/api/test_organizations_api_full.py` 44 用例，补齐
+  organizations 包 6 文件至 **100%**（原 15-53%）：
+  - 组织 CRUD：可见域（owner∪member，陌生人空集）、搜索/状态/三种排序
+    （钉住怪癖：get_request_args 缺省 sort_by='created_at'，列表端点的
+    updated_at 分支需显式传参才触发）、五维计数装配（member/agent/
+    project/active_role/last_activity）、slug 冲突自增后缀、创建链路
+    （owner 成员 + owner 角色绑定 + org.created 事件）、归档分型事件
+  - 成员管理：邀请（重邀请复活 REMOVED 成员、owner 邮箱 409、owner 角色
+    禁授、角色两种入参）、更新（owner 保护、状态机校验、事件载荷）、
+    移除、列表 include_user
+  - 角色管理：系统角色种子幂等与"复活"（非系统/停用/无名修复）、key
+    去重后缀、系统角色禁删禁停用、删除后剩余绑定主角色重同步
+  - 组织事件：record 工具全兜底（截断 512+3/actor_name 回退 actor_id/
+    非 dict payload 进 raw_payload/ip 注入失败保底）+ 路由过滤矩阵
+  - 全部 7 个 500 兜底分支经 monkeypatch 注入触发；非 JSON 体 400
+- **删死代码 2 处**：`_backfill_member_role_bindings`（40 行零调用，
+  且内部 stale role_bindings 集合会触发 UNIQUE 自撞——同 session 内
+  先读过成员再回填必炸，幸好从未接线）；`_sync_member_primary_role`
+  的 `except ValueError`（ROLE_PRIORITY 四键全是合法枚举，分支不可达）；
+  `_get_user_org_roles_map` 的空角色 setdefault 死分支（role 列
+  NOT NULL 非空枚举）。
+- 门禁 **1496 passed**（28 迭代后 1452）。
+- 经验：catch-all `except Exception` 的 500 分支是覆盖率钉子户，
+  monkeypatch 模块命名空间内的符号（from-import 落地的本地名）是最省
+  的触发方式；`Query.get()`/expire 语义（expire 丢弃未 flush 修改）
+  反复成为测试自身失败的来源，断言前先 commit。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

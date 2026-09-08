@@ -72,47 +72,6 @@ def _member_legacy_role_key(member):
     return role_key or 'member'
 
 
-def _backfill_member_role_bindings(organization_id, created_by='system'):
-    """
-    兼容旧数据：
-    当 organization_member_roles 还未建立绑定时，按旧 role 字段补齐一条系统角色绑定。
-    """
-    _ensure_system_roles(organization_id, created_by=created_by)
-    _, roles_by_key = _get_org_roles_map(organization_id, include_inactive=False)
-    if not roles_by_key:
-        return
-
-    members = (
-        OrganizationMember.query.options(selectinload(OrganizationMember.role_bindings))
-        .filter(
-            OrganizationMember.organization_id == organization_id,
-            OrganizationMember.status != OrganizationMemberStatus.REMOVED,
-        )
-        .all()
-    )
-
-    created = False
-    for member in members:
-        if member.role_bindings:
-            continue
-
-        role_key = _member_legacy_role_key(member)
-        role = roles_by_key.get(role_key) or roles_by_key.get('member')
-        if not role:
-            continue
-
-        OrganizationMemberRole.create(
-            organization_id=organization_id,
-            member_id=member.id,
-            role_id=role.id,
-            created_by=created_by,
-        )
-        created = True
-
-    if created:
-        db.session.flush()
-
-
 def _resolve_role_ids_from_payload(organization_id, data, default_role_key=None):
     """
     支持两种入参：
@@ -192,10 +151,8 @@ def _sync_member_primary_role(member):
             selected = key
             break
 
-    try:
-        member.role = OrganizationRole(selected)
-    except ValueError:
-        member.role = OrganizationRole.MEMBER
+    # ROLE_PRIORITY 与 OrganizationRole 同源维护，直接构造
+    member.role = OrganizationRole(selected)
 
 
 def _compute_primary_role_from_keys(role_keys):
@@ -256,8 +213,6 @@ def _get_user_org_roles_map(org_ids, user_id):
         role_key = str(raw_role or '').strip().lower()
         if role_key:
             roles_map[org_id] = [role_key]
-        else:
-            roles_map.setdefault(org_id, [])
 
     return roles_map
 
