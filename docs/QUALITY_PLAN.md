@@ -684,4 +684,27 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   20MB 阈值的量级；②批量硬删后身份映射残留过期实例，session.get
   会抛 ObjectDeletedError，改用 query 确认或先快照 id。
 
+### 迭代 36（2026-09-09）core 层：google_config + notification_queue ✅
+- 新增 `tests/unit/core/test_google_config_and_notification_queue.py`
+  44 用例，两模块 22.3%/18.8% → **100%**（148 + 69 语句）：
+  - GoogleConfig：环境变量缺失抛 ValueError / 齐备正常
+  - GoogleService：init_app OAuth 注册（含构造器直传 app 分支）、
+    get_user_info 成功/网络异常、create_or_update_user 四分支
+    （google_id 命中→更新、邮箱命中→绑定 google_id、全新用户→
+    四件套脚手架、缺邮箱/异常→None）、generate_tokens 对与错
+  - 新用户默认脚手架幂等与语言检测：默认 API Token、用户设置
+    （Accept-Language → zh-CN / locale 优先级 / 默认 en）、默认全局
+    规则（内容含 UI 四原则）、默认提示词按语言初始化；已有任一项
+    时整体跳过；异常路径回滚不打断主流程
+  - 通知队列：进程内假 Redis（list/zset/kv/pipeline）覆盖入队、
+    批量入队过滤非数字、重试调度（datetime/浮点两种 run_at）、
+    到期晋升（zset→list 迁移、limit、空集）、阻塞弹出（非整数
+    字段→None）、分布式锁 fail-open（无 Redis 放行）与属主校验
+- 门禁 **1739 passed**（35 迭代后 1695）。
+- 经验：假 Redis 的 zrangebyscore 必须只返回 member（与真实协议
+  一致），返回 (score, member) 元组会让晋升逻辑写出脏数据但断言
+  才暴露；scaffolding 类函数的失败注入要在 undo patch 之后再断言。
+  api/agents/experience_analytics.py（646 行）仍处他人 WIP 目录
+  （api/agents/ 27 个未提交文件），继续回避。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
