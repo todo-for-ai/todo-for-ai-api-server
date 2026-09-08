@@ -591,4 +591,26 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   `/system-settings` 子前缀（路由里 route('') 是相对路径），写
   端点测试前先查 app.py 的 url_prefix。
 
+### 迭代 32（2026-09-09）agent_analytics 路由层收口 ✅
+- 新增 `tests/unit/api/test_agent_analytics_api.py` 22 用例，模块
+  22.4% → **100%**。本文件是纯委托层（业务在 agent_health/
+  secret_analytics/agent_batch_ops 三个服务，迭代 10/11/12 已收口），
+  测试用 Recorder 桩替换三个服务 Getter，专注路由职责：
+  - 工作区门禁矩阵：10 个 GET 端点 × 工作区 404/陌生人 403 参数化、
+    4 个批量 POST 端点 × 非 JSON 400/工作区 404/陌生人 403/成员非
+    manage 403
+  - 参数解析与透传：days/threshold/limit 默认值与显式值、agent_ids
+    多值 getlist（空→None）、include_secrets 字符串解析、import 的
+    mode 透传、force 旗标、AgentStatus 按 value 枚举（'paused'，
+    非法值 400 回显）
+  - 响应形态：CSV 下载（mimetype + Content-Disposition 文件名）、
+    report 含 error 键 → 404 Secret、健康检查 agent 不存在 404
+- 确认蓝图 url_prefix='/api/v1' 会被 register_blueprint 的
+  url_prefix 覆盖，实际路由无双前缀问题（前端契约安全）。
+- 门禁 **1612 passed**（31 迭代后 1590）。
+- 经验：薄委托层的补测顺序——先 stub 服务 Getter 断开业务依赖，
+  再用参数化矩阵扫门禁早退分支，最后逐端点钉参数透传；枚举入参
+  统一按 value 形式（全库 SQLAlchemy Enum 按 name 落库、按 value
+  查询的既有约定）。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
