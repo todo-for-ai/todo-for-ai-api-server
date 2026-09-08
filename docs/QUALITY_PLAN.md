@@ -707,4 +707,27 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   api/agents/experience_analytics.py（646 行）仍处他人 WIP 目录
   （api/agents/ 27 个未提交文件），继续回避。
 
+### 迭代 37（2026-09-09）services 层收尾：goal_decomposition + saml + runtime_policy ✅
+- 全量重扫（第 37 轮）：services 层低覆盖仅剩 5 个——本轮收口
+  goal_decomposition（79.2%→100%）、saml（82.3%→100%）、
+  workspace_runtime_policy（81.0%→100%，与既有测试合计）；回避
+  agent_runtime_controller（缺失行全在他人的 auto_assign_task WIP）
+  与 task_content（未跟踪 WIP 文件）。services 层 51 文件除 WIP 外
+  **全部 ≥99.5%**。
+- **修真 bug：`_parse_saml_time` 小数秒+数字时区偏移被剁掉**——
+  原实现 `''.join(ch for ch in rest if not ch.isdigit())` 会把
+  `.123456+0000` 的偏移数字一并滤掉（`+0000`→`+`），导致带小数秒
+  且带显式偏移的 SAML 时间戳全部解析失败。改为只剥前导小数位。
+- 新增 32 用例：goal_decomposition 全链路（LLM 三态错误、二次转义
+  再解析、DoD 白名单/截断、双向依赖去重、工作区项目回退）；saml
+  缺口分支（元数据 binding 回退/缺证书、fetch 注入与自管客户端、
+  签名验证 6 个 False 分支、verify 10 个错误分支含 Response 级
+  签名回退/断言过期/InResponseTo、小数秒时间解析）、
+  build_authn_request/build_saml_redirect；runtime_policy（集群
+  异常静默、labels/phase 跳过、_pod_ready_at 三形态、
+  _last_activity_at 空记录）。
+- 门禁 **1783 passed**（36 迭代后 1739）。
+- 经验：SAML 时钟偏移 CLOCK_SKEW_SECONDS=90——"已过期"用例至少要
+  过期 2 分钟；测试类插桩锚点选错会让用例落进没有助手的类。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）

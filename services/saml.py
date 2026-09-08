@@ -315,8 +315,11 @@ def _parse_saml_time(value: str) -> _dt.datetime:
     text = value.strip()
     if text.endswith('Z'):
         text = text[:-1] + '+0000'
-    if '.' in text:  # 截掉小数秒，保留时区
+    if '.' in text:  # 只截掉小数秒数字，保留时区（否则 +0000 会被剁成 +）
         base, rest = text.split('.', 1)
-        tz = ''.join(ch for ch in rest if not ch.isdigit())
+        idx = 0
+        while idx < len(rest) and rest[idx].isdigit():
+            idx += 1
+        tz = rest[idx:] or '+0000'  # 无时区的小数秒按 UTC 处理
         text = base + tz
     return _dt.datetime.strptime(text[:29], '%Y-%m-%dT%H:%M:%S%z').replace(tzinfo=None)
