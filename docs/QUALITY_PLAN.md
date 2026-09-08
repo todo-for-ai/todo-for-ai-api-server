@@ -730,4 +730,31 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 经验：SAML 时钟偏移 CLOCK_SKEW_SECONDS=90——"已过期"用例至少要
   过期 2 分钟；测试类插桩锚点选错会让用例落进没有助手的类。
 
+
+### 迭代 38（2026-09-09）跨仓：todo-for-ai-mcp 传输层与会话管理 ✅
+- mcp 子仓覆盖率基线 33.55%（阈值 70%），零覆盖区：transports
+  （677 行）/session（142 行）/api-client methods/handlers 大部。
+- **修真 bug（mcp/src/transports/http.ts）**：startServer 在 listen
+  回调里 resolve、error 监听后挂——macOS 等平台绑定失败
+  （EADDRINUSE/EADDRNOTAVAIL）回调先触发，传输层错误地报告"已启动"。
+  改为显式等待 listening 事件、早期错误 reject、运行期错误降级为日志。
+- **删死代码（mcp/src/transports/factory.ts）**：私有
+  detectTransportType/analyzeEnvironment 仅被注释代码引用，删除
+  （HTTP 传输类本体保留在 http.ts 供未来启用）。
+- 新增 35 用例：session-manager 11（创建/过期/活跃/清理/定时器/销毁）、
+  transports 24（BaseTransport 契约、factory stdio-only、stdio 生命周期
+  含启停失败、HttpTransport 临时端口真实 HTTP——health、initialize
+  握手+会话复用、400 非法请求、JSON 解析错误、CORS 通配/精确/拒绝、
+  DELETE 会话终止清理、500 兜底、运行期 error 韧性）。
+- mcp 门禁 `npm test` **59 passed**；覆盖率：session/manager、
+  base/factory/stdio 行覆盖 **100%**、http.ts **96.8%**（剩余为
+  next(error) 透传与防御分支，已在测试注明）。
+- mcp 提交 794b52d，主仓 ref e6ebba4。
+- 经验：①tests/setup.ts 全局 mock fetch——HTTP 链路测试改用 node:http
+  极简助手；②macOS 的 listen 失败回调先于 error 事件（Linux 相反），
+  "等 listening 事件"是跨平台正确姿势；③同端口二次绑定在 macOS 会
+  先成功后报 EADDRINUSE，端口冲突测试在修复前不可写。mcp 剩余大块：
+  handlers（14-25%）、api-client methods（0%）、server.ts、http.ts
+  余量——后续迭代继续。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
