@@ -14,6 +14,8 @@ from flask import make_response, request
 
 from workflow_templates import WORKFLOW_TEMPLATES
 
+from services.agent_working_schedule import evaluate_working_window, is_in_working_window
+
 from ._shared import (  # noqa: E402
     agents_bp,
     ApiResponse,
@@ -118,6 +120,21 @@ from ._shared import (  # noqa: E402
     apply_assignment_update,
     _CAPABILITY_HIERARCHY,
 )
+def _normalize_working_schedule_field(data):
+    """校验并规范化 data 中的 working_schedule 字段。
+
+    返回 (data, None)；字段非法时返回 (None, 错误响应)。
+    """
+    if "working_schedule" not in data:
+        return data, None
+    from services.agent_working_schedule import normalize_working_schedule
+    try:
+        data["working_schedule"] = normalize_working_schedule(data["working_schedule"])
+        return data, None
+    except ValueError as e:
+        return None, ApiResponse.error(f"Invalid working_schedule: {e}", 400).to_response()
+
+
 @agents_bp.route("", methods=["GET"])
 @unified_auth_required
 def list_agents():
@@ -174,11 +191,15 @@ def create_agent():
         current_user = get_current_user()
         data = validate_json_request(
             required_fields=["name"],
-            optional_fields=["description", "kind", "status", "provider", "model", "capabilities", "config", "collaboration_role"],
+            optional_fields=["description", "kind", "status", "provider", "model", "capabilities", "config", "collaboration_role", "working_schedule"],
         )
 
         if isinstance(data, tuple):
             return data
+
+        data, err = _normalize_working_schedule_field(data)
+        if err:
+            return err
 
         try:
             kind = parse_enum(AgentKind, data.get("kind", AgentKind.ASSISTANT.value), "kind")
@@ -425,11 +446,15 @@ def update_agent(agent_id):
             return response
 
         data = validate_json_request(
-            optional_fields=["name", "description", "kind", "status", "provider", "model", "capabilities", "config", "collaboration_role", "role_template_id"],
+            optional_fields=["name", "description", "kind", "status", "provider", "model", "capabilities", "config", "collaboration_role", "role_template_id", "working_schedule"],
         )
 
         if isinstance(data, tuple):
             return data
+
+        data, err = _normalize_working_schedule_field(data)
+        if err:
+            return err
 
         # 岗位角色绑定：校验模板存在且为内置或同工作区
         if "role_template_id" in data:
@@ -473,7 +498,7 @@ def update_agent(agent_id):
         db.session.commit()
 
         # If capabilities or config changed, notify the owner via SSE + Notification
-        config_changed_fields = [f for f in ("capabilities", "config") if f in data]
+        config_changed_fields = [f for f in ("capabilities", "config", "working_schedule") if f in data]
         if config_changed_fields:
             _queue_sse(
                 current_user.id,
@@ -625,6 +650,16 @@ def claim_task(agent_id):
 
         if agent.status in [AgentStatus.DISABLED, AgentStatus.PAUSED]:
             return ApiResponse.error("Agent is not available to claim tasks", 409).to_response()
+
+        # 工作时间区间门禁：区间外不允许领取新任务（进行中的任务不受影响）
+        schedule = agent.working_schedule or {}
+        if not is_in_working_window(schedule):
+            evaluation = evaluate_working_window(schedule)
+            return ApiResponse.error(
+                "AGENT_OUT_OF_WORKING_WINDOW",
+                409,
+                next_window_at=evaluation.get("next_window_at"),
+            ).to_response()
 
         data = request.get_json(silent=True) or {}
         lease_seconds = int(data.get("lease_seconds") or 1800)
