@@ -864,3 +864,18 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 经验：911 行"大杂烩"文件往往是多次拆分的残余倾倒场——顶层巨型未用导入块是
   强信号；`validate_json_request()` 空 body 返回 Response 对象、`create()` 后不 flush
   取 id、列 default 顶掉显式 None——本仓三类高频坑。
+
+### 迭代 44（2026-09-10）_workflow_helpers.py 拆出纯逻辑模块 workflow_conditions ✅
+- 前：`api/agents/_workflow_helpers.py` 671 行 / 行覆盖 4.4%；条件求值（10 种操作符 +
+  all/any 组合）与运行时覆盖合并是**零 DB 依赖的纯逻辑**，却埋在 DAG 引擎文件里
+  （低内聚；且 4.4% 覆盖意味着这批共享逻辑从未被回归保护）。
+- 后：拆出 `api/agents/workflow_conditions.py`（44 行纯逻辑：_RUNTIME_OVERRIDABLE_KEYS /
+  _apply_runtime_overrides / _evaluate_step_condition）；_workflow_helpers 顶部改为从新模块
+  导入（既有一切 `from ._workflow_helpers import _evaluate_step_condition` 路径零破坏，
+  workflow_runs / workflow_versions / maintenance 的调用不变）。
+- 覆盖率：`workflow_conditions.py` **100%** 行覆盖（44/44）——条件引擎首次被回归保护。
+- 测试：新增 `test_workflow_conditions.py` 15 用例（allowlist 屏蔽/None 跳过/原对象不变/
+  全操作符真伪/all-any 组合/status_equals 的 enum 与 str 双形态/未知操作符放行）。
+- ⚠️ 遗留（迭代 45 处理）：_advance_workflow 内部给无根任务的步骤建 TaskAssignment
+  （task_id=None → NOT NULL）——builtin 模板带 steps 实例化时该路径必炸，messaging.py
+  侧已做容错降级（try/except + 日志）；修引擎需通读 _advance_workflow + _start_step。
