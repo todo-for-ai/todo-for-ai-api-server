@@ -152,6 +152,47 @@ def _validate_task_events(task_event_types):
     return normalized
 
 
+VALID_TASK_PRIORITIES = {'low', 'medium', 'high', 'urgent'}
+
+
+def _validate_trigger_action(data, workspace_id):
+    """校验 action/action_payload 组合；返回 (action, action_payload, error_response)。
+
+    create_task 动作要求 action_payload 提供 workspace 内的 project_id 和 title；
+    run_agent 动作不接受 action_payload。
+    """
+    from models import Project, AgentTriggerAction
+
+    allowed_actions = {item.value for item in AgentTriggerAction}
+    action_raw = str(data.get('action') or AgentTriggerAction.RUN_AGENT.value).strip().lower()
+    if action_raw not in allowed_actions:
+        return None, None, ApiResponse.error('action must be run_agent or create_task', 400).to_response()
+
+    action_payload = data.get('action_payload')
+    if action_raw == AgentTriggerAction.CREATE_TASK.value:
+        if not isinstance(action_payload, dict):
+            return None, None, ApiResponse.error('action_payload object is required for create_task', 400).to_response()
+        project_id = action_payload.get('project_id')
+        title = str(action_payload.get('title') or '').strip()
+        if not project_id or not str(project_id).isdigit() or not title:
+            return None, None, ApiResponse.error('action_payload requires project_id and title', 400).to_response()
+        project = Project.query.filter_by(id=int(project_id), organization_id=workspace_id).first()
+        if not project:
+            return None, None, ApiResponse.error('action_payload.project_id not found in workspace', 400).to_response()
+        priority = str(action_payload.get('priority') or 'medium').strip().lower()
+        if priority not in VALID_TASK_PRIORITIES:
+            return None, None, ApiResponse.error('action_payload.priority is invalid', 400).to_response()
+        tags = action_payload.get('tags')
+        if tags is not None and not isinstance(tags, list):
+            return None, None, ApiResponse.error('action_payload.tags must be a list', 400).to_response()
+    else:
+        if action_payload not in (None, {}):
+            return None, None, ApiResponse.error('action_payload is only allowed for create_task', 400).to_response()
+        action_payload = {}
+
+    return action_raw, action_payload, None
+
+
 def _resolve_channel_scope(scope_type, scope_id):
     user = get_current_user()
     scope_type_value = scope_type.value if hasattr(scope_type, 'value') else str(scope_type or '').strip().lower()

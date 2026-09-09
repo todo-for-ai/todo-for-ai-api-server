@@ -123,6 +123,10 @@ def emit_repo_event(task, event_name: str, payload=None, repo_full_name=None, ac
 
     db.session.commit()
     return created_runs
+
+
+def _is_trigger_match(trigger, task, event_type, payload) -> bool:
+    """task_event 触发匹配：事件名 + 项目/标签过滤 + 状态迁移过滤。"""
     event_types = [str(item).strip().lower() for item in (trigger.task_event_types or [])]
     if event_type not in event_types:
         return False

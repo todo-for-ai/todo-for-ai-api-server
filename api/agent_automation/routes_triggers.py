@@ -12,6 +12,7 @@ from .shared import (
     _parse_bool,
     _normalize_int,
     _validate_task_events,
+    _validate_trigger_action,
     _compute_next_fire_at,
 )
 
@@ -59,6 +60,8 @@ def create_agent_trigger(workspace_id, agent_id):
             'misfire_policy',
             'catch_up_window_seconds',
             'dedup_window_seconds',
+            'action',
+            'action_payload',
         ],
     )
     if isinstance(data, tuple):
@@ -101,6 +104,10 @@ def create_agent_trigger(workspace_id, agent_id):
         if not next_fire_at:
             return ApiResponse.error('Invalid cron_expr', 400).to_response()
 
+    action, action_payload, action_err = _validate_trigger_action(data, workspace_id)
+    if action_err:
+        return action_err
+
     trigger = AgentTrigger(
         workspace_id=workspace_id,
         agent_id=agent.id,
@@ -116,6 +123,8 @@ def create_agent_trigger(workspace_id, agent_id):
         catch_up_window_seconds=max(10, min(_normalize_int(data.get('catch_up_window_seconds'), 300), 86400)),
         dedup_window_seconds=max(10, min(_normalize_int(data.get('dedup_window_seconds'), 60), 3600)),
         next_fire_at=next_fire_at,
+        action=action,
+        action_payload=(action_payload or None),
         created_by=user.email,
     )
 
@@ -156,6 +165,8 @@ def patch_agent_trigger(workspace_id, agent_id, trigger_id):
             'misfire_policy',
             'catch_up_window_seconds',
             'dedup_window_seconds',
+            'action',
+            'action_payload',
         ]
     )
     if isinstance(data, tuple):
@@ -213,6 +224,21 @@ def patch_agent_trigger(workspace_id, agent_id, trigger_id):
             return ApiResponse.error('Invalid cron_expr', 400).to_response()
         trigger.cron_expr = cron_expr
         trigger.next_fire_at = next_fire_at
+
+    if 'action' in data or 'action_payload' in data:
+        from models import AgentTriggerAction
+        merged = {
+            'action': data.get('action', trigger.action),
+            'action_payload': data.get('action_payload', trigger.action_payload),
+        }
+        # 切回 run_agent 时旧 create_task payload 视为待清理，不做残留报错
+        if str(merged.get('action') or '').strip().lower() == AgentTriggerAction.RUN_AGENT.value:
+            merged['action_payload'] = None
+        action, action_payload, action_err = _validate_trigger_action(merged, workspace_id)
+        if action_err:
+            return action_err
+        trigger.action = action
+        trigger.action_payload = action_payload or None
 
     db.session.commit()
     return ApiResponse.success(trigger.to_dict(), 'Trigger updated successfully').to_response()

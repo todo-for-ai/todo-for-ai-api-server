@@ -14,6 +14,11 @@ class AgentTriggerType(enum.Enum):
     CRON = 'cron'
 
 
+class AgentTriggerAction(enum.Enum):
+    RUN_AGENT = 'run_agent'
+    CREATE_TASK = 'create_task'
+
+
 class AgentMisfirePolicy(enum.Enum):
     SKIP = 'skip'
     CATCH_UP_ONCE = 'catch_up_once'
@@ -39,6 +44,11 @@ class AgentTrigger(BaseModel):
     catch_up_window_seconds = Column(Integer, nullable=False, default=300, comment='补偿窗口秒数')
     dedup_window_seconds = Column(Integer, nullable=False, default=60, comment='触发去重窗口秒数')
 
+    action = Column(String(16), nullable=False, default=AgentTriggerAction.RUN_AGENT.value,
+                    server_default=AgentTriggerAction.RUN_AGENT.value, comment='触发动作: run_agent/create_task')
+    action_payload = Column(JSON, comment='动作参数（create_task: project_id/title/description/priority/tags）')
+    last_fired_key = Column(String(80), comment='create_task 动作的幂等键（最近一次触发）')
+
     last_triggered_at = Column(DateTime, comment='最近触发时间')
     next_fire_at = Column(DateTime, comment='下一次触发时间')
 
@@ -51,4 +61,6 @@ class AgentTrigger(BaseModel):
         data['misfire_policy'] = str(self.misfire_policy or '').lower() or None
         data['task_event_types'] = self.task_event_types or []
         data['task_filter'] = self.task_filter or {}
+        data['action'] = str(self.action or AgentTriggerAction.RUN_AGENT.value).lower() or None
+        data['action_payload'] = self.action_payload or {}
         return data

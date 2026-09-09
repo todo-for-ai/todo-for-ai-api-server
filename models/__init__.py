@@ -51,7 +51,7 @@ from .agent_task_attempt import AgentTaskAttempt, AgentTaskAttemptState
 from .agent_task_lease import AgentTaskLease
 from .agent_task_event import AgentTaskEvent
 from .agent_result_dedup import AgentResultDedup
-from .agent_trigger import AgentTrigger, AgentTriggerType, AgentMisfirePolicy
+from .agent_trigger import AgentTrigger, AgentTriggerType, AgentMisfirePolicy, AgentTriggerAction
 from .agent_run import AgentRun, AgentRunState
 from .agent_connect_link import AgentConnectLink
 from .agent_audit_event import AgentAuditEvent
@@ -202,6 +202,7 @@ __all__ = [
     'AgentTrigger',
     'AgentTriggerType',
     'AgentMisfirePolicy',
+    'AgentTriggerAction',
     'AgentRun',
     'AgentRunState',
     'AgentConnectLink',

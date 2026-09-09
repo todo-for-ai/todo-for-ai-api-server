@@ -396,6 +396,14 @@ try:
 except Exception as _e:
     print(f'⚠️ 目标循环看门狗启动失败: {_e}')
 
+# Start the Agent cron trigger scheduler if enabled (AGENT_CRON_SCHEDULER_ENABLED=true)
+try:
+    from core.agent_cron_scheduler import start_scheduler as start_agent_cron_scheduler
+    if start_agent_cron_scheduler(app):
+        print('⏰ Agent 定时触发调度器已启动（cron 触发/定时建任务）')
+except Exception as _e:
+    print(f'⚠️ Agent 定时触发调度器启动失败: {_e}')
+
 # 云端 Agent Pod 回源地址（Pod → 平台 API）：默认公网地址，
 # 本地/内网部署用 API_BASE_URL 环境变量覆盖（如 http://host.docker.internal:50110/...）
 if os.getenv('API_BASE_URL'):
