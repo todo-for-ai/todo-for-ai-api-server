@@ -823,3 +823,18 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 覆盖率：`api/agents/health.py` **100%**（52/52）、`services/agent_health_analytics.py` **100%**（200/200）。
 - 测试：新增 `test_agent_health_analytics.py` 20 用例（权重归一化/四维评分排序/告警原因分支/建议分支/趋势聚合含脏增量/状态迁移含脏 detail）；全量门禁见提交（后台全量）。
 - 经验：本文件自建 User/Agent 时别走 factory 清理（删除 Agent 级联 reputations 触发 NOT NULL，同 UserActivity 坑）；"0% 覆盖的旧路由"优先怀疑有潜伏 NameError/死导入。
+
+### 迭代 42（2026-09-10）api/agents/productivity.py 拆薄 + 生产力分析下沉 service ✅
+- 前：`api/agents/productivity.py` 703 行 / 行覆盖 8.4%；8 个端点全部内联聚合计算，
+  且"按状态分桶 + 时长累计"的同一段循环在概览/告警/分组抄了 **3 遍**（低内聚实证）。
+- 后：计算下沉 `services/agent_productivity_analytics.py`（8 入口 + `_bucket_by_state`
+  /`_aggregate_assignments` 去重）；路由薄化至 ~110 行（`_parse_int_arg/_parse_float_arg`
+  统一参数钳制）。端点 URL 与响应键零变化。
+- 顺带修复：trend 的 kind_map 把 AgentKind 枚举直接当字典键（响应 JSON 键不可序列化
+  且排序抛 TypeError）——统一取 `kind.value`。
+- 覆盖率：`api/agents/productivity.py` **100%**（67/67）、
+  `services/agent_productivity_analytics.py` **100%**（238/238）。
+- 测试：新增 `test_agent_productivity_analytics.py` 21 用例（六状态分桶/时长回退分支/
+  告警原因与排序/by-kind 分组/热力图峰值与截断/周对比 change_pct 三分支/闲置五档）。
+- 经验：`kind=None` 写不进有 `default=AgentKind.X` 的列（默认值顶掉）——"unknown" 兜底
+  分支只能靠 `.get()` 默认值触达，行覆盖不受影响但别指望造数命中；耗时 1.5h。

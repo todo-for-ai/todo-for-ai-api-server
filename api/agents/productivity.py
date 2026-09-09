@@ -1,704 +1,120 @@
-"""
-Agent productivity and idle ranking endpoints.
-"""
+"""Agent productivity endpoints (thin routes).
 
-from datetime import datetime, timedelta
+计算逻辑全部在 services/agent_productivity_analytics.py；本文件只做
+参数解析（含边界钳制与非法回退）、鉴权与响应包装。
+"""
 
 from flask import request
-from sqlalchemy import func
 
-from ._shared import (
-    agents_bp,
-    ApiResponse,
-    get_current_user,
-    unified_auth_required,
-    db,
-    Agent,
-    AgentKind,
-    AgentRun,
-    AgentRunStatus,
-    AgentStatus,
-    Task,
-    TaskAssignment,
-    TaskAssignmentState,
-    TaskStatus,
-    WorkflowRun,
-    WorkflowStatus,
-    get_request_args,
-    paginate_query,
+from ._shared import ApiResponse, agents_bp, get_current_user, unified_auth_required
+from services.agent_productivity_analytics import (
+    idle_ranking,
+    productivity_alerts,
+    productivity_by_kind,
+    productivity_calendar_heatmap,
+    productivity_hourly_heatmap,
+    productivity_summary,
+    productivity_trend,
+    productivity_weekly_comparison,
 )
+
+
+def _parse_int_arg(name, default, minimum, maximum):
+    try:
+        return max(minimum, min(maximum, int(request.args.get(name, default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_float_arg(name, default, minimum, maximum):
+    try:
+        return max(minimum, min(maximum, float(request.args.get(name, default))))
+    except (TypeError, ValueError):
+        return default
 
 
 @agents_bp.route("/productivity", methods=["GET"])
 @unified_auth_required
 def agent_productivity():
-    """Per-Agent productivity stats for the current user.
-
-    Aggregates TaskAssignment rows by agent: total assignments, completed
-    (DONE), failed, cancelled, completion rate, and average completion
-    duration (completed_at - claimed_at, in hours) for done assignments.
-    Reveals each Agent's throughput and reliability.
-    """
+    """Per-Agent productivity stats: assignments by state, completion rate,
+    average completion duration. Sorted by done desc, limited."""
     user = get_current_user()
-    try:
-        days = max(1, min(365, int(request.args.get("days", 30))))
-        limit = max(1, min(50, int(request.args.get("limit", 20))))
-    except (TypeError, ValueError):
-        days = 30
-        limit = 20
-
-    since = datetime.utcnow() - timedelta(days=days)
-    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
-    if not agent_ids:
-        return ApiResponse.success({"days": days, "items": []}).to_response()
-
-    rows = (
-        TaskAssignment.query
-        .filter(
-            TaskAssignment.agent_id.in_(agent_ids),
-            TaskAssignment.created_at >= since,
-        )
-        .with_entities(
-            TaskAssignment.agent_id,
-            TaskAssignment.state,
-            TaskAssignment.claimed_at,
-            TaskAssignment.completed_at,
-        )
-        .all()
-    )
-
-    agg: dict = {}
-    durations = {}  # agent_id -> list of hours
-    for aid, state, claimed_at, completed_at in rows:
-        bucket = agg.setdefault(aid, {
-            "agent_id": aid, "total": 0, "done": 0, "failed": 0,
-            "cancelled": 0, "expired": 0, "in_progress": 0,
-        })
-        bucket["total"] += 1
-        s = state.value if state else None
-        if s == "done":
-            bucket["done"] += 1
-            if claimed_at and completed_at and completed_at > claimed_at:
-                durations.setdefault(aid, []).append((completed_at - claimed_at).total_seconds() / 3600)
-        elif s == "failed":
-            bucket["failed"] += 1
-        elif s == "cancelled":
-            bucket["cancelled"] += 1
-        elif s == "expired":
-            bucket["expired"] += 1
-        else:
-            bucket["in_progress"] += 1
-
-    name_map = {a.id: a.name for a in Agent.query.filter(Agent.id.in_(list(agg.keys()))).with_entities(Agent.id, Agent.name).all()} if agg else {}
-    items = []
-    for aid, b in agg.items():
-        done = b["done"]
-        total = b["total"]
-        ds = durations.get(aid, [])
-        items.append({
-            "agent_id": aid,
-            "name": name_map.get(aid, f"#{aid}"),
-            "total": total,
-            "done": done,
-            "failed": b["failed"],
-            "cancelled": b["cancelled"],
-            "expired": b["expired"],
-            "in_progress": b["in_progress"],
-            "completion_rate": round(done / total * 100, 1) if total else 0,
-            "avg_completion_hours": round(sum(ds) / len(ds), 2) if ds else None,
-        })
-    items.sort(key=lambda x: x["done"], reverse=True)
-
-    return ApiResponse.success({"days": days, "items": items[:limit]}).to_response()
+    days = _parse_int_arg("days", 30, 1, 365)
+    limit = _parse_int_arg("limit", 20, 1, 50)
+    return ApiResponse.success(
+        productivity_summary(user.id, days, limit)).to_response()
 
 
 @agents_bp.route("/productivity/trend", methods=["GET"])
 @unified_auth_required
 def agent_productivity_trend():
-    """Daily Agent assignment completion trend for the current user.
-
-    Buckets done TaskAssignments (state=DONE, completed_at within window)
-    by day, returning per-day done count and failed count (state=FAILED).
-    Reveals whether throughput is rising or falling over time.
-    """
+    """Daily done/failed assignment trend, with per-kind layering."""
     user = get_current_user()
-    try:
-        days = max(1, min(365, int(request.args.get("days", 30))))
-    except (TypeError, ValueError):
-        days = 30
-
-    since = datetime.utcnow() - timedelta(days=days)
-    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
-    if not agent_ids:
-        return ApiResponse.success({"days": days, "trend": [], "total_done": 0, "total_failed": 0, "by_kind_totals": {}}).to_response()
-
-    # 取 agent_id -> kind 映射，用于按 kind 分层趋势
-    kind_map: dict = {}
-    for aid, kind in (
-        Agent.query
-        .filter(Agent.id.in_(agent_ids))
-        .with_entities(Agent.id, Agent.kind)
-        .all()
-    ):
-        kind_map[aid] = kind or "unknown"
-
-    rows = (
-        TaskAssignment.query
-        .filter(
-            TaskAssignment.agent_id.in_(agent_ids),
-            TaskAssignment.created_at >= since,
-            TaskAssignment.state.in_([TaskAssignmentState.DONE, TaskAssignmentState.FAILED]),
-        )
-        .with_entities(
-            TaskAssignment.agent_id,
-            TaskAssignment.state,
-            func.date(TaskAssignment.completed_at).label("d"),
-        )
-        .all()
-    )
-
-    by_day: dict = {}
-    total_done = 0
-    total_failed = 0
-    by_kind_totals: dict = {}
-    for aid, state, d in rows:
-        if not d:
-            continue
-        key = str(d)
-        bucket = by_day.setdefault(key, {"date": key, "done": 0, "failed": 0, "by_kind": {}})
-        s = state.value if state else None
-        k = kind_map.get(aid, "unknown")
-        kind_bucket = bucket["by_kind"].setdefault(k, {"done": 0, "failed": 0})
-        kind_total = by_kind_totals.setdefault(k, {"done": 0, "failed": 0})
-        if s == "done":
-            bucket["done"] += 1
-            total_done += 1
-            kind_bucket["done"] += 1
-            kind_total["done"] += 1
-        elif s == "failed":
-            bucket["failed"] += 1
-            total_failed += 1
-            kind_bucket["failed"] += 1
-            kind_total["failed"] += 1
-
-    trend = sorted(by_day.values(), key=lambda x: x["date"])
-    # 按 done 总数降序排列 by_kind_totals，便于前端取 top kind
-    by_kind_totals_sorted = dict(sorted(by_kind_totals.items(), key=lambda kv: kv[1]["done"], reverse=True))
-    return ApiResponse.success({
-        "days": days,
-        "trend": trend,
-        "total_done": total_done,
-        "total_failed": total_failed,
-        "by_kind_totals": by_kind_totals_sorted,
-    }).to_response()
+    days = _parse_int_arg("days", 30, 1, 365)
+    return ApiResponse.success(productivity_trend(user.id, days)).to_response()
 
 
 @agents_bp.route("/productivity/alerts", methods=["GET"])
 @unified_auth_required
 def agent_productivity_alerts():
-    """Low-efficiency Agent alert list for the current user.
-
-    Returns Agents whose assignment completion rate falls below
-    ``min_completion_rate`` (default 50%) OR whose failure rate exceeds
-    ``max_failure_rate`` (default 30%) within the window, provided they have
-    at least ``min_assignments`` (default 3) assignments. Each entry includes
-    the same productivity fields as ``/agents/productivity`` plus the
-    triggering reason. Surfaces Agents needing attention.
-    """
+    """Low-efficiency alerts: completion rate below threshold or failure rate
+    above threshold, with at least ``min_assignments`` assignments."""
     user = get_current_user()
-    try:
-        days = max(1, min(365, int(request.args.get("days", 30))))
-        min_completion_rate = max(0, min(100, float(request.args.get("min_completion_rate", 50))))
-        max_failure_rate = max(0, min(100, float(request.args.get("max_failure_rate", 30))))
-        min_assignments = max(1, min(1000, int(request.args.get("min_assignments", 3))))
-    except (TypeError, ValueError):
-        days = 30
-        min_completion_rate = 50
-        max_failure_rate = 30
-        min_assignments = 3
-
-    since = datetime.utcnow() - timedelta(days=days)
-    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
-    if not agent_ids:
-        return ApiResponse.success({"days": days, "items": []}).to_response()
-
-    rows = (
-        TaskAssignment.query
-        .filter(
-            TaskAssignment.agent_id.in_(agent_ids),
-            TaskAssignment.created_at >= since,
-        )
-        .with_entities(
-            TaskAssignment.agent_id, TaskAssignment.state,
-            TaskAssignment.claimed_at, TaskAssignment.completed_at,
-        )
-        .all()
-    )
-
-    agg: dict = {}
-    durations = {}
-    for aid, state, claimed_at, completed_at in rows:
-        bucket = agg.setdefault(aid, {
-            "agent_id": aid, "total": 0, "done": 0, "failed": 0,
-            "cancelled": 0, "expired": 0, "in_progress": 0,
-        })
-        bucket["total"] += 1
-        s = state.value if state else None
-        if s == "done":
-            bucket["done"] += 1
-            if claimed_at and completed_at and completed_at > claimed_at:
-                durations.setdefault(aid, []).append((completed_at - claimed_at).total_seconds() / 3600)
-        elif s == "failed":
-            bucket["failed"] += 1
-        elif s == "cancelled":
-            bucket["cancelled"] += 1
-        elif s == "expired":
-            bucket["expired"] += 1
-        else:
-            bucket["in_progress"] += 1
-
-    name_map = {a.id: a.name for a in Agent.query.filter(Agent.id.in_(list(agg.keys()))).with_entities(Agent.id, Agent.name).all()} if agg else {}
-    items = []
-    for aid, b in agg.items():
-        total = b["total"]
-        if total < min_assignments:
-            continue
-        done = b["done"]
-        failed = b["failed"]
-        completion_rate = round(done / total * 100, 1) if total else 0
-        failure_rate = round(failed / total * 100, 1) if total else 0
-        reasons = []
-        if completion_rate < min_completion_rate:
-            reasons.append(f"完成率 {completion_rate}% < {min_completion_rate}%")
-        if failure_rate > max_failure_rate:
-            reasons.append(f"失败率 {failure_rate}% > {max_failure_rate}%")
-        if not reasons:
-            continue
-        ds = durations.get(aid, [])
-        items.append({
-            "agent_id": aid,
-            "name": name_map.get(aid, f"#{aid}"),
-            "total": total,
-            "done": done,
-            "failed": failed,
-            "cancelled": b["cancelled"],
-            "expired": b["expired"],
-            "in_progress": b["in_progress"],
-            "completion_rate": completion_rate,
-            "failure_rate": failure_rate,
-            "avg_completion_hours": round(sum(ds) / len(ds), 2) if ds else None,
-            "reasons": reasons,
-        })
-    # 最差优先：按完成率升序、失败率降序
-    items.sort(key=lambda x: (x["completion_rate"], -x["failure_rate"]))
-
-    return ApiResponse.success({
-        "days": days,
-        "min_completion_rate": min_completion_rate,
-        "max_failure_rate": max_failure_rate,
-        "min_assignments": min_assignments,
-        "items": items,
-    }).to_response()
+    days = _parse_int_arg("days", 30, 1, 365)
+    min_completion_rate = _parse_float_arg("min_completion_rate", 50, 0, 100)
+    max_failure_rate = _parse_float_arg("max_failure_rate", 30, 0, 100)
+    min_assignments = _parse_int_arg("min_assignments", 3, 1, 1000)
+    return ApiResponse.success(
+        productivity_alerts(user.id, days, min_completion_rate,
+                            max_failure_rate, min_assignments)).to_response()
 
 
 @agents_bp.route("/productivity/by-kind", methods=["GET"])
 @unified_auth_required
 def agent_productivity_by_kind():
-    """Productivity comparison grouped by Agent kind for the current user.
-
-    Aggregates TaskAssignment rows by the owning Agent's ``kind`` field:
-    per-kind totals, done, failed, cancelled, expired, in_progress,
-    agent count, average completion rate, average failure rate, and average
-    completion duration (hours). Surfaces how each Agent class performs
-    relative to its peers of the same kind.
-    """
+    """Productivity comparison grouped by Agent kind."""
     user = get_current_user()
-    try:
-        days = max(1, min(365, int(request.args.get("days", 30))))
-    except (TypeError, ValueError):
-        days = 30
-
-    since = datetime.utcnow() - timedelta(days=days)
-    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
-    if not agent_ids:
-        return ApiResponse.success({"days": days, "items": []}).to_response()
-
-    # kind per agent
-    kind_map = {
-        aid: (k.value if k else "unknown")
-        for aid, k in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.kind).all()
-    }
-
-    rows = (
-        TaskAssignment.query
-        .filter(
-            TaskAssignment.agent_id.in_(agent_ids),
-            TaskAssignment.created_at >= since,
-        )
-        .with_entities(
-            TaskAssignment.agent_id, TaskAssignment.state,
-            TaskAssignment.claimed_at, TaskAssignment.completed_at,
-        )
-        .all()
-    )
-
-    agg: dict = {}  # kind -> bucket
-    durations: dict = {}  # kind -> list of hours
-    agents_seen: dict = {}  # kind -> set of agent_id
-    for aid, state, claimed_at, completed_at in rows:
-        kind = kind_map.get(aid, "unknown")
-        bucket = agg.setdefault(kind, {
-            "kind": kind, "total": 0, "done": 0, "failed": 0,
-            "cancelled": 0, "expired": 0, "in_progress": 0,
-        })
-        bucket["total"] += 1
-        agents_seen.setdefault(kind, set()).add(aid)
-        s = state.value if state else None
-        if s == "done":
-            bucket["done"] += 1
-            if claimed_at and completed_at and completed_at > claimed_at:
-                durations.setdefault(kind, []).append((completed_at - claimed_at).total_seconds() / 3600)
-        elif s == "failed":
-            bucket["failed"] += 1
-        elif s == "cancelled":
-            bucket["cancelled"] += 1
-        elif s == "expired":
-            bucket["expired"] += 1
-        else:
-            bucket["in_progress"] += 1
-
-    items = []
-    for kind, b in agg.items():
-        total = b["total"]
-        done = b["done"]
-        failed = b["failed"]
-        ds = durations.get(kind, [])
-        completion_rate = round(done / total * 100, 1) if total else 0
-        failure_rate = round(failed / total * 100, 1) if total else 0
-        items.append({
-            "kind": kind,
-            "agent_count": len(agents_seen.get(kind, set())),
-            "total": total,
-            "done": done,
-            "failed": failed,
-            "cancelled": b["cancelled"],
-            "expired": b["expired"],
-            "in_progress": b["in_progress"],
-            "completion_rate": completion_rate,
-            "failure_rate": failure_rate,
-            "avg_completion_hours": round(sum(ds) / len(ds), 2) if ds else None,
-        })
-    # 完成率降序，失败率升序
-    items.sort(key=lambda x: (-x["completion_rate"], x["failure_rate"]))
-
-    return ApiResponse.success({"days": days, "items": items}).to_response()
+    days = _parse_int_arg("days", 30, 1, 365)
+    return ApiResponse.success(productivity_by_kind(user.id, days)).to_response()
 
 
 @agents_bp.route("/productivity/hourly-heatmap", methods=["GET"])
 @unified_auth_required
 def agent_productivity_hourly_heatmap():
-    """Hour-of-day × Agent completion heatmap for the current user.
-
-    Buckets done TaskAssignments (state=DONE, completed_at within window) by
-    the hour-of-day (0-23) of ``completed_at`` and the agent_id. Returns a
-    matrix {agent_id: {hour: count}} plus per-agent totals, revealing when
-    each Agent is most productive. Uses Python-side hour extraction for
-    cross-DB compatibility (SQLite has no EXTRACT).
-    """
+    """Hour-of-day × Agent completion heatmap (Python-side hour extraction)."""
     user = get_current_user()
-    try:
-        days = max(1, min(365, int(request.args.get("days", 30))))
-        limit = max(1, min(50, int(request.args.get("limit", 15))))
-    except (TypeError, ValueError):
-        days = 30
-        limit = 15
-
-    since = datetime.utcnow() - timedelta(days=days)
-    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
-    if not agent_ids:
-        return ApiResponse.success({"days": days, "agents": [], "matrix": {}, "max_cell": 0, "peak_hour": None}).to_response()
-
-    name_map = {
-        aid: name
-        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
-    }
-
-    rows = (
-        TaskAssignment.query
-        .filter(
-            TaskAssignment.agent_id.in_(agent_ids),
-            TaskAssignment.state == TaskAssignmentState.DONE,
-            TaskAssignment.completed_at.isnot(None),
-            TaskAssignment.completed_at >= since,
-        )
-        .with_entities(TaskAssignment.agent_id, TaskAssignment.completed_at)
-        .all()
-    )
-
-    matrix: dict = {}  # {agent_id: {hour: count}}
-    totals: dict = {}  # {agent_id: total}
-    hour_totals = [0] * 24
-    max_cell = 0
-    for aid, completed_at in rows:
-        h = completed_at.hour
-        bucket = matrix.setdefault(aid, {})
-        bucket[h] = bucket.get(h, 0) + 1
-        if bucket[h] > max_cell:
-            max_cell = bucket[h]
-        totals[aid] = totals.get(aid, 0) + 1
-        hour_totals[h] += 1
-
-    # 按 done 总数降序取 top N agents
-    top_agents = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
-    peak_hour = max(range(24), key=lambda h: hour_totals[h]) if any(hour_totals) else None
-    agents_out = [
-        {"agent_id": aid, "name": name_map.get(aid, f"Agent#{aid}"), "done": totals.get(aid, 0)}
-        for aid, _ in top_agents
-    ]
-    matrix_out = {str(aid): matrix.get(aid, {}) for aid, _ in top_agents}
-    return ApiResponse.success({
-        "days": days,
-        "agents": agents_out,
-        "matrix": matrix_out,
-        "hour_totals": hour_totals,
-        "max_cell": max_cell,
-        "peak_hour": peak_hour,
-    }).to_response()
+    days = _parse_int_arg("days", 30, 1, 365)
+    limit = _parse_int_arg("limit", 15, 1, 50)
+    return ApiResponse.success(
+        productivity_hourly_heatmap(user.id, days, limit)).to_response()
 
 
 @agents_bp.route("/productivity/calendar-heatmap", methods=["GET"])
 @unified_auth_required
 def agent_productivity_calendar_heatmap():
-    """Date × Agent completion calendar heatmap for the current user.
-
-    Buckets done TaskAssignments by calendar date (YYYY-MM-DD) and agent_id
-    over the last N days. Returns a {agent_id: {date: count}} matrix plus
-    per-agent totals and overall date range. Ideal for a GitHub-style
-    contribution calendar per agent.
-    """
+    """Date × Agent completion calendar heatmap (GitHub-style)."""
     user = get_current_user()
-    try:
-        days = max(1, min(365, int(request.args.get("days", 90))))
-        limit = max(1, min(20, int(request.args.get("limit", 10))))
-    except (TypeError, ValueError):
-        days = 90
-        limit = 10
-
-    since = datetime.utcnow() - timedelta(days=days)
-    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
-    if not agent_ids:
-        return ApiResponse.success({
-            "days": days, "agents": [], "matrix": {},
-            "max_cell": 0, "date_range": [],
-        }).to_response()
-
-    name_map = {
-        aid: name
-        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
-    }
-
-    rows = (
-        TaskAssignment.query
-        .filter(
-            TaskAssignment.agent_id.in_(agent_ids),
-            TaskAssignment.state == TaskAssignmentState.DONE,
-            TaskAssignment.completed_at.isnot(None),
-            TaskAssignment.completed_at >= since,
-        )
-        .with_entities(TaskAssignment.agent_id, TaskAssignment.completed_at)
-        .all()
-    )
-
-    matrix: dict = {}  # {agent_id: {date_str: count}}
-    totals: dict = {}  # {agent_id: total}
-    max_cell = 0
-    for aid, completed_at in rows:
-        ds = completed_at.strftime("%Y-%m-%d")
-        bucket = matrix.setdefault(aid, {})
-        bucket[ds] = bucket.get(ds, 0) + 1
-        if bucket[ds] > max_cell:
-            max_cell = bucket[ds]
-        totals[aid] = totals.get(aid, 0) + 1
-
-    top_agents = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:limit]
-    agents_out = [
-        {"agent_id": aid, "name": name_map.get(aid, f"Agent#{aid}"), "done": totals.get(aid, 0)}
-        for aid, _ in top_agents
-    ]
-    matrix_out = {str(aid): matrix.get(aid, {}) for aid, _ in top_agents}
-
-    # Build full date range
-    date_range = []
-    d = since.date() + timedelta(days=1)
-    end = datetime.utcnow().date()
-    while d <= end:
-        date_range.append(d.isoformat())
-        d += timedelta(days=1)
-
-    return ApiResponse.success({
-        "days": days,
-        "agents": agents_out,
-        "matrix": matrix_out,
-        "max_cell": max_cell,
-        "date_range": date_range,
-    }).to_response()
+    days = _parse_int_arg("days", 90, 1, 365)
+    limit = _parse_int_arg("limit", 10, 1, 20)
+    return ApiResponse.success(
+        productivity_calendar_heatmap(user.id, days, limit)).to_response()
 
 
 @agents_bp.route("/productivity/weekly-comparison", methods=["GET"])
 @unified_auth_required
 def agent_productivity_weekly_comparison():
-    """Week-over-week Agent productivity comparison for the current user.
-
-    Buckets done TaskAssignments by ISO week of completed_at and agent_id.
-    Returns per-agent current_week / previous_week done counts and change
-    percentage, sorted by current week descending. Reveals which agents
-    are ramping up or slowing down.
-    """
+    """Week-over-week done comparison per Agent with change percentage."""
     user = get_current_user()
-    try:
-        limit = max(1, min(30, int(request.args.get("limit", 10))))
-    except (TypeError, ValueError):
-        limit = 10
-
-    agent_ids = [a.id for a in Agent.query.filter_by(owner_id=user.id).with_entities(Agent.id).all()]
-    if not agent_ids:
-        return ApiResponse.success({"agents": [], "total_this_week": 0, "total_last_week": 0}).to_response()
-
-    name_map = {
-        aid: name
-        for aid, name in Agent.query.filter(Agent.id.in_(agent_ids)).with_entities(Agent.id, Agent.name).all()
-    }
-
-    # Compute current and previous ISO week boundaries
-    now = datetime.utcnow()
-    # Monday of current week
-    current_week_start = now - timedelta(days=now.weekday())
-    current_week_start = current_week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    prev_week_start = current_week_start - timedelta(weeks=1)
-
-    rows = (
-        TaskAssignment.query
-        .filter(
-            TaskAssignment.agent_id.in_(agent_ids),
-            TaskAssignment.state == TaskAssignmentState.DONE,
-            TaskAssignment.completed_at.isnot(None),
-            TaskAssignment.completed_at >= prev_week_start,
-        )
-        .with_entities(TaskAssignment.agent_id, TaskAssignment.completed_at)
-        .all()
-    )
-
-    agent_week: dict = {}  # {agent_id: {"this_week": n, "last_week": m}}
-    total_this = 0
-    total_last = 0
-    for aid, completed_at in rows:
-        if aid not in agent_week:
-            agent_week[aid] = {"this_week": 0, "last_week": 0}
-        if completed_at >= current_week_start:
-            agent_week[aid]["this_week"] += 1
-            total_this += 1
-        else:
-            agent_week[aid]["last_week"] += 1
-            total_last += 1
-
-    agents_out = []
-    for aid, wk in sorted(agent_week.items(), key=lambda kv: kv[1]["this_week"], reverse=True)[:limit]:
-        this_w = wk["this_week"]
-        last_w = wk["last_week"]
-        change = round((this_w - last_w) / last_w * 100, 1) if last_w > 0 else (100.0 if this_w > 0 else 0.0)
-        agents_out.append({
-            "agent_id": aid,
-            "name": name_map.get(aid, f"Agent#{aid}"),
-            "this_week": this_w,
-            "last_week": last_w,
-            "change_pct": change,
-        })
-
-    return ApiResponse.success({
-        "agents": agents_out,
-        "total_this_week": total_this,
-        "total_last_week": total_last,
-    }).to_response()
+    limit = _parse_int_arg("limit", 10, 1, 30)
+    return ApiResponse.success(
+        productivity_weekly_comparison(user.id, limit)).to_response()
 
 
 @agents_bp.route("/idle-ranking", methods=["GET"])
 @unified_auth_required
 def agent_idle_ranking():
-    """Rank Agents by how long they have been idle.
-
-    Idle duration is measured from the most recent of Agent.last_seen_at
-    and the latest TaskAssignment activity (completed_at /
-    last_heartbeat_at). Each Agent is classified as active (<24h), idle
-    (1-7d), stale (7-30d), dormant (>30d), or never, surfacing
-    stale/dormant Agents for cleanup or reassignment.
-    """
+    """Agents ranked by idle duration with stage classification
+    (active/idle/stale/dormant/never)."""
     user = get_current_user()
-    try:
-        limit = max(1, min(50, int(request.args.get("limit", 20))))
-    except (TypeError, ValueError):
-        limit = 20
-
-    rows = (
-        TaskAssignment.query
-        .join(Agent, TaskAssignment.agent_id == Agent.id)
-        .filter(Agent.owner_id == user.id)
-        .with_entities(
-            TaskAssignment.agent_id,
-            TaskAssignment.completed_at,
-            TaskAssignment.last_heartbeat_at,
-        )
-        .all()
-    )
-    last_assign = {}
-    for aid, completed_at, heartbeat in rows:
-        cand = max([t for t in (completed_at, heartbeat) if t], default=None)
-        if cand is None:
-            continue
-        cur = last_assign.get(aid)
-        if cur is None or cand > cur:
-            last_assign[aid] = cand
-
-    agents = (
-        Agent.query
-        .filter_by(owner_id=user.id)
-        .with_entities(Agent.id, Agent.name, Agent.status, Agent.last_seen_at)
-        .all()
-    )
-    now = datetime.utcnow()
-    results = []
-    for aid, aname, status, last_seen in agents:
-        candidates = [t for t in (last_seen, last_assign.get(aid)) if t]
-        last_activity = max(candidates) if candidates else None
-        if last_activity is None:
-            idle_hours = None
-            stage = "never"
-        else:
-            idle_hours = (now - last_activity).total_seconds() / 3600
-            if idle_hours < 24:
-                stage = "active"
-            elif idle_hours < 24 * 7:
-                stage = "idle"
-            elif idle_hours < 24 * 30:
-                stage = "stale"
-            else:
-                stage = "dormant"
-        results.append({
-            "agent_id": aid,
-            "agent_name": aname or f"Agent#{aid}",
-            "status": status.value if status else None,
-            "last_seen_at": last_seen.isoformat() if last_seen else None,
-            "last_activity_at": last_activity.isoformat() if last_activity else None,
-            "idle_hours": round(idle_hours, 1) if idle_hours is not None else None,
-            "stage": stage,
-        })
-
-    results.sort(key=lambda r: -(r["idle_hours"] if r["idle_hours"] is not None else float("inf")))
-
-    stage_counts = {}
-    for r in results:
-        stage_counts[r["stage"]] = stage_counts.get(r["stage"], 0) + 1
-    return ApiResponse.success({
-        "agents": results[:limit],
-        "total_agents": len(results),
-        "stage_counts": stage_counts,
-    }).to_response()
+    limit = _parse_int_arg("limit", 20, 1, 50)
+    return ApiResponse.success(idle_ranking(user.id, limit)).to_response()
