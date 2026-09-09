@@ -360,17 +360,18 @@ class TestAgentRuntimeProtocol:
         db_session.add(key_row)
         db_session.commit()
 
-        fake_controller = MagicMock()
-        fake_controller.get_agent_pod_status.return_value = None
-        fake_controller.spawn_agent_pod.return_value = {
+        fake_provider = MagicMock()
+        fake_provider.name = "fake"
+        fake_provider.get_runtime_status.return_value = None
+        fake_provider.spawn.return_value = {
             "pod_name": "agent-test",
-            "pod_uid": "uid-test",
+            "runtime_id": "uid-test",
             "status": "creating",
             "agent_id": agent.id,
             "created_at": datetime.utcnow().isoformat(),
         }
 
-        with patch("services.cloud_runtime.management.get_agent_controller", return_value=fake_controller):
+        with patch("services.cloud_runtime.management.get_runtime_provider", return_value=fake_provider):
             resp = client.post(
                 f"{BASE_URL}/workspaces/{org.id}/agents/{agent.id}/runtime/spawn",
                 json={"sandbox_profile": "standard"},
@@ -378,6 +379,6 @@ class TestAgentRuntimeProtocol:
             )
 
         assert resp.status_code == 200
-        kwargs = fake_controller.spawn_agent_pod.call_args.kwargs
+        kwargs = fake_provider.spawn.call_args.kwargs
         assert kwargs["agent"].id == agent.id
         assert kwargs["agent_key"] == raw_key
