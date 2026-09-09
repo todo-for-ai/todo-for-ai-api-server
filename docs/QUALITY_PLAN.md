@@ -784,4 +784,34 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - mcp 剩余：handlers 分支覆盖 21%（深层整形分支）、部分 api-client
   模块分支、server.ts/index.ts——后续迭代按需继续。
 
+
+### 迭代 40（2026-09-09）跨仓：agent-runtime 子仓清扫 ✅
+- **修最重 bug：src/notifications 双向循环导入**——manager 在定义
+  NotificationBackend/Notification 之前顶层 import chinese_providers，
+  而后者回导这两个名字，**任何导入顺序都 ImportError，通知功能自
+  出生即死**。修复：chinese_providers 导入下沉到三个 configure_*
+  方法（局部导入破环）。
+- **补依赖声明**：requirements.txt 漏 tenacity（src/api/client.py
+  顶层导入，缺失时 22 个测试全 ERROR）/fastapi/uvicorn
+  （health_server 依赖）。
+- **门禁质变**：基线 4 failed + 18 errors + 149 passed →
+  **209 passed, 0 failed, 0 errors**（补装 tenacity 后既有 22 用例
+  全部转绿）。
+- 新增 38 用例：test_notifications.py 31（8 后端 configured/成功/
+  失败、飞书钉钉签名、严重度颜色、Manager 聚合/历史上限溢出/规则
+  匹配/get_stats）+ test_health_server.py 7（health/ready 双态/
+  metrics Prometheus 文本/profiling 三端点/uvicorn 生命周期；
+  prometheus 全局注册表按名反注册隔离）。
+- 覆盖率：notifications 0→100%/96.6%、health_server 0→**100%**、
+  api/client.py 4.1%→63.5%（tenacity 解锁既有测试）、src 总计
+  46.2%→**61.4%**。
+- agent-runtime e80cb5a，主仓 ref 待推。
+- 经验：①asyncio.run() 结束后主线程无当前事件循环——测试里用
+  asyncio.run 会毒化后续同步测试的 asyncio.Event() 构造，改
+  pytest-asyncio auto 模式的 async def 即可；②prometheus 指标注册
+  在全局注册表，同进程二次实例化需按名反注册隔离；③"既有失败基线"
+  有时只是环境缺依赖——先装声明内依赖再断定失败是既有的。
+- WIP 仍回避：src/runtime/main.py、task_executor.py（修改中）、
+  cli_engines/runtimes/cli-agents（未跟踪）。
+
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
