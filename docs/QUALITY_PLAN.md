@@ -815,3 +815,11 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   cli_engines/runtimes/cli-agents（未跟踪）。
 
 （每完成一个迭代追加：日期、做了什么、覆盖率前后、测试数、提交号）
+
+### 迭代 41（2026-09-10）api/agents/health.py 拆薄 + 健康分析下沉 service ✅
+- 前：`api/agents/health.py` 490 行 / 行覆盖仅 7.5%（trend 与 state-transitions 端点引用未导入的 `AuditLog`——潜伏 NameError，从未被测试触达）。
+- 后：计算逻辑下沉 `services/agent_health_analytics.py`（评分/告警/趋势/状态迁移四入口，入参 owner_id 解耦 flask user）；路由薄化至 109 行（参数钳制 + 鉴权 + 包装）。端点 URL 与响应键零变化。
+- 顺带修复：trend/state-transitions 缺 `AuditLog` 导入的潜伏 NameError；移除两处死守卫（`created_at` NOT NULL 约束下"空日期 continue"不可达；`isinstance(detail, dict)` 已保护的冗余 try/except）；transitions 的日期键兼容 sqlite（func.date 返回 str）。
+- 覆盖率：`api/agents/health.py` **100%**（52/52）、`services/agent_health_analytics.py` **100%**（200/200）。
+- 测试：新增 `test_agent_health_analytics.py` 20 用例（权重归一化/四维评分排序/告警原因分支/建议分支/趋势聚合含脏增量/状态迁移含脏 detail）；全量门禁见提交（后台全量）。
+- 经验：本文件自建 User/Agent 时别走 factory 清理（删除 Agent 级联 reputations 触发 NOT NULL，同 UserActivity 坑）；"0% 覆盖的旧路由"优先怀疑有潜伏 NameError/死导入。
