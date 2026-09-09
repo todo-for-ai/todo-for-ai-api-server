@@ -764,17 +764,19 @@ class TestCloudExecutorLinkage:
         import types
         calls = []
 
-        class _FakeController:
-            def ensure_agent_pod(self, agent, agent_key):
+        class _FakeProvider:
+            name = "fake"
+
+            def ensure_runtime(self, agent, agent_key, sandbox_profile=None):
                 calls.append({"agent_id": agent.id})
                 if raise_on_ensure:
                     raise RuntimeError("no cluster")
                 return {"status": "created"}
 
-        fake_mod = types.SimpleNamespace(get_agent_controller=lambda: _FakeController())
+        fake_mod = types.SimpleNamespace(get_runtime_provider=lambda: _FakeProvider())
         monkeypatch.setattr(
-            "services.agent_runtime_controller.get_agent_controller",
-            fake_mod.get_agent_controller,
+            "services.runtime_env.get_runtime_provider",
+            fake_mod.get_runtime_provider,
         )
         return calls
 

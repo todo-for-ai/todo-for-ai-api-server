@@ -6,7 +6,7 @@
 
 from models import db
 from models.agent_key import AgentKey
-from services.agent_runtime_controller import get_agent_controller
+from services.runtime_env import get_runtime_provider
 from services.workspace_runtime_policy import (
     active_agent_count,
     get_workspace_runtime_setting,
@@ -48,7 +48,7 @@ class SettingsValidationError(RuntimeManagementError):
 
 
 def _occupying_status(agent_id):
-    status = get_agent_controller().get_agent_pod_status(agent_id)
+    status = get_runtime_provider().get_runtime_status(agent_id)
     if status and status.get('phase') in _OCCUPYING_PHASES:
         raise AgentRuntimeExistsError(status)
 
@@ -79,7 +79,7 @@ def spawn_runtime(agent, workspace_id, user_id, payload):
     data = payload or {}
     sandbox_profile = data.get('sandbox_profile', agent.sandbox_profile or 'standard')
     try:
-        result = get_agent_controller().spawn_agent_pod(
+        result = get_runtime_provider().spawn(
             agent=agent,
             agent_key=runtime_key,
             sandbox_profile=sandbox_profile,
@@ -89,12 +89,12 @@ def spawn_runtime(agent, workspace_id, user_id, payload):
     agent.runner_enabled = True
     agent.execution_mode = 'managed_runner'
     db.session.commit()
-    return {'pod': result, 'agent': agent.to_dict()}
+    return {'pod': result, 'runtime': result, 'agent': agent.to_dict()}
 
 
 def terminate_runtime(agent):
     """终止云端运行时并回切外部拉取模式；无在岗 Pod 时 404。"""
-    if not get_agent_controller().terminate_agent_pod(agent.id):
+    if not get_runtime_provider().terminate(agent.id):
         raise NoRunningRuntimeError('No running runtime found for this agent')
     agent.runner_enabled = False
     agent.execution_mode = 'external_pull'
@@ -107,17 +107,19 @@ def runtime_status(agent):
         'agent_id': agent.id,
         'execution_mode': agent.execution_mode,
         'runner_enabled': agent.runner_enabled,
-        'pod': get_agent_controller().get_agent_pod_status(agent.id),
+        'pod': get_runtime_provider().get_runtime_status(agent.id),
+        'runtime': get_runtime_provider().get_runtime_status(agent.id),
     }
 
 
 def list_runtime_pods(workspace_id):
-    pods = get_agent_controller().list_agent_pods(workspace_id=workspace_id)
-    return {'pods': pods, 'total': len(pods)}
+    runtimes = get_runtime_provider().list_runtimes(workspace_id=workspace_id)
+    # API 键名沿用 pods（历史兼容），内容为归一化后的运行时状态
+    return {'pods': runtimes, 'total': len(runtimes)}
 
 
 def get_runtime_settings(workspace_id):
-    settings = get_workspace_runtime_setting(get_agent_controller(), workspace_id)
+    settings = get_workspace_runtime_setting(get_runtime_provider(), workspace_id)
     # 当前「正在干活」的 distinct Agent 数，供前端显示水位（active/limit）
     return {
         'settings': settings,

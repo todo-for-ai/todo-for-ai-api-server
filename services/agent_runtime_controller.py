@@ -11,26 +11,34 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import uuid4
 
-import kubernetes.client
-from kubernetes.client import (
-    V1Pod,
-    V1PodSpec,
-    V1Container,
-    V1ResourceRequirements,
-    V1Secret,
-    V1PersistentVolumeClaim,
-    V1PersistentVolumeClaimSpec,
-)
-from kubernetes.client.rest import ApiException
+def _k8s():
+    """kubernetes 包惰性导入（非 K8s 部署不需要安装它）。"""
+    import kubernetes
+    return kubernetes
+
+
+def _k8s_client():
+    import kubernetes.client
+    return kubernetes.client
+
+
+def _k8s_api_exception():
+    from kubernetes.client.rest import ApiException
+    return ApiException
 
 from core.config import Config
 from models.agent import Agent
 from services.cloud_runtime import manifests
+from services.runtime_env.base import RuntimeProvider, normalize_runtime
 from utils.logger import logger
 
 
-class AgentRuntimeController:
-    """Agent 运行时控制器"""
+class AgentRuntimeController(RuntimeProvider):
+    """Agent 运行时控制器（K8s 后端，RuntimeProvider 接口的 k8s 实现）
+
+    其他后端（docker/compose/baremetal）见 services/runtime_env/，
+    调用方通过 get_runtime_provider() 获取当前后端。
+    """
 
     # 运行时镜像映射（定义移至 services/cloud_runtime/manifests.py）
     RUNTIME_IMAGES = manifests.RUNTIME_IMAGES
@@ -57,15 +65,15 @@ class AgentRuntimeController:
         """初始化 K8s 客户端"""
         try:
             # 尝试加载集群内配置
-            kubernetes.config.load_incluster_config()
+            _k8s().config.load_incluster_config()
             logger.info("controller.k8s_loaded source=incluster")
-        except kubernetes.config.config_exception.ConfigException:
+        except _k8s().config.config_exception.ConfigException:
             # 回退到本地配置
-            kubernetes.config.load_kube_config()
+            _k8s().config.load_kube_config()
             logger.info("controller.k8s_loaded source=kubeconfig")
 
-        self.k8s_client = kubernetes.client.ApiClient()
-        self.core_v1 = kubernetes.client.CoreV1Api(self.k8s_client)
+        self.k8s_client = _k8s_client().ApiClient()
+        self.core_v1 = _k8s_client().CoreV1Api(self.k8s_client)
 
     def spawn_agent_pod(
         self,
@@ -161,8 +169,8 @@ class AgentRuntimeController:
                 raise
         self.core_v1.create_namespaced_secret(
             namespace=self.namespace,
-            body=kubernetes.client.V1Secret(
-                metadata=kubernetes.client.V1ObjectMeta(name=secret_name),
+            body=_k8s_client().V1Secret(
+                metadata=_k8s_client().V1ObjectMeta(name=secret_name),
                 type='Opaque',
                 data={field: encoded},
             ),
@@ -190,12 +198,12 @@ class AgentRuntimeController:
             spec_kwargs['storage_class_name'] = storage_class
         self.core_v1.create_namespaced_persistent_volume_claim(
             namespace=self.namespace,
-            body=kubernetes.client.V1PersistentVolumeClaim(
-                metadata=kubernetes.client.V1ObjectMeta(
+            body=_k8s_client().V1PersistentVolumeClaim(
+                metadata=_k8s_client().V1ObjectMeta(
                     name=pvc_name,
                     labels={'app': 'todo4ai-workspace', 'workspace-id': str(workspace_id)},
                 ),
-                spec=kubernetes.client.V1PersistentVolumeClaimSpec(
+                spec=_k8s_client().V1PersistentVolumeClaimSpec(
                     access_modes=['ReadWriteMany'],
                     resources=V1ResourceRequirements(requests={'storage': '10Gi'}),
                     **spec_kwargs,
@@ -206,7 +214,7 @@ class AgentRuntimeController:
                     workspace_id, pvc_name)
         return pvc_name
 
-    def _list_workspace_pods(self, workspace_id: int) -> List[V1Pod]:
+    def _list_workspace_pods(self, workspace_id: int) -> List:
         """工作区内全部 Agent Pod（含非 Running，用于配额判断）。"""
         try:
             pods = self.core_v1.list_namespaced_pod(
@@ -252,6 +260,55 @@ class AgentRuntimeController:
         )
         return {'status': 'created', 'pod': result}
 
+    # ── RuntimeProvider 接口（多后端抽象，见 services/runtime_env/base.py）──
+
+    def spawn(self, agent: Agent, agent_key: str, sandbox_profile: str = None) -> Dict:
+        self.spawn_agent_pod(agent=agent, agent_key=agent_key,
+                             sandbox_profile=sandbox_profile)
+        return self.get_runtime_status(agent.id) or normalize_runtime(
+            name=f'agent-{agent.id}', agent_id=agent.id,
+            workspace_id=agent.workspace_id, phase='Pending')
+
+    def terminate(self, agent_id) -> bool:
+        return self.terminate_agent_pod(agent_id)
+
+    def get_runtime_status(self, agent_id) -> Optional[Dict]:
+        pod = self.get_agent_pod_status(agent_id)
+        if not pod:
+            return None
+        info = dict(pod)
+        info.update({
+            'runtime_id': pod.get('pod_uid'),
+            'name': pod.get('pod_name'),
+            'address': pod.get('pod_ip'),
+            'started_at': pod.get('start_time'),
+        })
+        return info
+
+    def list_runtimes(self, workspace_id=None) -> List[Dict]:
+        runtimes = []
+        for pod in self.list_agent_pods(workspace_id=workspace_id):
+            info = dict(pod)
+            info.update({
+                'runtime_id': pod.get('pod_uid'),
+                'name': pod.get('pod_name'),
+                'address': pod.get('pod_ip'),
+                'started_at': pod.get('start_time'),
+            })
+            runtimes.append(info)
+        return runtimes
+
+    def ensure_runtime(self, agent: Agent, agent_key: str,
+                       sandbox_profile: str = None) -> Dict:
+        """接口实现：复用既有 ensure_agent_pod 幂等流程（含工作区 Pod 配额）。"""
+        result = self.ensure_agent_pod(agent, agent_key, sandbox_profile)
+        mapped = {'status': result['status']}
+        if 'pod' in result:
+            mapped['runtime'] = result['pod']
+        if 'cap' in result:
+            mapped['cap'] = result['cap']
+        return mapped
+
     def terminate_agent_pod(self, agent_id: int) -> bool:
         """
         终止 Agent Pod
@@ -275,7 +332,7 @@ class AgentRuntimeController:
                 self.core_v1.delete_namespaced_pod(
                     name=pod.metadata.name,
                     namespace=self.namespace,
-                    body=kubernetes.client.V1DeleteOptions(
+                    body=_k8s_client().V1DeleteOptions(
                         grace_period_seconds=30
                     )
                 )
@@ -340,7 +397,7 @@ class AgentRuntimeController:
             return []
 
     def _build_pod(self, name: str, agent: Agent, agent_key: str,
-                   sandbox_profile: str) -> V1Pod:
+                   sandbox_profile: str):
         """构建 Agent Pod 清单（声明式部分见 services/cloud_runtime/manifests.py）。"""
         return manifests.build_pod(
             name=name, agent=agent, secret_name=self.RUNTIME_SECRET_NAME,
@@ -357,7 +414,7 @@ class AgentRuntimeController:
     def _get_network_mode(self, agent: Agent) -> str:
         return manifests.network_mode(agent)
 
-    def _find_pods_by_agent(self, agent_id: int) -> List[V1Pod]:
+    def _find_pods_by_agent(self, agent_id: int) -> List:
         """根据 Agent ID 查找 Pods"""
         try:
             pods = self.core_v1.list_namespaced_pod(
@@ -368,7 +425,7 @@ class AgentRuntimeController:
         except ApiException:
             return []
 
-    def _list_all_agent_pods(self) -> List[V1Pod]:
+    def _list_all_agent_pods(self) -> List:
         """命名空间内全部 Agent Pod（空闲回收巡检用）"""
         try:
             pods = self.core_v1.list_namespaced_pod(
@@ -379,7 +436,7 @@ class AgentRuntimeController:
         except ApiException:
             return []
 
-    def _format_pod_status(self, pod: V1Pod) -> Dict:
+    def _format_pod_status(self, pod) -> Dict:
         """格式化 Pod 状态"""
         return {
             'pod_name': pod.metadata.name,

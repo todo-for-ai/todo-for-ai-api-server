@@ -77,16 +77,17 @@ def outsider(_isolated_app):
 
 @pytest.fixture
 def fake_controller(monkeypatch):
-    """替换业务层引用的 get_agent_controller（按 name 查找处打桩）。"""
+    """替换业务层引用的 get_runtime_provider（按 name 查找处打桩）。"""
     from unittest.mock import MagicMock
     from services.cloud_runtime import management
 
     controller = MagicMock()
-    controller.get_agent_pod_status.return_value = None
-    controller.list_agent_pods.return_value = []
-    controller.spawn_agent_pod.return_value = {"pod_name": "agent-1-abc", "status": "creating"}
-    controller.terminate_agent_pod.return_value = True
-    monkeypatch.setattr(management, "get_agent_controller", lambda: controller)
+    controller.name = "fake"
+    controller.get_runtime_status.return_value = None
+    controller.list_runtimes.return_value = []
+    controller.spawn.return_value = {"pod_name": "agent-1-abc", "status": "creating"}
+    controller.terminate.return_value = True
+    monkeypatch.setattr(management, "get_runtime_provider", lambda: controller)
     return controller
 
 
@@ -106,12 +107,12 @@ class TestSpawnRuntime:
         assert resp.status_code == 403
 
     def test_conflict_when_already_running(self, client, env, fake_controller):
-        fake_controller.get_agent_pod_status.return_value = {
+        fake_controller.get_runtime_status.return_value = {
             "phase": "Running", "pod_name": "agent-1-xyz"}
         resp = client.post(_spawn_url(env), headers=env["headers"], json={})
         assert resp.status_code == 409
         assert resp.get_json()["error_details"]["existing"]["pod_name"] == "agent-1-xyz"
-        fake_controller.spawn_agent_pod.assert_not_called()
+        fake_controller.spawn.assert_not_called()
 
     def test_key_decrypt_failure_returns_500(self, client, env, fake_controller):
         from models.agent_key import AgentKey
@@ -124,7 +125,7 @@ class TestSpawnRuntime:
 
         resp = client.post(_spawn_url(env), headers=env["headers"], json={})
         assert resp.status_code == 500
-        fake_controller.spawn_agent_pod.assert_not_called()
+        fake_controller.spawn.assert_not_called()
 
     def test_reuses_existing_key_when_revealable(self, client, env, fake_controller):
         from models.agent_key import AgentKey
@@ -136,7 +137,7 @@ class TestSpawnRuntime:
 
         resp = client.post(_spawn_url(env), headers=env["headers"], json={})
         assert resp.status_code == 200
-        assert fake_controller.spawn_agent_pod.call_args.kwargs["agent_key"] == raw
+        assert fake_controller.spawn.call_args.kwargs["agent_key"] == raw
 
     def test_success_generates_key_and_enables_runner(self, client, env, fake_controller):
         from models.agent_key import AgentKey
@@ -154,10 +155,10 @@ class TestSpawnRuntime:
 
     def test_spawn_uses_requested_sandbox_profile(self, client, env, fake_controller):
         client.post(_spawn_url(env), headers=env["headers"], json={"sandbox_profile": "minimal"})
-        assert fake_controller.spawn_agent_pod.call_args.kwargs["sandbox_profile"] == "minimal"
+        assert fake_controller.spawn.call_args.kwargs["sandbox_profile"] == "minimal"
 
     def test_controller_failure_returns_500(self, client, env, fake_controller):
-        fake_controller.spawn_agent_pod.side_effect = RuntimeError("kube boom")
+        fake_controller.spawn.side_effect = RuntimeError("kube boom")
         resp = client.post(_spawn_url(env), headers=env["headers"], json={})
         assert resp.status_code == 500
         assert "kube boom" in resp.get_json()["message"]
@@ -175,7 +176,7 @@ class TestTerminateRuntime:
         assert env["agent"].execution_mode == "external_pull"
 
     def test_no_running_runtime_returns_404(self, client, env, fake_controller):
-        fake_controller.terminate_agent_pod.return_value = False
+        fake_controller.terminate.return_value = False
         url = f"/todo-for-ai/api/v1/workspaces/{env['org'].id}/agents/{env['agent'].id}/runtime/terminate"
         resp = client.post(url, headers=env["headers"])
         assert resp.status_code == 404
@@ -188,7 +189,7 @@ class TestTerminateRuntime:
 
 class TestStatusAndList:
     def test_status_reports_pod(self, client, env, fake_controller):
-        fake_controller.get_agent_pod_status.return_value = {"phase": "Running"}
+        fake_controller.get_runtime_status.return_value = {"phase": "Running"}
         url = f"/todo-for-ai/api/v1/workspaces/{env['org'].id}/agents/{env['agent'].id}/runtime/status"
         resp = client.get(url, headers=env["headers"])
         assert resp.status_code == 200
@@ -220,7 +221,7 @@ def settings_controller(monkeypatch):
     from services.cloud_runtime import management
 
     controller = SimpleNamespace(MAX_PODS_PER_WORKSPACE=5, POD_IDLE_TIMEOUT_MINUTES=10)
-    monkeypatch.setattr(management, "get_agent_controller", lambda: controller)
+    monkeypatch.setattr(management, "get_runtime_provider", lambda: controller)
     return controller
 
 

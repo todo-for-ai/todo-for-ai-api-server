@@ -60,6 +60,16 @@ class Config:
     SESSION_KEY_PREFIX = 'todo-for-ai:'
     SESSION_FILE_DIR = '/tmp/flask-sessions'
 
+    # Agent 运行时环境后端（k8s | docker | compose | baremetal）
+    RUNTIME_PROVIDER = os.environ.get('RUNTIME_PROVIDER', 'k8s')
+    DOCKER_RUNTIME_IMAGE = os.environ.get('DOCKER_RUNTIME_IMAGE', 'todo4ai/agent-runtime:latest')
+    DOCKER_RUNTIME_NETWORK = os.environ.get('DOCKER_RUNTIME_NETWORK', '')
+    DOCKER_API_BASE_URL = os.environ.get('DOCKER_API_BASE_URL', '')
+    COMPOSE_RUNTIME_DIR = os.environ.get('COMPOSE_RUNTIME_DIR', '/tmp/todo4ai-compose')
+    BAREMETAL_STATE_DIR = os.environ.get('BAREMETAL_STATE_DIR', '/tmp/todo4ai-baremetal')
+    BAREMETAL_RUNTIME_COMMAND = os.environ.get('BAREMETAL_RUNTIME_COMMAND', '')
+    BAREMETAL_RUNTIME_CWD = os.environ.get('BAREMETAL_RUNTIME_CWD', '')
+
     
     # 数据库配置
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \

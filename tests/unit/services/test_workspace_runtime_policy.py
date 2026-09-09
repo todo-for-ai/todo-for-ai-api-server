@@ -32,31 +32,28 @@ def client(_isolated_app):
     return _isolated_app.test_client()
 
 
-class FakeController:
-    """不需要 k8s 的控制器替身。"""
+class FakeProvider:
+    """不需要任何真实后端的 provider 替身（归一化状态契约）。"""
 
+    name = "fake"
     MAX_PODS_PER_WORKSPACE = 10
     POD_IDLE_TIMEOUT_MINUTES = 30
 
-    def __init__(self, pods=None):
-        self.pods = pods or []
+    def __init__(self, runtimes=None):
+        self.runtimes = runtimes or []
         self.terminated = []
 
-    def _list_all_agent_pods(self):
-        return self.pods
+    def list_runtimes(self, workspace_id=None):
+        return self.runtimes
 
-    def terminate_agent_pod(self, agent_id):
+    def terminate(self, agent_id):
         self.terminated.append(agent_id)
         return True
 
 
-def _pod(agent_id=11, workspace_id=22, phase="Running"):
-    pod = SimpleNamespace(
-        metadata=SimpleNamespace(labels={"agent-id": str(agent_id),
-                                         "workspace-id": str(workspace_id)}),
-        status=SimpleNamespace(phase=phase, conditions=[]),
-    )
-    return pod
+def _runtime(agent_id=11, workspace_id=22, phase="Running"):
+    return {"agent_id": agent_id, "workspace_id": workspace_id,
+            "phase": phase, "started_at": None}
 
 
 def _attempt(agent_id, started_hours_ago, ended_hours_ago=None, state="ACTIVE"):
@@ -75,7 +72,7 @@ def _attempt(agent_id, started_hours_ago, ended_hours_ago=None, state="ACTIVE"):
 
 def test_settings_default_without_row():
     from services.workspace_runtime_policy import get_workspace_runtime_setting
-    setting = get_workspace_runtime_setting(FakeController(), 22)
+    setting = get_workspace_runtime_setting(FakeProvider(), 22)
     assert setting == {"max_pods": 10, "idle_timeout_minutes": 30,
                       "max_concurrent_agents": 5}
 
@@ -86,27 +83,27 @@ def test_set_then_get_settings():
         set_workspace_runtime_setting,
     )
     set_workspace_runtime_setting(22, max_pods=3, idle_timeout_minutes=15)
-    setting = get_workspace_runtime_setting(FakeController(), 22)
+    setting = get_workspace_runtime_setting(FakeProvider(), 22)
     assert setting == {"max_pods": 3, "idle_timeout_minutes": 15,
                       "max_concurrent_agents": 5}
     # 未设置的工作区不受影响
-    assert get_workspace_runtime_setting(FakeController(), 99)["max_pods"] == 10
+    assert get_workspace_runtime_setting(FakeProvider(), 99)["max_pods"] == 10
 
 
 def test_recycle_removes_idle_pod_and_skips_active():
     from services.workspace_runtime_policy import recycle_idle_pods
 
-    controller = FakeController(pods=[_pod(agent_id=11), _pod(agent_id=12)])
+    provider = FakeProvider(runtimes=[_runtime(agent_id=11), _runtime(agent_id=12)])
     # agent 11：2 小时前的已结束 attempt（空闲）；agent 12：ACTIVE attempt（在干活）
     db.session.add(_attempt(11, started_hours_ago=3, ended_hours_ago=2, state="COMMITTED"))
     db.session.add(_attempt(12, started_hours_ago=0.1))
     db.session.commit()
 
-    result = recycle_idle_pods(controller)
+    result = recycle_idle_pods(provider)
     assert result["checked"] == 2
     assert result["recycled"] == 1
     assert result["skipped_active"] == 1
-    assert controller.terminated == [11]
+    assert provider.terminated == [11]
 
 
 def test_recycle_zero_threshold_disables():
@@ -115,10 +112,10 @@ def test_recycle_zero_threshold_disables():
         set_workspace_runtime_setting,
     )
     set_workspace_runtime_setting(22, idle_timeout_minutes=0)
-    controller = FakeController(pods=[_pod(agent_id=11)])
-    result = recycle_idle_pods(controller)
+    provider = FakeProvider(runtimes=[_runtime(agent_id=11)])
+    result = recycle_idle_pods(provider)
     assert result["skipped_recent"] == 0 and result["recycled"] == 0
-    assert controller.terminated == []
+    assert provider.terminated == []
 
 
 def test_recycle_uses_workspace_threshold_override():
@@ -128,13 +125,13 @@ def test_recycle_uses_workspace_threshold_override():
     )
     # 默认阈值 30 分钟；该工作区放宽到 600 分钟 → 2 小时空闲不回收
     set_workspace_runtime_setting(22, idle_timeout_minutes=600)
-    controller = FakeController(pods=[_pod(agent_id=11)])
+    provider = FakeProvider(runtimes=[_runtime(agent_id=11)])
     db.session.add(_attempt(11, started_hours_ago=3, ended_hours_ago=2, state="COMMITTED"))
     db.session.commit()
 
-    result = recycle_idle_pods(controller)
+    result = recycle_idle_pods(provider)
     assert result["skipped_recent"] == 1
-    assert controller.terminated == []
+    assert provider.terminated == []
 
 
 def test_quota_settings_api_roundtrip(client):

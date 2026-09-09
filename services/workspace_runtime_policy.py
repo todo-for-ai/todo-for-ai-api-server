@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 from core.config import Config
 from models import AgentTaskAttempt, AgentTaskLease, WorkspaceRuntimeSetting
+from services.runtime_env.base import OCCUPYING_PHASES
 from utils.logger import logger
 
 # 工作区「同时干活」Agent 数的系统默认上限（Config 可覆盖；0=不限）。
@@ -66,39 +67,37 @@ def set_workspace_runtime_setting(workspace_id: int, max_pods=None,
     return row
 
 
-def recycle_idle_pods(controller, limit: int = 100) -> dict:
-    """回收空闲 Agent Pod（幂等，供看门狗周期调用）。
+def recycle_idle_pods(provider, limit: int = 100) -> dict:
+    """回收空闲运行时（幂等，供看门狗周期调用）。
 
     活动信号 = 该 Agent 最近一次任务 attempt（ended_at 或 started_at）；
-    从未有任务的 Pod 以 Pod Ready 时间计。有 ACTIVE attempt 的一律不回收
+    从未有任务的实例以启动时间计。有 ACTIVE attempt 的一律不回收
     （正在干活）。阈值来自 get_workspace_runtime_setting；0 = 不回收。
+    provider 为任意 RuntimeProvider 后端（k8s/docker/compose/baremetal），
+    状态按 services/runtime_env/base 的归一化契约读取。
     """
     now = datetime.utcnow()
     result = {'checked': 0, 'recycled': 0, 'skipped_active': 0, 'skipped_recent': 0}
 
     try:
-        pods = controller._list_all_agent_pods()
-    except Exception as e:  # noqa: BLE001  无集群配置时静默跳过
-        logger.warning("runtime.recycle_no_cluster error=%s", e)
+        runtimes = provider.list_runtimes()
+    except Exception as e:  # noqa: BLE001  后端不可达时静默跳过
+        logger.warning("runtime.recycle_backend_unreachable error=%s", e)
         return result
 
     setting_cache = {}
-    for pod in pods[:limit]:
+    for entry in runtimes[:limit]:
         result['checked'] += 1
-        labels = pod.metadata.labels if pod.metadata else {}
-        try:
-            agent_id = int((labels or {}).get('agent-id', 0) or 0)
-            workspace_id = int((labels or {}).get('workspace-id', 0) or 0)
-        except (TypeError, ValueError):
-            continue
+        agent_id = entry.get('agent_id')
+        workspace_id = entry.get('workspace_id')
         if not agent_id:
             continue
-        if pod.status and pod.status.phase not in ('Running', 'Pending'):
+        if entry.get('phase') not in OCCUPYING_PHASES:
             continue
 
         if workspace_id not in setting_cache:
             setting_cache[workspace_id] = get_workspace_runtime_setting(
-                controller, workspace_id
+                provider, workspace_id
             )
         idle_minutes = setting_cache[workspace_id]['idle_timeout_minutes']
         if idle_minutes <= 0:
@@ -107,27 +106,42 @@ def recycle_idle_pods(controller, limit: int = 100) -> dict:
         active = AgentTaskAttempt.query.filter(
             AgentTaskAttempt.agent_id == agent_id,
             AgentTaskAttempt.state == 'ACTIVE',
-            # 只认阈值窗口内开始的 attempt：被强删 Pod 遗留的陈旧 ACTIVE 行
-            # 不应永久阻塞回收（租约级活动判定留待 Phase 3 观测面）
+            # 只认阈值窗口内开始的 attempt：被强删实例遗留的陈旧 ACTIVE 行
+            # 不应永久阻塞回收（租约级活动判定留待观测面）
             AgentTaskAttempt.started_at >= now - timedelta(minutes=idle_minutes),
         ).first()
         if active:
             result['skipped_active'] += 1
             continue
 
-        last = _last_activity_at(agent_id) or _pod_ready_at(pod) or now
+        last = _last_activity_at(agent_id) or _parse_ts(entry.get('started_at')) or now
         idle = (now - last).total_seconds() / 60.0
         if idle < idle_minutes:
             result['skipped_recent'] += 1
             continue
 
-        if controller.terminate_agent_pod(agent_id):
+        if provider.terminate(agent_id):
             result['recycled'] += 1
             logger.info(
-                "runtime.idle_pod_recycled agent_id=%s workspace_id=%s idle_minutes=%s",
+                "runtime.idle_instance_recycled agent_id=%s workspace_id=%s "
+                "idle_minutes=%s backend=%s",
                 agent_id, workspace_id, round(idle, 1),
+                getattr(provider, 'name', '?'),
             )
     return result
+
+
+def _parse_ts(value):
+    """归一化 started_at（ISO 字符串或 datetime）→ naive datetime；失败返回 None。"""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    try:
+        parsed = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    except ValueError:
+        return None
 
 
 def _last_activity_at(agent_id: int):
@@ -192,11 +206,3 @@ def check_dispatch_capacity(workspace_id: int, agent_id: int,
     return result
 
 
-def _pod_ready_at(pod):
-    try:
-        for condition in (pod.status.conditions or []):
-            if condition.type == 'Ready' and condition.last_transition_time:
-                return condition.last_transition_time.replace(tzinfo=None)
-    except (AttributeError, TypeError):
-        pass
-    return None

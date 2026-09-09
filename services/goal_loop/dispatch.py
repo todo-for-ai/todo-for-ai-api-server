@@ -211,8 +211,8 @@ def ensure_cloud_executor(loop, executor: Agent):
         if not agent_key:
             log.warning("goal_loop.cloud_executor_no_key", extra={"agent_id": executor.id})
             return
-        from services.agent_runtime_controller import get_agent_controller
-        result = get_agent_controller().ensure_agent_pod(executor, agent_key)
+        from services.runtime_env import get_runtime_provider
+        result = get_runtime_provider().ensure_runtime(executor, agent_key)
         log.info("goal_loop.cloud_executor_ensured",
                  extra={"agent_id": executor.id, "result": result.get('status')})
     except Exception:  # noqa: BLE001

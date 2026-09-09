@@ -8,7 +8,7 @@ saml：元数据解析回退与缺证书报错、fetch_idp_metadata 注入客户
 InResponseTo 不匹配/缺 email NameID）、小数秒时间解析；
 runtime_policy：_list_all_agent_pods 异常静默、labels 解析失败与
 无 agent_id 跳过、非 Running/Pending phase 跳过、_last_activity_at
-无记录、_pod_ready_at 各形态。
+无记录、_parse_ts 各形态。
 """
 
 import base64
@@ -32,7 +32,7 @@ from services.saml import (
 )
 from services.workspace_runtime_policy import (
     _last_activity_at,
-    _pod_ready_at,
+    _parse_ts,
     recycle_idle_pods,
 )
 
@@ -488,58 +488,52 @@ class TestSamlRequestBuilders:
 # ─────────────────────────── runtime_policy 缺口 ───────────────────────────
 
 
-class _BoomController:
+class _BoomProvider:
+    name = "boom"
     MAX_PODS_PER_WORKSPACE = 10
     POD_IDLE_TIMEOUT_MINUTES = 30
 
-    def _list_all_agent_pods(self):
-        raise RuntimeError("no cluster config")
+    def list_runtimes(self, workspace_id=None):
+        raise RuntimeError("backend unreachable")
 
 
 class TestRuntimePolicyGaps:
     def test_recycle_swallows_cluster_error(self):
-        result = recycle_idle_pods(_BoomController())
+        result = recycle_idle_pods(_BoomProvider())
         assert result == {"checked": 0, "recycled": 0,
                           "skipped_active": 0, "skipped_recent": 0}
 
-    def test_recycle_skips_bad_labels_and_phases(self):
-        pods = [
-            SimpleNamespace(metadata=SimpleNamespace(
-                labels={"agent-id": "not-a-number"}),
-                status=SimpleNamespace(phase="Running", conditions=[])),
-            SimpleNamespace(metadata=SimpleNamespace(
-                labels={"agent-id": "0", "workspace-id": "1"}),
-                status=SimpleNamespace(phase="Running", conditions=[])),
-            SimpleNamespace(metadata=SimpleNamespace(
-                labels={"agent-id": "12", "workspace-id": "1"}),
-                status=SimpleNamespace(phase="Failed", conditions=[])),
+    def test_recycle_skips_bad_ids_and_phases(self):
+        runtimes = [
+            {"agent_id": None, "workspace_id": 1, "phase": "Running",
+             "started_at": None},
+            {"agent_id": 0, "workspace_id": 1, "phase": "Running",
+             "started_at": None},
+            {"agent_id": 12, "workspace_id": 1, "phase": "Failed",
+             "started_at": None},
         ]
-        controller = SimpleNamespace(
+        provider = SimpleNamespace(
+            name="fake",
             MAX_PODS_PER_WORKSPACE=10,
             POD_IDLE_TIMEOUT_MINUTES=30,
-            _list_all_agent_pods=lambda: pods,
-            terminate_agent_pod=lambda aid: True)
-        result = recycle_idle_pods(controller)
+            list_runtimes=lambda workspace_id=None: runtimes,
+            terminate=lambda aid: True)
+        result = recycle_idle_pods(provider)
         assert result["checked"] == 3
         assert result["recycled"] == 0
 
-    def test_pod_ready_at_variants(self):
-        naive_time = dt.datetime(2026, 9, 9, 8, 0)
-        aware_time = naive_time.replace(
-            tzinfo=dt.timezone.utc)
-        pod_ready = SimpleNamespace(status=SimpleNamespace(conditions=[
-            SimpleNamespace(type="NotReady", last_transition_time=None),
-            SimpleNamespace(type="Ready",
-                            last_transition_time=aware_time),
-        ]))
-        assert _pod_ready_at(pod_ready) == naive_time
+    def test_started_at_parse_variants(self):
+        naive = dt.datetime(2026, 9, 9, 8, 0)
+        aware = naive.replace(tzinfo=dt.timezone.utc)
+        assert _parse_ts("2026-09-09T08:00:00") == naive
+        assert _parse_ts(aware) == naive
+        assert _parse_ts("2026-09-09T08:00:00+00:00") == naive
+        assert _parse_ts(None) is None
+        assert _parse_ts("garbage") is None
 
-        no_conditions = SimpleNamespace(
-            status=SimpleNamespace(conditions=None))
-        assert _pod_ready_at(no_conditions) is None
-
-        bare = SimpleNamespace(status=None)
-        assert _pod_ready_at(bare) is None
+        assert _parse_ts(0) is None
+        assert _parse_ts(dt.datetime(2026, 9, 9, 8, 0, tzinfo=None)) == \
+            dt.datetime(2026, 9, 9, 8, 0)
 
     def test_last_activity_at_none_without_rows(self, _isolated_app):
         assert _last_activity_at(424242) is None
