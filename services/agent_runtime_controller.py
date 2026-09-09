@@ -128,7 +128,7 @@ class AgentRuntimeController(RuntimeProvider):
                 'created_at': datetime.utcnow().isoformat(),
             }
 
-        except ApiException as e:
+        except _k8s_api_exception() as e:
             logger.error(
                 "controller.pod_create_failed pod=%s error=%s", pod_name, e,
             )
@@ -164,7 +164,7 @@ class AgentRuntimeController(RuntimeProvider):
             )
             logger.info("controller.runtime_secret_patched agent_id=%s", agent_id)
             return secret_name
-        except ApiException as e:
+        except _k8s_api_exception() as e:
             if e.status != 404:
                 raise
         self.core_v1.create_namespaced_secret(
@@ -189,7 +189,7 @@ class AgentRuntimeController(RuntimeProvider):
                 name=pvc_name, namespace=self.namespace
             )
             return pvc_name
-        except ApiException as e:
+        except _k8s_api_exception() as e:
             if e.status != 404:
                 raise
         storage_class = getattr(Config, 'K8S_SHARED_WORKSPACE_STORAGE_CLASS', None)
@@ -205,7 +205,7 @@ class AgentRuntimeController(RuntimeProvider):
                 ),
                 spec=_k8s_client().V1PersistentVolumeClaimSpec(
                     access_modes=['ReadWriteMany'],
-                    resources=V1ResourceRequirements(requests={'storage': '10Gi'}),
+                    resources=_k8s_client().V1ResourceRequirements(requests={'storage': '10Gi'}),
                     **spec_kwargs,
                 ),
             ),
@@ -222,7 +222,7 @@ class AgentRuntimeController(RuntimeProvider):
                 label_selector=f'app=todo4ai-agent,workspace-id={workspace_id}',
             )
             return pods.items
-        except ApiException:
+        except _k8s_api_exception():
             return []
 
     def ensure_agent_pod(self, agent: Agent, agent_key: str, sandbox_profile: str = None) -> Dict:
@@ -341,7 +341,7 @@ class AgentRuntimeController(RuntimeProvider):
                     "controller.pod_deleted pod=%s agent_id=%s",
                     pod.metadata.name, agent_id,
                 )
-            except ApiException as e:
+            except _k8s_api_exception() as e:
                 logger.error(
                     "controller.pod_delete_failed pod=%s error=%s",
                     pod.metadata.name, e,
@@ -392,7 +392,7 @@ class AgentRuntimeController(RuntimeProvider):
 
             return [self._format_pod_status(pod) for pod in pods.items]
 
-        except ApiException as e:
+        except _k8s_api_exception() as e:
             logger.error("controller.list_pods_failed error=%s", e)
             return []
 
@@ -422,7 +422,7 @@ class AgentRuntimeController(RuntimeProvider):
                 label_selector=f'app=todo4ai-agent,agent-id={agent_id}'
             )
             return pods.items
-        except ApiException:
+        except _k8s_api_exception():
             return []
 
     def _list_all_agent_pods(self) -> List:
@@ -433,7 +433,7 @@ class AgentRuntimeController(RuntimeProvider):
                 label_selector='app=todo4ai-agent'
             )
             return pods.items
-        except ApiException:
+        except _k8s_api_exception():
             return []
 
     def _format_pod_status(self, pod) -> Dict:
