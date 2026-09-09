@@ -838,3 +838,29 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   告警原因与排序/by-kind 分组/热力图峰值与截断/周对比 change_pct 三分支/闲置五档）。
 - 经验：`kind=None` 写不进有 `default=AgentKind.X` 的列（默认值顶掉）——"unknown" 兜底
   分支只能靠 `.get()` 默认值触达，行覆盖不受影响但别指望造数命中；耗时 1.5h。
+
+### 迭代 43（2026-09-10）api/agents/messaging.py 拆分四模块 + 修 7 处潜伏运行时错误 ✅
+- 前：`api/agents/messaging.py` 911 行 / 行覆盖 14.9%（且 14.9% 几乎全是导入 incidental——
+  messaging 相关端点零测试）；大杂烩混 workflow-triggers CRUD、点对点消息、broadcast、
+  workflow-templates、collaboration-templates 五类不相关路由 + 100+ 行复制来的未用导入。
+- **潜伏运行时错误 7 处**（全部由本次测试首次触达暴露）：
+  1. `_compute_next_fire` 未导入 → cron 触发器 create/update 必 500；
+  2. `_advance_workflow` 未导入 → 协作模板实例化（带 workflow）必 500；
+  3. `_BUILTIN_COLLAB_TEMPLATES` 未导入 → 协作模板列表/实例化必 500；
+  4. `AuditLog.record` 传参 target_type/target_id（形参是 resource_type/resource_id）→ 实例化必 500；
+  5. builtin 模板建 Workflow 缺 NOT NULL 的 definition → 500；
+  6. Workflow.create 传不存在的 project_id 列 → TypeError 500（归属由 WorkflowRun 携带）；
+  7. AgentChannel.create 后未 flush 即取 channel.id 建成员 → NOT NULL 500。
+  全部修复：前三者从真实定义处导入；后四者本地修复（含两处 Workflow.create 后补 flush）。
+- 后：拆分为四个内聚模块（URL 零变化，纯移动 + 各自精简导入）：
+  `messaging.py`（342 行，broadcast/点对点/消息流/collaborators）、
+  `workflow_triggers.py`（174 行）、`workflow_templates.py`（99 行）、
+  `collaboration_templates.py`（285 行）；`__init__.py` 注册。
+- 另修：5 处 `if isinstance(data, tuple): return data` 的失效守卫
+  （validate_json_request 出错时返回 Response 对象而非 tuple——空 body 请求此前会
+  落进 500）→ 改为 `if not isinstance(data, dict): return data`。
+- 覆盖率：四个模块 **全部 100% 行覆盖**（122 + 97 + 39 + 126 = 384/384）。
+- 测试：新增 `test_agent_messaging.py` 26 用例；全量门禁见提交（后台全量）。
+- 经验：911 行"大杂烩"文件往往是多次拆分的残余倾倒场——顶层巨型未用导入块是
+  强信号；`validate_json_request()` 空 body 返回 Response 对象、`create()` 后不 flush
+  取 id、列 default 顶掉显式 None——本仓三类高频坑。

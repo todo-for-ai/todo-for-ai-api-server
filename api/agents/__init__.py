@@ -29,6 +29,9 @@ from . import health  # noqa: E402
 from . import knowledge  # noqa: E402
 from . import maintenance  # noqa: E402
 from . import messaging  # noqa: E402
+from . import workflow_triggers  # noqa: E402
+from . import workflow_templates  # noqa: E402
+from . import collaboration_templates  # noqa: E402
 from . import productivity  # noqa: E402
 from . import protocols  # noqa: E402
 from . import reputation  # noqa: E402
