@@ -84,6 +84,9 @@ class Agent(BaseModel):
     # Notification channels configuration (Feishu, WeCom, DingTalk, etc.)
     notification_channels = Column(JSON, comment='通知渠道配置')
 
+    # 工作时间区间（includes/excludes 时间窗，结构见 services/agent_working_schedule.py）
+    working_schedule = Column(JSON, comment='工作时间区间配置')
+
     # ── 协作编排字段（原 agent_core.Agent）──
     owner_id = Column(Integer, ForeignKey('users.id'), nullable=True, index=True, comment='Agent 所有者用户ID（协作侧）')
     kind = Column(Enum(AgentKind), default=AgentKind.ASSISTANT, comment='Agent 角色/类型')
@@ -144,6 +147,7 @@ class Agent(BaseModel):
         data['temperature'] = float(self.temperature) if self.temperature is not None else None
         data['top_p'] = float(self.top_p) if self.top_p is not None else None
         data['notification_channels'] = self.notification_channels or {}
+        data['working_schedule'] = self.working_schedule or {}
 
         if include_stats:
             now = datetime.utcnow()

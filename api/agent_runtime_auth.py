@@ -53,6 +53,7 @@ def agent_auth_introspect():
                 'id': agent.id,
                 'workspace_id': agent.workspace_id,
                 'name': agent.name,
+                'working_schedule': agent.working_schedule or {},
             },
         },
         'Agent authenticated successfully',

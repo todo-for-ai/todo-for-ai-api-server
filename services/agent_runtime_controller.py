@@ -416,22 +416,35 @@ class AgentRuntimeController:
 
         # owner_id 是用户 ID、workspace_id 是组织 ID，二者属不同 ID 空间；
         # 任务的工作区归属以其所属项目的 organization_id 为准。
+        from services.agent_working_schedule import is_in_working_window
+
+        def _pick_in_window_agent(query):
+            """按工作时间区间过滤候选 Agent：区间外的跳过（任务留在 TODO，
+            待窗口打开后由 pull 兜底领取）。"""
+            for candidate in query.all():
+                if is_in_working_window(candidate.working_schedule or {}):
+                    return candidate
+                logger.info(
+                    "runtime.auto_assign_window_skipped agent_id=%s", candidate.id,
+                )
+            return None
+
         org_id = None
         if task.project_id:
             org_id = db.session.get(Project, task.project_id).organization_id
         agent = None
         if org_id is not None:
-            agent = Agent.query.filter_by(
+            agent = _pick_in_window_agent(Agent.query.filter_by(
                 workspace_id=org_id,
                 runner_enabled=True,
                 status='ACTIVE'
-            ).first()
+            ))
         if agent is None:
-            agent = Agent.query.filter_by(
+            agent = _pick_in_window_agent(Agent.query.filter_by(
                 workspace_id=task.owner_id,
                 runner_enabled=True,
                 status='ACTIVE'
-            ).first()
+            ))
         if not agent:
             return
 

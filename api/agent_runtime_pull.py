@@ -20,6 +20,7 @@ from models import (
 )
 from .base import ApiResponse, validate_json_request
 from .agent_common import generate_id, now_utc, write_agent_audit, agent_session_required
+from services.agent_working_schedule import evaluate_working_window
 from services.budget_service import check_budgets, raise_budget_exceeded
 
 
@@ -148,6 +149,7 @@ def _build_agent_profile(agent):
         'active_grant_ids': active_grant_ids,
         'secret_capability_refs': secret_capability_refs,
         'notification_channels': agent.notification_channels or {},
+        'working_schedule': agent.working_schedule or {},
     }
 
 
@@ -200,6 +202,23 @@ def pull_tasks():
             max_tasks = max(1, min(int(data['max_tasks']), 10))
         except Exception:
             return ApiResponse.error('max_tasks must be integer', 400).to_response()
+
+    # ── 工作时间区间门：区间外不派发新任务（返回 next_window_at 供 runtime 安排唤醒）──
+    schedule = agent.working_schedule or {}
+    evaluation = evaluate_working_window(schedule)
+    if not evaluation['in_window']:
+        return ApiResponse.success(
+            {
+                'agent_profile': _build_agent_profile(agent),
+                'tasks': [],
+                'working_window': {
+                    'blocked': True,
+                    'in_window': False,
+                    'next_window_at': evaluation.get('next_window_at'),
+                },
+            },
+            'Outside agent working window',
+        ).to_response()
 
     # ── 预算门（P2.6）：agent/workspace 维度超限则停止派发并走审批队列 ──
     budget_block = None
