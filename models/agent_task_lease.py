@@ -2,7 +2,7 @@
 Agent 任务租约模型
 """
 
-from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, BigInteger, DateTime, UniqueConstraint
+from sqlalchemy import Column, String, Boolean, Integer, ForeignKey, BigInteger, DateTime, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from .base import BaseModel
 
@@ -11,6 +11,9 @@ class AgentTaskLease(BaseModel):
     __tablename__ = 'agent_task_leases'
     __table_args__ = (
         UniqueConstraint('task_id', 'active', name='uq_agent_task_leases_task_active'),
+        # 编排容量门禁热路径：工作区/Agent 维度的「正在干活」水位（每次 pull 都查询）
+        Index('idx_leases_workspace_active_exp', 'workspace_id', 'active', 'expires_at', 'agent_id'),
+        Index('idx_leases_agent_active_exp', 'agent_id', 'active', 'expires_at'),
     )
 
     lease_id = Column(String(64), nullable=False, unique=True, index=True, comment='租约ID')

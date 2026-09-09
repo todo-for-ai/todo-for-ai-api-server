@@ -5,7 +5,7 @@ Agent Runtime 监控相关模型
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, BigInteger
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, JSON, BigInteger, Index
 from sqlalchemy.orm import relationship
 from .base import BaseModel, db
 
@@ -14,6 +14,10 @@ class AgentHeartbeat(BaseModel):
     """Agent 心跳记录"""
 
     __tablename__ = 'agent_heartbeats'
+    # 最新心跳查询热路径：get_latest_by_agent（按 Agent 取最新一条）
+    __table_args__ = (
+        Index('idx_agent_heartbeats_agent_created', 'agent_id', 'created_at'),
+    )
 
     agent_id = Column(Integer, ForeignKey('agents.id'), nullable=False, index=True, comment='Agent ID')
     workspace_id = Column(Integer, ForeignKey('organizations.id'), nullable=False, index=True, comment='工作区ID')
