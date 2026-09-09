@@ -31,6 +31,11 @@ ALWAYS_SCHEDULE = {
     'enabled': True, 'timezone': 'UTC',
     'includes': [{'type': 'daily', 'start_time': '00:00', 'end_time': '24:00'}],
 }
+# 夜间窗口（Shanghai 22:00–06:00）
+NIGHT_SCHEDULE_CLIENT = {
+    'enabled': True, 'timezone': 'Asia/Shanghai',
+    'includes': [{'type': 'daily', 'start_time': '22:00', 'end_time': '06:00'}],
+}
 
 
 def _unique(prefix):
@@ -285,6 +290,31 @@ def test_auto_assign_assigns_in_window_agent(db_session, user_factory,
     assert AgentTaskLease.query.filter_by(agent_id=agent.id).count() == 1
     db_session.expire_all()
     assert task.status == TaskStatus.IN_PROGRESS
+
+
+# ────────────────────────── workspace PATCH 路径 ──────────────────────────
+
+def test_workspace_agent_patch_working_schedule(client, db_session, user_factory,
+                                                organization_factory, agent_factory):
+    """前端编辑页走的 PATCH /workspaces/<wid>/agents/<id> 同样支持并校验。"""
+    user = user_factory()
+    org = organization_factory(owner_id=user.id)
+    agent = agent_factory(workspace_id=org.id, owner_id=user.id, creator_user_id=user.id)
+    headers = _user_headers(user)
+    url = f"{BASE_URL}/workspaces/{org.id}/agents/{agent.id}"
+
+    resp = client.patch(url, json={"working_schedule": NIGHT_SCHEDULE_CLIENT}, headers=headers)
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["data"]["working_schedule"]["includes"][0]["start_time"] == "22:00"
+
+    bad = {"working_schedule": {"enabled": True, "includes": [{"type": "weekly"}]}}
+    resp = client.patch(url, json=bad, headers=headers)
+    assert resp.status_code == 400
+    assert "working_schedule" in resp.get_json()["message"]
+
+    # 非法配置不落库
+    resp = client.get(url, headers=headers)
+    assert resp.get_json()["data"]["working_schedule"]["includes"][0]["type"] == "daily"
 
 
 # ────────────────────────── introspect 下发 ──────────────────────────

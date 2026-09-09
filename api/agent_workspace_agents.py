@@ -30,13 +30,19 @@ AGENT_EDITABLE_FIELDS = [
     'response_style', 'tool_policy', 'memory_policy', 'handoff_policy',
     'execution_mode', 'runner_enabled', 'sandbox_profile', 'sandbox_policy',
     'max_concurrency', 'max_retry', 'timeout_seconds', 'heartbeat_interval_seconds',
-    'notification_channels',
+    'notification_channels', 'working_schedule',
 ]
 FLOAT_FIELDS = {'temperature', 'top_p'}
 INT_FIELDS = {'max_output_tokens', 'context_window_tokens', 'max_concurrency', 'max_retry', 'timeout_seconds', 'heartbeat_interval_seconds'}
 BOOL_FIELDS = {'runner_enabled'}
-JSON_OBJECT_FIELDS = {'response_style', 'tool_policy', 'memory_policy', 'handoff_policy', 'sandbox_policy', 'notification_channels'}
+JSON_OBJECT_FIELDS = {'response_style', 'tool_policy', 'memory_policy', 'handoff_policy', 'sandbox_policy', 'notification_channels', 'working_schedule'}
 JSON_LIST_FIELDS = {'capability_tags', 'allowed_project_ids'}
+
+
+def _normalize_working_schedule(raw_value):
+    """校验并规范化 working_schedule；非法抛 ValueError。"""
+    from services.agent_working_schedule import normalize_working_schedule
+    return normalize_working_schedule(raw_value)
 
 
 def _normalize_int(value, default_value):
@@ -167,6 +173,11 @@ def create_agent(workspace_id):
     if not name:
         return ApiResponse.error('name cannot be empty', 400).to_response()
 
+    try:
+        working_schedule = _normalize_working_schedule(data.get('working_schedule'))
+    except ValueError as e:
+        return ApiResponse.error(f'Invalid working_schedule: {e}', 400).to_response()
+
     agent = Agent(
         workspace_id=workspace_id,
         creator_user_id=user.id,
@@ -195,6 +206,7 @@ def create_agent(workspace_id):
         runner_enabled=bool(data.get('runner_enabled', False)),
         sandbox_profile=(str(data.get('sandbox_profile') or 'standard').strip()[:64] or 'standard'),
         sandbox_policy=data.get('sandbox_policy') or {'network_mode': 'whitelist', 'allowed_domains': []},
+        working_schedule=working_schedule or {},
         max_concurrency=_normalize_int(data.get('max_concurrency'), 1),
         max_retry=_normalize_int(data.get('max_retry'), 2),
         timeout_seconds=_normalize_int(data.get('timeout_seconds'), 1800),
@@ -261,6 +273,12 @@ def update_agent(workspace_id, agent_id):
 
     updated_fields = []
     soul_changed = False
+
+    if 'working_schedule' in data:
+        try:
+            data['working_schedule'] = _normalize_working_schedule(data['working_schedule'])
+        except ValueError as e:
+            return ApiResponse.error(f'Invalid working_schedule: {e}', 400).to_response()
 
     if 'status' in data:
         try:
