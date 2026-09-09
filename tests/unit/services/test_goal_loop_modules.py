@@ -195,9 +195,9 @@ def test_pick_executor_skips_unbound_candidates(monkeypatch):
     loop = SimpleNamespace(workspace_id=1, agent=fallback, director_agent_id=None,
                            director=None)
     pool = [
-        SimpleNamespace(role_template=None),
-        SimpleNamespace(role_template=SimpleNamespace(display_name="测试工程师",
-                                                      name="qa_tpl")),
+        SimpleNamespace(id=2, role_template=None),
+        SimpleNamespace(id=3, role_template=SimpleNamespace(display_name="测试工程师",
+                                                            name="qa_tpl")),
     ]
     monkeypatch.setattr(dispatch, "executor_pool", lambda loop: pool)
     picked = dispatch.pick_executor(loop, {"role": "测试工程师"})
