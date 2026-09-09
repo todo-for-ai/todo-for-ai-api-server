@@ -233,7 +233,7 @@ class TestWorkspaceRuntimeSettings:
         resp = client.get(_settings_url(env), headers=env["headers"])
         assert resp.status_code == 200
         assert resp.get_json()["data"]["settings"] == {
-            "max_pods": 5, "idle_timeout_minutes": 10}
+            "max_pods": 5, "idle_timeout_minutes": 10, "max_concurrent_agents": 5}
 
     def test_workspace_not_found(self, client, env, settings_controller):
         resp = client.get(
@@ -256,7 +256,7 @@ class TestWorkspaceRuntimeSettings:
                           json={"max_pods": 3, "idle_timeout_minutes": 30})
         assert resp.status_code == 200
         assert resp.get_json()["data"]["settings"] == {
-            "max_pods": 3, "idle_timeout_minutes": 30}
+            "max_pods": 3, "idle_timeout_minutes": 30, "max_concurrent_agents": 5}
         from models.workspace_runtime_setting import WorkspaceRuntimeSetting
         row = WorkspaceRuntimeSetting.query.filter_by(workspace_id=env["org"].id).first()
         assert row.max_pods == 3 and row.idle_timeout_minutes == 30

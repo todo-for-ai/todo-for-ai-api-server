@@ -76,7 +76,8 @@ def _attempt(agent_id, started_hours_ago, ended_hours_ago=None, state="ACTIVE"):
 def test_settings_default_without_row():
     from services.workspace_runtime_policy import get_workspace_runtime_setting
     setting = get_workspace_runtime_setting(FakeController(), 22)
-    assert setting == {"max_pods": 10, "idle_timeout_minutes": 30}
+    assert setting == {"max_pods": 10, "idle_timeout_minutes": 30,
+                      "max_concurrent_agents": 5}
 
 
 def test_set_then_get_settings():
@@ -86,7 +87,8 @@ def test_set_then_get_settings():
     )
     set_workspace_runtime_setting(22, max_pods=3, idle_timeout_minutes=15)
     setting = get_workspace_runtime_setting(FakeController(), 22)
-    assert setting == {"max_pods": 3, "idle_timeout_minutes": 15}
+    assert setting == {"max_pods": 3, "idle_timeout_minutes": 15,
+                      "max_concurrent_agents": 5}
     # 未设置的工作区不受影响
     assert get_workspace_runtime_setting(FakeController(), 99)["max_pods"] == 10
 
@@ -157,7 +159,8 @@ def test_quota_settings_api_roundtrip(client):
         headers=headers,
     )
     assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["data"]["settings"] == {"max_pods": 5, "idle_timeout_minutes": 45}
+    assert resp.get_json()["data"]["settings"] == {
+        "max_pods": 5, "idle_timeout_minutes": 45, "max_concurrent_agents": 5}
 
     resp = client.get(f"{base}/workspaces/{org.id}/runtime/settings", headers=headers)
     assert resp.status_code == 200

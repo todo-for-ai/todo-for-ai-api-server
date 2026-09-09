@@ -21,6 +21,7 @@ from models import (
 from .base import ApiResponse, validate_json_request
 from .agent_common import generate_id, now_utc, write_agent_audit, agent_session_required
 from services.agent_working_schedule import evaluate_working_window
+from services.workspace_runtime_policy import check_dispatch_capacity
 from services.budget_service import check_budgets, raise_budget_exceeded
 
 
@@ -218,6 +219,24 @@ def pull_tasks():
                 },
             },
             'Outside agent working window',
+        ).to_response()
+
+    # ── 编排并发门：工作区「同时干活」Agent 数达到上限时，不在岗的
+    #    Agent 不再领取新任务（已在岗者不受影响，可继续领）──
+    capacity = check_dispatch_capacity(int(agent.workspace_id), int(agent.id))
+    if not capacity['allowed']:
+        return ApiResponse.success(
+            {
+                'agent_profile': _build_agent_profile(agent),
+                'tasks': [],
+                'orchestration': {
+                    'blocked': True,
+                    'reason': capacity['reason'],
+                    'active_agents': capacity['active_agents'],
+                    'limit': capacity['limit'],
+                },
+            },
+            'Workspace agent concurrency limit reached',
         ).to_response()
 
     # ── 预算门（P2.6）：agent/workspace 维度超限则停止派发并走审批队列 ──

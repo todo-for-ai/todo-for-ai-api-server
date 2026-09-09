@@ -417,34 +417,74 @@ class AgentRuntimeController:
         # owner_id 是用户 ID、workspace_id 是组织 ID，二者属不同 ID 空间；
         # 任务的工作区归属以其所属项目的 organization_id 为准。
         from services.agent_working_schedule import is_in_working_window
+        from services.workspace_runtime_policy import (
+            agent_active_lease_count,
+            check_dispatch_capacity,
+        )
+        from services.budget_service import check_budgets, raise_budget_exceeded
 
-        def _pick_in_window_agent(query):
-            """按工作时间区间过滤候选 Agent：区间外的跳过（任务留在 TODO，
-            待窗口打开后由 pull 兜底领取）。"""
+        def _pick_dispatchable_agent(query, scope_workspace_id):
+            """多 Agent 编排派发选择器：依次过 工作时间区间 → token 预算 →
+            并发容量（工作区「同时干活」Agent 上限）三道门，再按当前活跃
+            租约数升序（负载均衡，次序稳定）挑出执行者。
+
+            被门禁挡下的候选只跳过不报错：任务留在 TODO，等窗口打开 /
+            预算恢复 / 有 Agent 空出来后由 pull 兜底领取。
+            """
+            best_key, best_agent = None, None
             for candidate in query.all():
-                if is_in_working_window(candidate.working_schedule or {}):
-                    return candidate
-                logger.info(
-                    "runtime.auto_assign_window_skipped agent_id=%s", candidate.id,
+                if not is_in_working_window(candidate.working_schedule or {}):
+                    logger.info(
+                        "runtime.auto_assign_window_skipped agent_id=%s", candidate.id,
+                    )
+                    continue
+
+                violations = check_budgets(
+                    workspace_id=int(scope_workspace_id),
+                    agent_id=int(candidate.id),
+                    project_id=int(task.project_id) if task.project_id else None,
                 )
-            return None
+                if violations:
+                    raise_budget_exceeded(
+                        workspace_id=int(scope_workspace_id),
+                        violations=violations,
+                        context={'agent_id': int(candidate.id), 'task_id': int(task.id)},
+                    )
+                    logger.info(
+                        "runtime.auto_assign_budget_blocked agent_id=%s violations=%s",
+                        candidate.id, len(violations),
+                    )
+                    continue
+
+                capacity = check_dispatch_capacity(scope_workspace_id, candidate.id)
+                if not capacity['allowed']:
+                    logger.info(
+                        "runtime.auto_assign_capacity_skipped agent_id=%s active=%s limit=%s",
+                        candidate.id, capacity['active_agents'], capacity['limit'],
+                    )
+                    continue
+
+                key = (agent_active_lease_count(candidate.id), candidate.id)
+                if best_key is None or key < best_key:
+                    best_key, best_agent = key, candidate
+            return best_agent
 
         org_id = None
         if task.project_id:
             org_id = db.session.get(Project, task.project_id).organization_id
         agent = None
         if org_id is not None:
-            agent = _pick_in_window_agent(Agent.query.filter_by(
+            agent = _pick_dispatchable_agent(Agent.query.filter_by(
                 workspace_id=org_id,
                 runner_enabled=True,
                 status='ACTIVE'
-            ))
+            ), org_id)
         if agent is None:
-            agent = _pick_in_window_agent(Agent.query.filter_by(
+            agent = _pick_dispatchable_agent(Agent.query.filter_by(
                 workspace_id=task.owner_id,
                 runner_enabled=True,
                 status='ACTIVE'
-            ))
+            ), task.owner_id)
         if not agent:
             return
 

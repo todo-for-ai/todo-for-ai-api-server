@@ -26,8 +26,15 @@ def director(loop) -> Agent:
 
 
 def executor_pool(loop) -> list:
-    """工作区内可接单的活跃 Agent（含岗位绑定），按创建序。"""
-    return (
+    """工作区内可接单的活跃 Agent（含岗位绑定），按创建序。
+
+    只包含当前处于工作时间区间内的 Agent——编排拆分时不应把步骤路由给
+    窗口外的执行者（会被派发门禁挡下，白费一轮）。
+    """
+    from services.agent_working_schedule import is_in_working_window
+
+    return [
+        a for a in
         Agent.query.filter(
             Agent.workspace_id == loop.workspace_id,
             Agent.runner_enabled.is_(True),
@@ -35,7 +42,8 @@ def executor_pool(loop) -> list:
         )
         .order_by(Agent.id)
         .all()
-    )
+        if is_in_working_window(a.working_schedule or {})
+    ]
 
 
 def available_executor_roles(loop, limit=20) -> list:
@@ -54,17 +62,29 @@ def available_executor_roles(loop, limit=20) -> list:
 
 
 def pick_executor(loop, step: dict) -> Agent:
-    """按步骤声明的岗位要求路由执行者；无匹配退回绑定 Agent。"""
+    """按步骤声明的岗位要求路由执行者；无匹配退回绑定 Agent。
+
+    岗位匹配到多个执行者时选当前活跃租约最少的一个（负载均衡），
+    让编排拆分出的步骤真正摊到多个 Agent 上并行干活。
+    """
+    from services.workspace_runtime_policy import agent_active_lease_count
+
     wanted = (step.get('role') or '').strip()
     if wanted:
+        best_key, best = None, None
         for cand in executor_pool(loop):
             template = cand.role_template
             if not template:
                 continue
             names = {(template.display_name or '').strip(), (template.name or '').strip()}
             names.discard('')
-            if wanted in names or any(wanted in n for n in names):
-                return cand
+            if wanted not in names and not any(wanted in n for n in names):
+                continue
+            key = (agent_active_lease_count(cand.id), cand.id)
+            if best_key is None or key < best_key:
+                best_key, best = key, cand
+        if best is not None:
+            return best
     return loop.agent
 
 
@@ -94,11 +114,39 @@ def create_round_task(loop, step: dict, executor: Agent = None) -> Task:
 def assign_task_to_agent(task, agent: Agent):
     """把任务直接派给指定执行者（建 attempt+lease 并推送）。
 
-    AgentRuntimeController.auto_assign_task 固定派给工作区第一个活跃 Agent，
-    无法按步骤岗位路由，且该文件有并行会话在改，故此处自包含实现。
+    派发前过两道门（与 pull 路径同语义）：
+    - 工作区编排并发上限（「同时干活」Agent 数）——到上限且该 Agent 不在岗
+      则不派（任务留 TODO，等容量释放后由 pull 兜底）；
+    - token/时长预算——超限走审批队列事件并跳过派发。
     """
     from api.agent_common import generate_id, now_utc
     from api.agent_runtime_websocket import push_task_to_agent
+    from services.workspace_runtime_policy import check_dispatch_capacity
+
+    capacity = check_dispatch_capacity(agent.workspace_id, agent.id)
+    if not capacity['allowed']:
+        log.warning("goal_loop.dispatch_capacity_blocked",
+                    extra={"agent_id": agent.id, "task_id": task.id,
+                           "active_agents": capacity['active_agents'],
+                           "limit": capacity['limit']})
+        return
+
+    from services.budget_service import check_budgets, raise_budget_exceeded
+    violations = check_budgets(
+        workspace_id=int(agent.workspace_id),
+        agent_id=int(agent.id),
+        project_id=int(task.project_id) if task.project_id else None,
+    )
+    if violations:
+        raise_budget_exceeded(
+            workspace_id=int(agent.workspace_id),
+            violations=violations,
+            context={'agent_id': int(agent.id), 'task_id': int(task.id)},
+        )
+        log.warning("goal_loop.dispatch_budget_blocked",
+                    extra={"agent_id": agent.id, "task_id": task.id,
+                           "violations": len(violations)})
+        return
 
     now = now_utc()
     attempt_id = generate_id('att')

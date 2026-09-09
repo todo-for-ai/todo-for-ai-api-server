@@ -20,10 +20,14 @@ class WorkspaceRuntimeSetting(BaseModel):
                       comment='同时在岗 Agent Pod 上限；NULL=用系统默认')
     idle_timeout_minutes = Column(Integer, nullable=True,
                                   comment='Pod 空闲回收阈值（分钟）；NULL=用系统默认')
+    max_concurrent_agents = Column(Integer, nullable=True,
+                                   comment='同时干活的 Agent 数上限（按活跃租约去重计数）；'
+                                           'NULL=用系统默认，0=不限')
     created_by = Column(Integer, nullable=True, comment='创建人用户ID')
 
     def to_dict(self):
         data = super().to_dict()
         data['max_pods'] = self.max_pods
         data['idle_timeout_minutes'] = self.idle_timeout_minutes
+        data['max_concurrent_agents'] = self.max_concurrent_agents
         return data

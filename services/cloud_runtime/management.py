@@ -8,6 +8,7 @@ from models import db
 from models.agent_key import AgentKey
 from services.agent_runtime_controller import get_agent_controller
 from services.workspace_runtime_policy import (
+    active_agent_count,
     get_workspace_runtime_setting,
     set_workspace_runtime_setting,
 )
@@ -116,26 +117,39 @@ def list_runtime_pods(workspace_id):
 
 
 def get_runtime_settings(workspace_id):
-    return {'settings': get_workspace_runtime_setting(get_agent_controller(), workspace_id)}
+    settings = get_workspace_runtime_setting(get_agent_controller(), workspace_id)
+    # 当前「正在干活」的 distinct Agent 数，供前端显示水位（active/limit）
+    return {
+        'settings': settings,
+        'orchestration': {
+            'active_agents': active_agent_count(workspace_id),
+        },
+    }
 
 
 def update_runtime_settings(workspace_id, payload):
-    """校验并保存工作区配额（max_pods / idle_timeout_minutes，None=不改）。"""
+    """校验并保存工作区配额（max_pods / idle_timeout_minutes /
+    max_concurrent_agents，None=不改）。"""
     data = payload or {}
     max_pods = data.get('max_pods')
     idle_timeout = data.get('idle_timeout_minutes')
+    max_agents = data.get('max_concurrent_agents')
     try:
         if max_pods is not None and not 0 <= int(max_pods) <= 100:
             raise SettingsValidationError('max_pods must be within 0..100')
         if idle_timeout is not None and not 0 <= int(idle_timeout) <= 10080:
             raise SettingsValidationError(
                 'idle_timeout_minutes must be within 0..10080')
+        if max_agents is not None and not 0 <= int(max_agents) <= 200:
+            raise SettingsValidationError(
+                'max_concurrent_agents must be within 0..200')
     except (TypeError, ValueError):
         raise SettingsValidationError(
-            'max_pods/idle_timeout_minutes must be integers')
+            'max_pods/idle_timeout_minutes/max_concurrent_agents must be integers')
     set_workspace_runtime_setting(
         workspace_id,
         max_pods=max_pods,
         idle_timeout_minutes=idle_timeout,
+        max_concurrent_agents=max_agents,
     )
     return get_runtime_settings(workspace_id)
