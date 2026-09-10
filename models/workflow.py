@@ -175,6 +175,7 @@ class WorkflowStepRun(BaseModel):
     started_at = Column(DateTime, comment="When this step started")
     finished_at = Column(DateTime, comment="When this step finished")
     error = Column(Text, comment="Error message if this step failed")
+    result_summary = Column(Text, comment="Step outcome summary; sub-workflow steps carry sub_workflow_run:{id} linkage")
     attempt = Column(Integer, default=1, comment="Attempt number (for retries)")
     # Runtime overrides — applied on top of the step definition for this run only.
     # Allows dynamic reconfiguration of a not-yet-started step without altering

@@ -942,3 +942,15 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   抓住（测试先行就是给重构上保险的最好证据）。
 - 全量门禁：见提交（后台全量）。
 
+### 迭代 48（2026-09-11）DAG 引擎本体覆盖收口：_workflow_helpers 4%→100% + 修 3 处引擎级潜伏崩溃 ✅
+- 前：`api/agents/_workflow_helpers.py`（522 行/230 语句）行覆盖 4%（scoped）/34%（含 messaging 测试）——DAG 推进引擎（子工作流传播、步骤 Agent 挑选、_start_step、_advance_workflow、沙箱挂钩）从未被系统性回归保护。
+- **测试首次触达即暴露 3 处引擎级崩溃**（全部为线上必炸路径）：
+  1. `_propagate_sub_workflow_completion` / `_start_step` 引用 `WorkflowStepRun.result_summary`——**该列在模型中不存在**（写入=挂 Python 属性不报错，类级 LIKE 查询必 AttributeError）→ 子工作流完成回传父步骤必炸，且 `_advance_workflow` 的全部终结分支（每次工作流正常完成）都调它 → **工作流永远无法正常完成**。修复：模型补 `result_summary = Column(Text)` + 迁移 `20260911_000026_add_step_run_result_summary`（MySQL ADD COLUMN / SQLite PRAGMA 守卫）。
+  2. `_pick_agent_for_step` Phase 2 引用 `wf.project_id`——Workflow 模型无此列 → 能力匹配不到本 owner Agent 时（进入跨项目挑选）必 AttributeError。修复：改用 `wf_run.project_id`（运行携带项目域，语义正确）。
+  3. `_start_step` 模板分支 `from models.task import TaskTemplate`——TaskTemplate 实际在 models.task_collab → 步骤带 task_template_id 必 ImportError。修复：`from models.task_collab import TaskTemplate`（TaskPriority 仍留 models.task）。
+- 新增 `tests/unit/api/test_workflow_dag_engine.py` 41→47 用例：子工作流完成传播（成功/失败/无 agent/悬空父运行）、Agent 挑选全分支（显式指定/能力匹配/coordination-leader 与 follower 加成/负载惩罚/声望加成/跨项目两阶段含限流与不匹配跳过/回退 leader 与任意活跃）、_start_step（子工作流缺失与启动、无 Agent 失败、任务/分配/运行创建、前驱上下文注入含空跳过、任务模板四分支）、_advance_workflow（终结守卫/首步启动/PAUSED/双源 max_parallel/缺定义/依赖三策略/条件跳过/全终结成功与失败）、沙箱挂钩（无沙箱/有沙箱快照/finish 三态）。
+- 覆盖率：`_workflow_helpers.py` **100% 行覆盖**（230/230）。
+- 经验：①引擎类代码的"写入不存在的 ORM 属性"不报错、查询类属性才炸——写入测试通过≠落库正确，必须验证查询路径；②模型列名与引擎引用的一致性只能靠测试首触达暴露（result_summary bug 存活至今正因零覆盖）；③跨项目挑选测试的"跨"字必须落在 owner_id 上（同 owner 走 Phase 1 永远进不了 Phase 2）。
+- 全量门禁：见提交（后台全量）。
+
+

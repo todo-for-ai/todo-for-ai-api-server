@@ -143,16 +143,15 @@ def _pick_agent_for_step(wf_run, step_def):
 
         # Phase 2: If no good match, search cross-project agents
         if not scored or scored[0][1] < 20:
-            # Get the workflow's project
-            wf = Workflow.query.get(wf_run.workflow_id)
-            if wf and wf.project_id:
-                cross_auths = CrossProjectAgent.get_active_for_project(wf.project_id)
+            # The run carries the project scope (Workflow has no project_id column)
+            if wf_run.project_id:
+                cross_auths = CrossProjectAgent.get_active_for_project(wf_run.project_id)
                 for auth in cross_auths:
                     c = Agent.query.get(auth.agent_id)
                     if not c or c.status != AgentStatus.ACTIVE:
                         continue
                     # Use effective capabilities (may be overridden for this project)
-                    caps = CrossProjectAgent.get_effective_capabilities(c.id, wf.project_id)
+                    caps = CrossProjectAgent.get_effective_capabilities(c.id, wf_run.project_id)
                     expanded = _expand_capabilities(set(caps or []))
                     match_count = len(required.intersection(expanded))
                     if match_count == 0:
@@ -299,7 +298,8 @@ def _start_step(wf_run, step_run, step_def, now):
     )
     # If there's a task template, use its defaults
     if step_def.task_template_id:
-        from models.task import TaskTemplate, TaskPriority
+        from models.task import TaskPriority
+        from models.task_collab import TaskTemplate
         tmpl = TaskTemplate.query.get(step_def.task_template_id)
         if tmpl:
             task_kwargs["title"] = task_title + f" (from: {tmpl.name})"
