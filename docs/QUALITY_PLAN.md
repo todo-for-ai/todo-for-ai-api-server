@@ -953,4 +953,29 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 经验：①引擎类代码的"写入不存在的 ORM 属性"不报错、查询类属性才炸——写入测试通过≠落库正确，必须验证查询路径；②模型列名与引擎引用的一致性只能靠测试首触达暴露（result_summary bug 存活至今正因零覆盖）；③跨项目挑选测试的"跨"字必须落在 owner_id 上（同 owner 走 Phase 1 永远进不了 Phase 2）。
 - 全量门禁：见提交（后台全量）。
 
+### 迭代 49（2026-09-11）_dispatch_helpers.py 派发辅助收口：11%→100% ✅
+- 前：`api/agents/_dispatch_helpers.py`（250 行/120 语句）行覆盖 11%——
+  协调者派发策略归一化、可认领任务收集、可用 worker 挑选、交接取消、
+  候选序列化等共享逻辑零回归保护（task_handoffs / task_operations / dispatch 共用）。
+- 新增 `tests/unit/api/test_dispatch_helpers.py` 33 用例：
+  - 交接取消：CANCELLED 落库、RUNNING/WAITING_HUMAN 运行连带取消、
+    终态运行不动、无运行返回 None
+  - 认领分配+运行创建：CLAIMED+RUNNING+租约、OFFLINE→ACTIVE 唤醒
+  - 派发策略归一化 14 分支：非对象 400、project_id 空值/字符串/负数/归属校验、
+    max_assignments 钳制（falsy 0 回退默认 20）、lease 钳制 60~86400、
+    candidate_agent_ids 去重/类型/正整数/归属校验、match off 强制 require off
+  - coordinator 策略读取：config None/非 dict/存储策略归一
+  - resolve 合并：存储策略 × 单次覆盖
+  - 可认领收集：优先级排序（当前为枚举名字母序——观察项）、终态过滤、
+    忙碌跳过、项目过滤
+  - 可用 worker：排除自身/其他 coordinator/忙碌/非活跃、candidate_ids 过滤
+  - 候选序列化：capability_match 与 priority_fifo 双策略、字段透传
+- 观察项（未擅动，属行为变更）：`collect_claimable_tasks` 以
+  `Task.priority.desc()` 排序，但 priority 为枚举名落库（HIGH/LOW/MEDIUM），
+  字母序 HIGH<LOW<MEDIUM → 实际排序为 medium→low→high，与业务优先级相反；
+  修正需改排序表达式（CASE 映射或数值列），待产品裁决。
+- 覆盖率：`_dispatch_helpers.py` **100%**（120/120）+ 测试文件自身 100%。
+- 全量门禁：见提交（后台全量）。
+
+
 
