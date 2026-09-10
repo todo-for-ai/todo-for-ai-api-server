@@ -977,5 +977,17 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 覆盖率：`_dispatch_helpers.py` **100%**（120/120）+ 测试文件自身 100%。
 - 全量门禁：见提交（后台全量）。
 
+### 迭代 50（2026-09-11）小模块清扫：治理规则 + Runtime 鉴权 100% ✅
+- `api/agent_governance_rules.py`（46 语句/35%→**100%**）：工作区治理规则
+  GET/PUT 全分支（未知工作区 404、陌生人读 403、非管理者写 403、
+  rules 非数组 400、有效读写往返、审计事件 governance.rules_updated 落库
+  含 rule_count）。存储走 SystemSettings key `governance_rules:<workspace_id>`。
+- `api/agent_runtime_auth.py`（22 语句/86%→**100%**）：introspect 三分支
+  （缺 agent_key 400、无效 key 401、非活跃 Agent 401）+ 成功签发
+  （ags_ 会话令牌 15 分钟、usage_count 自增、Agent 信息含 working_schedule）。
+- 新增 `tests/unit/api/test_governance_and_runtime_auth.py` 12 用例。
+- 全量门禁：见提交。
+
+
 
 
