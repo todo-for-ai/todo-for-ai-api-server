@@ -312,6 +312,7 @@ def _start_step(wf_run, step_run, step_def, now):
                 task_kwargs["is_ai_task"] = tmpl.is_ai_task
 
     task = Task.create(**task_kwargs)
+    db.session.flush()  # 立即取 task.id——否则下方 assignment/run 会拿到 None
     step_run.task_id = task.id
 
     # Claim the task for the agent
@@ -321,6 +322,7 @@ def _start_step(wf_run, step_run, step_def, now):
         assigned_by_user_id=wf_run.owner_id,
         state=TaskAssignmentState.ASSIGNED,
     )
+    db.session.flush()  # 取 assignment.id / run.id 同理
     run = AgentRun.create(
         task_id=task.id,
         agent_id=agent.id,

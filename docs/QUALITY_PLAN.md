@@ -879,3 +879,17 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - ⚠️ 遗留（迭代 45 处理）：_advance_workflow 内部给无根任务的步骤建 TaskAssignment
   （task_id=None → NOT NULL）——builtin 模板带 steps 实例化时该路径必炸，messaging.py
   侧已做容错降级（try/except + 日志）；修引擎需通读 _advance_workflow + _start_step。
+
+### 迭代 45（2026-09-10）修 _start_step 双 flush 缺陷——工作流步骤派发从"必炸"到"真实可用" ✅
+- 前：`_start_step` 在 `Task.create()` 后**未 flush 就读 task.id**（None）→
+  TaskAssignment/AgentRun/step_run 全部拿到 task_id=None/assignment_id=None →
+  下一次 flush 必炸 NOT NULL。这是迭代 43 发现的 builtin 模板带 steps 实例化
+  "必 500" 的真正根因（此前只能靠 try/except 吞掉降级——推进永远失败）。
+- 后：Task.create 与 TaskAssignment.create 之后各补一行 `db.session.flush()`。
+- 回归测试 `test_instantiate_builtin_with_steps_advances_for_real`：真实推进
+  （不打桩）——run 进入 RUNNING、步骤启动、assignment.task_id == step_run.task_id
+  全链路断言（该测试在修复前必失败）。
+- 覆盖率：改动文件全部 100%（沿用迭代 43 的 26+ 测试 + 新回归测试）。
+- 经验：本仓 `Model.create()` = add 不 flush——**create 后立刻读自增 id 的地方
+  全是同类雷**（channel/workflow/assignment 三连修），后续迭代 45+ 扫
+  `\.id` 紧跟 `create()` 的模式可再清一批。

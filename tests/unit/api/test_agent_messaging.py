@@ -495,6 +495,40 @@ def test_instantiate_collaboration_template_builtin_creates_channel(
     assert resp.status_code == 400
 
 
+def test_instantiate_builtin_with_steps_advances_for_real(client, db_session):
+    """回归：builtin 模板（带 steps）真实推进工作流——_start_step 必须
+    flush 后取 task.id，assignment/run/step_run 拿到真实 id（而非 None
+    导致后续 flush 炸 NOT NULL）。"""
+    user = _make_user(db_session)
+    project = _make_project(db_session, user)
+
+    resp = client.get(f"{BASE_URL}/agents/collaboration-templates",
+                      headers=_headers(user))
+    builtin = next(i for i in resp.get_json()["data"]
+                   if i.get("is_builtin") and i.get("workflow_steps"))
+
+    resp = client.post(
+        f"{BASE_URL}/agents/collaboration-templates/{builtin['id']}/instantiate",
+        json={"project_id": project.id},
+        headers=_headers(user))
+    assert resp.status_code == 200, resp.get_json()
+
+    from models import (TaskAssignment, WorkflowRun, WorkflowStepRun,
+                        WorkflowStatus)
+    run = WorkflowRun.query.filter_by(project_id=project.id).one()
+    assert run.status == WorkflowStatus.RUNNING  # 真实推进成功
+    step_runs = WorkflowStepRun.query.filter_by(run_id=run.id).all()
+    assert step_runs, "step runs 应已创建"
+    started = [sr for sr in step_runs if sr.status == WorkflowStatus.RUNNING
+               or sr.task_id]
+    assert started, "至少一个步骤应已启动"
+    for sr in started:
+        assert sr.task_id is not None
+        assignment = TaskAssignment.query.filter_by(id=sr.assignment_id).first()
+        assert assignment is not None
+        assert assignment.task_id == sr.task_id
+
+
 def test_instantiate_collaboration_template_user_with_workflow(
         client, db_session):
     """用户模板带 workflow_id + project → 创建 wf_run 并推进。"""
