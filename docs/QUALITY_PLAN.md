@@ -909,3 +909,36 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   urgent-done-cancelled-无截止排除/cutoff 阈值/owner 作用域/全 owner/提交分支/
   端点回归）。
 - 全量门禁：**1966 passed**（污染修复后套件首次全绿收敛）。
+
+### 迭代 47（2026-09-11）_core.py 955 行清零：拆 agents_crud + agent_assignments 双 100% ✅
+- 前：`api/agents/_core.py` 955 行 / 行覆盖 24.2%——project_members/workflow_routes/
+  task_templates 等多轮拆分后的"残余倾倒场"（文件头自述"Routes that don't clearly
+  belong to a specific sub-module live here"），14 条协作核心路由零测试。
+- **潜伏运行时错误第十、十一、十二处**（AST 未定义调用扫描 + 审计Signature核对）：
+  1. `list_review_queue` 用 `or_`/`and_` 但全文件未导入 → **默认 action=all 请求必 500**
+     （人类审查队列入口整体不可用）；
+  2. `self_register_agent` 两条路径的 `AuditLog.record` 传 `target_type/target_id`
+     （形参是 resource_type/resource_id）→ TypeError：**Agent 已 commit 建成，
+     但调用方收到 500**（更新/新建双路径全坏）；
+  3. 顶部 `from workflow_templates import WORKFLOW_TEMPLATES` 绝对路径导入且正文
+     零使用（依赖 sys.path hack 才能解析的脆弱导入）→ 删除。
+- 后：拆为两个内聚模块（URL 零变化，纯移动 + 各自精简导入）：
+  `agents_crud.py`（229 语句：列表/创建/自助注册/发现/详情/更新/心跳 +
+  _normalize_working_schedule_field）、`agent_assignments.py`（228 语句：
+  审查队列/推荐/认领/agent 分配列表与更新/task 分配列表与更新）；
+  `_core.py` 变 9 行兼容 shim（`from . import ...` 副作用注册语义不变，
+  `__init__.py` 零改动）。
+- 覆盖率：`agents_crud.py` **100%**（229/229）、`agent_assignments.py` **100%**
+  （228/228）、`_core.py` shim 100%。
+- 测试：新增 `tests/unit/api/test_agents_core_routes.py` **89 用例**
+  （每路由 200/400/404/409/500 矩阵 + 审计 kwargs 断言 + 工作时间窗 409 +
+  认领双模式 + 能力合并 + 角色模板四分支 + 租约过期 409 + 更新错误三态）。
+- 经验：①AST "调用-定义差集" 扫描是 NameError 家族的终极武器（本轮第 10-12 处，
+  累计 12 处同类潜伏错误全部在零测试路由里）；②本轮测试自身先后暴露
+  werkzeug test client 无 params=（用 query_string=）、TaskStatus/TaskAssignmentState
+  枚举值全小写、AgentRoleTemplate 三个 NOT NULL（display_name/created_by_user_id）——
+  新测试文件首轮全红是常态，按签名逐个收敛；③本体曾犯"自造符号
+  ACTIVE_ASSIGNMENT_STATES_QUERY/AuditLog_record_claim"——被自己的测试当场
+  抓住（测试先行就是给重构上保险的最好证据）。
+- 全量门禁：见提交（后台全量）。
+
