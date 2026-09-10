@@ -174,6 +174,124 @@ def _check_version_consistency() -> List[Dict[str, Any]]:
     return checks
 
 
+def _add_runtime_check(checks: List[Dict[str, Any]], name: str, status: str,
+                       detail: str, hint: str = '') -> None:
+    entry = {'name': name, 'category': 'runtime', 'status': status, 'detail': detail}
+    if hint:
+        entry['hint'] = hint
+    checks.append(entry)
+
+
+def _check_runtime_provider() -> List[Dict[str, Any]]:
+    """运行时环境后端检查：RUNTIME_PROVIDER 合法性 + 选中后端的前置条件。"""
+    import subprocess
+
+    from core.config import Config
+
+    checks: List[Dict[str, Any]] = []
+    provider = (getattr(Config, 'RUNTIME_PROVIDER', None) or 'k8s').strip().lower()
+    valid = ('k8s', 'docker', 'compose', 'baremetal', 'remote')
+    if provider in valid:
+        _add_runtime_check(checks, 'runtime.provider', 'pass',
+                           f'RUNTIME_PROVIDER={provider}')
+    else:
+        _add_runtime_check(checks, 'runtime.provider', 'error',
+                           f'unknown RUNTIME_PROVIDER {provider!r}',
+                           hint='可选值：k8s | docker | compose | baremetal | remote')
+        return checks
+
+    if provider == 'k8s':
+        try:
+            import kubernetes  # noqa: F401
+            try:
+                kubernetes.config.load_incluster_config()
+                source = 'in-cluster'
+            except Exception:  # noqa: BLE001
+                kubernetes.config.load_kube_config()
+                source = 'kubeconfig'
+            _add_runtime_check(checks, 'runtime.backend.k8s', 'pass',
+                               f'cluster credentials loaded ({source})')
+        except Exception as e:  # noqa: BLE001
+            _add_runtime_check(
+                checks, 'runtime.backend.k8s', 'error', f'k8s unavailable: {e}',
+                hint='安装 kubernetes 包并配置集群凭据，或改用 RUNTIME_PROVIDER=docker')
+    elif provider in ('docker', 'compose'):
+        try:
+            result = subprocess.run(
+                ['docker', 'info'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                _add_runtime_check(checks, f'runtime.backend.{provider}', 'pass',
+                                   'docker daemon reachable')
+            else:
+                _add_runtime_check(
+                    checks, f'runtime.backend.{provider}', 'error',
+                    f'docker info failed: {(result.stderr or "").strip()[:200]}',
+                    hint='确认 Docker 已安装且当前用户有权限访问 docker daemon')
+        except FileNotFoundError:
+            _add_runtime_check(checks, f'runtime.backend.{provider}', 'error',
+                               'docker CLI not found',
+                               hint='安装 Docker 或改用其他 RUNTIME_PROVIDER')
+        except Exception as e:  # noqa: BLE001
+            _add_runtime_check(checks, f'runtime.backend.{provider}', 'error',
+                               f'docker unreachable: {e}')
+    elif provider == 'baremetal':
+        command = getattr(Config, 'BAREMETAL_RUNTIME_COMMAND', None)
+        cwd = getattr(Config, 'BAREMETAL_RUNTIME_CWD', None)
+        if command and cwd:
+            _add_runtime_check(checks, 'runtime.backend.baremetal', 'pass',
+                               f'command configured (cwd={cwd})')
+        else:
+            _add_runtime_check(
+                checks, 'runtime.backend.baremetal', 'error',
+                'BAREMETAL_RUNTIME_COMMAND / BAREMETAL_RUNTIME_CWD not configured',
+                hint='baremetal 后端必须显式配置启动命令与工作目录')
+    else:  # remote
+        _add_runtime_check(checks, 'runtime.backend.remote', 'pass',
+                           'reverse-connect agents self-manage their lifecycle')
+
+    api_base_url = getattr(Config, 'API_BASE_URL', None)
+    if api_base_url:
+        _add_runtime_check(checks, 'runtime.api_base_url', 'pass',
+                           f'API_BASE_URL={api_base_url}')
+    else:
+        _add_runtime_check(
+            checks, 'runtime.api_base_url', 'warning', 'API_BASE_URL not set',
+            hint='容器/远程运行时需要回连平台地址（docker 后端可用 DOCKER_API_BASE_URL）')
+    return checks
+
+
+def _check_agents_overview() -> List[Dict[str, Any]]:
+    """Agent/连接面概览：有没有可干活的 Agent、反连是否在线。"""
+    checks: List[Dict[str, Any]] = []
+    try:
+        from models.agent import Agent
+
+        total = Agent.query.count()
+        active = Agent.query.filter_by(status='ACTIVE').count()
+        managed = Agent.query.filter_by(execution_mode='managed_runner').count()
+        _add_runtime_check(
+            checks, 'runtime.agents',
+            'pass' if total else 'warning',
+            f'total={total} active={active} managed_runner={managed}',
+            hint='' if total else '还没有任何 Agent：在网页创建 Agent 并接入运行时',
+        )
+    except Exception as e:  # noqa: BLE001
+        _add_runtime_check(checks, 'runtime.agents', 'error', f'query failed: {e}')
+        return checks
+
+    try:
+        from api.agent_runtime_websocket import _CONNECTED_AGENT_IDS
+        online = len(_CONNECTED_AGENT_IDS)
+        _add_runtime_check(
+            checks, 'runtime.ws_connected', 'pass' if online else 'warning',
+            f'{online} agent(s) connected via websocket (this process)',
+            hint='' if online else '没有在线反连连接：确认 agent-runtime daemon 已启动并配置了 agent_key',
+        )
+    except Exception:  # noqa: BLE001 — 非 Web 进程（脚本自检）无 WS 注册表，跳过
+        pass
+    return checks
+
+
 def run_deploy_checks() -> Dict[str, Any]:
     """执行全部部署自检，返回报告（ok=False 表示存在 error 级问题）。"""
     from flask import current_app
@@ -183,6 +301,8 @@ def run_deploy_checks() -> Dict[str, Any]:
     checks.extend(_check_version_consistency())
     checks.extend(_check_env(app))
     checks.extend(_check_database())
+    checks.extend(_check_runtime_provider())
+    checks.extend(_check_agents_overview())
 
     errors = [check for check in checks if check['status'] == 'error']
     warnings = [check for check in checks if check['status'] == 'warning']

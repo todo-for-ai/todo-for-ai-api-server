@@ -135,3 +135,169 @@ class TestVersionConsistency:
         assert "latest=22" in files_check['detail']
         assert files_check['status'] == 'warning'  # 声明版本仍是 16
         assert checks[0]['status'] == 'pass'
+
+
+class TestRuntimeProviderChecks:
+    def _by_name(self, checks):
+        return {c['name']: c for c in checks}
+
+    def test_unknown_provider_short_circuits(self, monkeypatch):
+        from core.config import Config
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'nomad', raising=False)
+        checks = dc._check_runtime_provider()
+        assert len(checks) == 1
+        assert checks[0]['name'] == 'runtime.provider'
+        assert checks[0]['status'] == 'error'
+        assert 'k8s | docker' in checks[0]['hint']
+
+    def test_docker_backend_reachable(self, monkeypatch):
+        from core.config import Config
+        from subprocess import CompletedProcess
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'docker', raising=False)
+        monkeypatch.setattr(Config, 'API_BASE_URL', 'http://x:1/api/v1', raising=False)
+
+        def fake_run(args, **kw):
+            assert args[:2] == ['docker', 'info']
+            return CompletedProcess(args, 0)
+        monkeypatch.setattr('subprocess.run', fake_run)
+
+        by_name = self._by_name(dc._check_runtime_provider())
+        assert by_name['runtime.provider']['status'] == 'pass'
+        assert by_name['runtime.backend.docker']['status'] == 'pass'
+        assert by_name['runtime.api_base_url']['status'] == 'pass'
+
+    def test_docker_daemon_down_reports_hint(self, monkeypatch):
+        from core.config import Config
+        from subprocess import CompletedProcess
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'compose', raising=False)
+        monkeypatch.setattr(
+            'subprocess.run',
+            lambda args, **kw: CompletedProcess(args, 1, stderr='Cannot connect to the Docker daemon'))
+
+        by_name = self._by_name(dc._check_runtime_provider())
+        assert by_name['runtime.backend.compose']['status'] == 'error'
+        assert 'Docker' in by_name['runtime.backend.compose']['hint']
+
+    def test_docker_cli_missing(self, monkeypatch):
+        from core.config import Config
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'docker', raising=False)
+
+        def no_docker(args, **kw):
+            raise FileNotFoundError('docker')
+        monkeypatch.setattr('subprocess.run', no_docker)
+
+        by_name = self._by_name(dc._check_runtime_provider())
+        assert by_name['runtime.backend.docker']['status'] == 'error'
+        assert '安装 Docker' in by_name['runtime.backend.docker']['hint']
+
+    def test_k8s_sdk_missing_reports_error(self, monkeypatch):
+        from core.config import Config
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'k8s', raising=False)
+        monkeypatch.setitem(__import__('sys').modules, 'kubernetes', None)
+
+        by_name = self._by_name(dc._check_runtime_provider())
+        assert by_name['runtime.backend.k8s']['status'] == 'error'
+        assert 'RUNTIME_PROVIDER=docker' in by_name['runtime.backend.k8s']['hint']
+
+    def test_baremetal_requires_explicit_config(self, monkeypatch):
+        from core.config import Config
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'baremetal', raising=False)
+        monkeypatch.setattr(Config, 'BAREMETAL_RUNTIME_COMMAND', '', raising=False)
+        monkeypatch.setattr(Config, 'BAREMETAL_RUNTIME_CWD', '', raising=False)
+
+        by_name = self._by_name(dc._check_runtime_provider())
+        assert by_name['runtime.backend.baremetal']['status'] == 'error'
+
+        monkeypatch.setattr(Config, 'BAREMETAL_RUNTIME_COMMAND',
+                            'python -m runtime.main', raising=False)
+        monkeypatch.setattr(Config, 'BAREMETAL_RUNTIME_CWD', '/opt/agent', raising=False)
+        by_name = self._by_name(dc._check_runtime_provider())
+        assert by_name['runtime.backend.baremetal']['status'] == 'pass'
+
+    def test_remote_backend_always_pass(self, monkeypatch):
+        from core.config import Config
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'remote', raising=False)
+        monkeypatch.setattr(Config, 'API_BASE_URL', '', raising=False)
+
+        by_name = self._by_name(dc._check_runtime_provider())
+        assert by_name['runtime.backend.remote']['status'] == 'pass'
+        assert by_name['runtime.api_base_url']['status'] == 'warning'
+
+
+class TestAgentsOverviewChecks:
+    def _fake_agent_module(self, monkeypatch, counts):
+        """把 models.agent.Agent 换成带可链式 query 桩的假模块。"""
+        import sys
+        from types import SimpleNamespace
+
+        class _Q:
+            def __init__(self, counter):
+                self._counter = counter
+
+            def count(self):
+                return next(self._counter)
+
+            def filter_by(self, **kw):
+                return self
+
+        class FakeAgent:
+            query = _Q(iter(counts))
+
+        monkeypatch.setitem(sys.modules, 'models.agent',
+                            SimpleNamespace(Agent=FakeAgent))
+        return FakeAgent
+
+    def test_agents_present_passes(self, monkeypatch):
+        self._fake_agent_module(monkeypatch, [3, 2, 1])
+        from api import agent_runtime_websocket as ws
+        monkeypatch.setattr(ws, '_CONNECTED_AGENT_IDS', {1, 2}, raising=False)
+
+        by_name = {c['name']: c for c in dc._check_agents_overview()}
+        assert by_name['runtime.agents']['status'] == 'pass'
+        assert 'total=3' in by_name['runtime.agents']['detail']
+        assert by_name['runtime.ws_connected']['status'] == 'pass'
+        assert '2 agent(s)' in by_name['runtime.ws_connected']['detail']
+
+    def test_no_agents_warns_with_hint(self, monkeypatch):
+        self._fake_agent_module(monkeypatch, [0, 0, 0])
+        from api import agent_runtime_websocket as ws
+        monkeypatch.setattr(ws, '_CONNECTED_AGENT_IDS', set(), raising=False)
+
+        by_name = {c['name']: c for c in dc._check_agents_overview()}
+        assert by_name['runtime.agents']['status'] == 'warning'
+        assert by_name['runtime.agents']['hint']
+        assert by_name['runtime.ws_connected']['status'] == 'warning'
+
+    def test_query_failure_is_error_not_crash(self, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        class _RaisingDescriptor:
+            # 类级访问（Agent.query）即抛错；property 在类访问时返回自身、不适用
+            def __get__(self, obj, owner=None):
+                raise RuntimeError('db down')
+
+        class BrokenAgent:
+            query = _RaisingDescriptor()
+
+        monkeypatch.setitem(sys.modules, 'models.agent',
+                            SimpleNamespace(Agent=BrokenAgent))
+        checks = dc._check_agents_overview()
+        assert checks[0]['status'] == 'error'
+        assert 'db down' in checks[0]['detail']
+
+
+class TestRunDeployChecksIntegration:
+    def test_report_includes_runtime_category(self, monkeypatch):
+        from core.config import Config
+        monkeypatch.setattr(Config, 'RUNTIME_PROVIDER', 'remote', raising=False)
+        monkeypatch.setattr(dc, '_check_version_consistency', lambda: [])
+        monkeypatch.setattr(dc, '_check_env', lambda app: [])
+        monkeypatch.setattr(dc, '_check_database', lambda: [])
+        monkeypatch.setattr(dc, '_check_agents_overview', lambda: [])
+
+        report = dc.run_deploy_checks()
+        names = [c['name'] for c in report['checks']]
+        assert 'runtime.provider' in names
+        assert 'runtime.backend.remote' in names
+        assert report['summary']['total'] == len(report['checks'])
