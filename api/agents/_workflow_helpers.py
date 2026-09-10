@@ -6,6 +6,10 @@ Extracted from workflow_runs.py to keep route handlers and DAG logic separate.
 
 from datetime import datetime, timedelta
 
+from .task_escalation import (  # noqa: F401  兼容再导出（实现已下沉）
+    PRIORITY_LADDER as _PRIORITY_LADDER,
+    escalate_overdue_tasks as _escalate_overdue_tasks,
+)
 from .workflow_conditions import (
     _RUNTIME_OVERRIDABLE_KEYS,
     _apply_runtime_overrides,
@@ -516,62 +520,3 @@ def _maybe_finish_sandboxed_execution(run, status, summary=None, error=None):
         return None
     execution.finish(status, summary=summary, error=error)
     return execution
-
-
-# ── Priority auto-escalation ──────────────────────────────────────────
-
-_PRIORITY_LADDER = {
-    "low": "medium",
-    "medium": "high",
-    "high": "urgent",
-}
-
-
-def _escalate_overdue_tasks(owner_id=None, overdue_after_days=1):
-    """Auto-escalate the priority of overdue tasks that are not yet urgent.
-
-    Tasks whose due_date is in the past and whose status is not in a terminal
-    state (done / cancelled) will have their priority bumped one level.
-    Returns the list of escalated task IDs.
-    """
-    from models.task import TaskPriority
-
-    now = datetime.utcnow()
-    cutoff = now - timedelta(days=overdue_after_days)
-
-    query = Task.query.filter(
-        Task.due_date.isnot(None),
-        Task.due_date < cutoff,
-        Task.status.notin_([TaskStatus.DONE, TaskStatus.CANCELLED]),
-        Task.priority != TaskPriority.URGENT,
-    )
-    if owner_id:
-        project_ids = [p.id for p in Project.query.filter_by(owner_id=owner_id).all()]
-        query = query.filter(Task.project_id.in_(project_ids))
-
-    escalated = []
-    for task in query.all():
-        current = task.priority.value if task.priority else "medium"
-        next_level = _PRIORITY_LADDER.get(current)
-        if next_level:
-            try:
-                task.priority = TaskPriority(next_level)
-                db.session.add(task)
-                escalated.append(task.id)
-                Notification.create_notification(
-                    user_id=task.project.owner_id if task.project and task.project.owner_id else None,
-                    event_type="task_priority_escalated",
-                    task_id=task.id,
-                    payload={
-                        "old_priority": current,
-                        "new_priority": next_level,
-                        "due_date": task.due_date.isoformat() if task.due_date else None,
-                    },
-                )
-            except (ValueError, AttributeError):
-                pass
-
-    if escalated:
-        db.session.commit()
-
-    return escalated

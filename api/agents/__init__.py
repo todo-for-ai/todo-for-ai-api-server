@@ -33,6 +33,7 @@ from . import workflow_triggers  # noqa: E402
 from . import workflow_templates  # noqa: E402
 from . import collaboration_templates  # noqa: E402
 from . import workflow_conditions  # noqa: E402
+from . import task_escalation  # noqa: E402
 from . import productivity  # noqa: E402
 from . import protocols  # noqa: E402
 from . import reputation  # noqa: E402

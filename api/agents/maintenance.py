@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from flask import request
 from sqlalchemy import func
 
+from .task_escalation import escalate_overdue_tasks as _escalate_overdue_tasks  # 潜伏 NameError 修复
 from ._shared import (
     agents_bp,
     ApiResponse,

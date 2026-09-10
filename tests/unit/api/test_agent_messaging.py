@@ -8,9 +8,14 @@ workflow-templates、collaboration-templates 的全分支到行。
 - 会话级库清场：每例先删 Notification/TaskEvent/WorkflowTrigger 与相关 AuditLog。
 """
 
+import itertools
 import uuid
 
 import pytest
+
+# 本文件造的 Task 用独立高位 id 段（会话级库中其他用例的 task_factory 从 1 起
+# 手工分配）；真实推进还会产生自增 id 的 Task。用例结束统一清场。
+_TASK_ID = itertools.count(9_100_001)
 
 BASE_URL = "/todo-for-ai/api/v1"
 
@@ -30,6 +35,14 @@ def _clean_messaging_tables(db_session):
     db_session.rollback()  # 清掉上一例可能遗留的 pending 脏状态
     db_session.commit()
     yield
+    # 真实推进会产生自增 id 的 Task/Workflow 链；不清理会撞后续文件
+    # task_factory 的手工 id=1（UNIQUE tasks.id）
+    from models import (AgentRun, Task, TaskAssignment, Workflow,
+                        WorkflowRun, WorkflowStep, WorkflowStepRun)
+    for mdl in (TaskAssignment, AgentRun, WorkflowStepRun, WorkflowRun,
+                WorkflowStep, Workflow, Task):
+        db_session.query(mdl).delete(synchronize_session=False)
+    db_session.commit()
     db_session.rollback()
     db_session.commit()
 
@@ -74,8 +87,9 @@ def _make_project(db_session, user):
 
 def _make_task(db_session, user, project):
     from models import Task
-    task = Task(title=f"mt_{uuid.uuid4().hex[:8]}", content="x",
-                project_id=project.id, owner_id=user.id, status="TODO")
+    task = Task(id=next(_TASK_ID), title=f"mt_{uuid.uuid4().hex[:8]}",
+                content="x", project_id=project.id, owner_id=user.id,
+                status="TODO", is_ai_task=False)
     db_session.add(task)
     db_session.commit()
     return task

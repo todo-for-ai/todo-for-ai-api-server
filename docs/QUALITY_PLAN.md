@@ -893,3 +893,19 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 经验：本仓 `Model.create()` = add 不 flush——**create 后立刻读自增 id 的地方
   全是同类雷**（channel/workflow/assignment 三连修），后续迭代 45+ 扫
   `\.id` 紧跟 `create()` 的模式可再清一批。
+
+### 迭代 46（2026-09-10）task_escalation 下沉 + 修 maintenance 三处潜伏 NameError + 根治套件 65F 污染 ✅
+- **潜伏运行时错误第八、九处**：maintenance.py 三处调用 `_escalate_overdue_tasks`
+  （POST /maintenance/escalate-overdue 等三个维护端点）全模块无导入 → 必 NameError 500。
+- 后：下沉独立模块 `api/agents/task_escalation.py`（PRIORITY_LADDER + escalate_overdue_tasks，
+  周期维护职责与 DAG 引擎分离）；maintenance.py 正式导入（潜伏 NameError 修复）；
+  _workflow_helpers 保留兼容再导出；`__init__.py` 注册。
+- **根治全量套件 65F+60E 污染链**：定位到 test_agent_messaging.py 泄漏自增 id 的 Task 行
+  （真实推进用例的自增 Task 残留 + 自建 Task 未用高位 id）→ 撞后续文件 task_factory 的
+  手工 id=1。修复：_make_task 用高位 id 段（9_100_000+）+ is_ai_task=False +
+  夹具 teardown 全量清场（Task/Workflow 链）。**注意：该修复在迭代 45 曾修过但未
+  commit 就 push——origin/main 30b196f 仍带此问题，本迭代正式落库修复。**
+- 覆盖率：`task_escalation.py` **100%** 行覆盖（23/23）+ 9 新用例（阶梯逐级/
+  urgent-done-cancelled-无截止排除/cutoff 阈值/owner 作用域/全 owner/提交分支/
+  端点回归）。
+- 全量门禁：**1966 passed**（污染修复后套件首次全绿收敛）。
