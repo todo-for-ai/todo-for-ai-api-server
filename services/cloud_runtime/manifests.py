@@ -7,6 +7,12 @@ RuntimeClass 等全部是可纯测的规格构造，便于 100% 覆盖与后续�
 import os
 from typing import Dict, List
 
+from services.runtime_env.engines import (
+    ENGINE_SPECS,
+    engine_task_env,
+    resolve_engine,
+)
+
 def _kc():
     """kubernetes.client 惰性导入：非 K8s 部署（docker/compose/baremetal）无需装 kubernetes 包。"""
     import kubernetes.client
@@ -17,17 +23,9 @@ def _kc():
 from core.config import Config
 from models.agent import Agent
 
-# 运行时镜像映射（claude/codex/opencode 走 cli-agents 镜像）
-RUNTIME_IMAGES = {
-    'openai': 'todo4ai/agent-openai:latest',
-    'anthropic': 'todo4ai/agent-claude:latest',
-    'google': 'todo4ai/agent-gemini:latest',
-    'ollama': 'todo4ai/agent-ollama:latest',
-    'claude': 'todo4ai/agent-cli-agents:latest',
-    'codex': 'todo4ai/agent-cli-agents:latest',
-    'opencode': 'todo4ai/agent-cli-agents:latest',
-    'custom': 'todo4ai/agent-runtime:latest',
-}
+# 运行时镜像映射：由引擎注册表（services/runtime_env/engines.py）派生，
+# 引擎轴的单一事实来源在那里；此处仅为向后兼容保留同名导出。
+RUNTIME_IMAGES = {spec.key: spec.image for spec in ENGINE_SPECS}
 
 # 沙箱资源配置
 SANDBOX_RESOURCES = {
@@ -56,20 +54,8 @@ def runtime_secret_field(agent_id: int) -> str:
 
 
 def runtime_type(agent: Agent) -> str:
-    """运行时类型：沙箱策略显式声明的 CLI 引擎优先，否则按 LLM 供应商映射。"""
-    cli_engine = (agent_policy(agent).get('cli_engine') or '').strip().lower()
-    if cli_engine in ('claude', 'codex', 'opencode', 'custom'):
-        return cli_engine
-    provider = (agent.llm_provider or 'openai').lower()
-    if provider in ['openai']:
-        return 'openai'
-    elif provider in ['anthropic', 'claude']:
-        return 'anthropic'
-    elif provider in ['google', 'gemini']:
-        return 'google'
-    elif provider in ['ollama', 'local']:
-        return 'ollama'
-    return 'custom'
+    """运行时（引擎）类型：委托引擎注册表解析（策略声明 CLI 引擎优先，否则按 LLM 供应商）。"""
+    return resolve_engine(agent).key
 
 
 def network_mode(agent: Agent) -> str:
@@ -77,8 +63,11 @@ def network_mode(agent: Agent) -> str:
 
 
 def build_env_vars(agent: Agent) -> list:
-    """构建环境变量（AGENT_KEY 走 SecretKeyRef，绝不落明文）。"""
-    cli_engine = (agent_policy(agent).get('cli_engine') or '').strip().lower()
+    """构建环境变量（AGENT_KEY 走 SecretKeyRef，绝不落明文）。
+
+    引擎/任务相关的明文变量统一来自 engines.engine_task_env；
+    K8s 特有的凭据注入（SecretKeyRef）与回连地址在此追加。
+    """
     env_vars = [
         _kc().V1EnvVar(
             name='AGENT_KEY',
@@ -94,43 +83,9 @@ def build_env_vars(agent: Agent) -> list:
             value=getattr(Config, 'API_BASE_URL', None)
             or 'https://api.todo-for-ai.com/todo-for-ai/api/v1'
         ),
-        _kc().V1EnvVar(
-            name='LLM_PROVIDER',
-            value=agent.llm_provider or 'openai'
-        ),
-        _kc().V1EnvVar(
-            name='LLM_MODEL',
-            value=agent.llm_model or 'gpt-4'
-        ),
-        _kc().V1EnvVar(
-            name='SANDBOX_MODE',
-            value=agent.sandbox_profile or 'standard'
-        ),
-        _kc().V1EnvVar(
-            name='SANDBOX_NETWORK_MODE',
-            value=network_mode(agent)
-        ),
-        _kc().V1EnvVar(
-            name='MAX_CONCURRENT_TASKS',
-            value=str(agent.max_concurrency or 1)
-        ),
-        _kc().V1EnvVar(
-            name='TASK_TIMEOUT_SECONDS',
-            value=str(agent.timeout_seconds or 1800)
-        ),
-        _kc().V1EnvVar(
-            name='HEARTBEAT_INTERVAL_SECONDS',
-            value=str(agent.heartbeat_interval_seconds or 20)
-        ),
-        _kc().V1EnvVar(
-            name='LOG_LEVEL',
-            value='INFO'
-        ),
     ]
-    if cli_engine:
-        env_vars.append(
-            _kc().V1EnvVar(name='CLI_AGENT_ENGINE', value=cli_engine)
-        )
+    for name, value in engine_task_env(agent).items():
+        env_vars.append(_kc().V1EnvVar(name=name, value=value))
     # LLM API Key（从 Secret）
     if agent.llm_provider:
         env_vars.append(

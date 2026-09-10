@@ -43,25 +43,20 @@ def _memory_to_docker(value: str) -> str:
 
 
 def build_runtime_env(agent, agent_key: str) -> Dict[str, str]:
-    """跨后端共享的运行时环境变量（与 manifests.build_env_vars 语义对齐）。"""
-    policy = agent.sandbox_policy or {}
+    """跨后端共享的运行时环境变量。
+
+    引擎/任务变量来自 engines.engine_task_env（引擎轴单一事实来源）；
+    凭据（AGENT_KEY 明文，单机可信场景）与回连地址是 docker 系后端特有注入。
+    """
+    from services.runtime_env.engines import engine_task_env
+
     env = {
         'AGENT_KEY': agent_key,
         'API_BASE_URL': getattr(Config, 'DOCKER_API_BASE_URL', None)
         or getattr(Config, 'API_BASE_URL', None)
         or 'http://host.docker.internal:50110/todo-for-ai/api/v1',
-        'LLM_PROVIDER': agent.llm_provider or 'openai',
-        'LLM_MODEL': agent.llm_model or 'gpt-4',
-        'SANDBOX_MODE': agent.sandbox_profile or 'standard',
-        'SANDBOX_NETWORK_MODE': policy.get('network_mode', 'isolated'),
-        'MAX_CONCURRENT_TASKS': str(agent.max_concurrency or 1),
-        'TASK_TIMEOUT_SECONDS': str(agent.timeout_seconds or 1800),
-        'HEARTBEAT_INTERVAL_SECONDS': str(agent.heartbeat_interval_seconds or 20),
-        'LOG_LEVEL': 'INFO',
     }
-    cli_engine = (policy.get('cli_engine') or '').strip().lower()
-    if cli_engine:
-        env['CLI_AGENT_ENGINE'] = cli_engine
+    env.update(engine_task_env(agent))
     return env
 
 
@@ -91,8 +86,9 @@ class DockerRuntimeProvider(RuntimeProvider):
 
     def spawn(self, agent, agent_key, sandbox_profile=None) -> Dict[str, Any]:
         from services.cloud_runtime import manifests
+        from services.runtime_env.engines import resolve_engine
 
-        runtime = manifests.runtime_type(agent)
+        runtime = resolve_engine(agent).key
         profile = sandbox_profile or agent.sandbox_profile or 'standard'
         resources = manifests.SANDBOX_RESOURCES.get(profile, manifests.SANDBOX_RESOURCES['standard'])
         cpu = str(resources['limits'].get('cpu', '1'))
@@ -126,8 +122,8 @@ class DockerRuntimeProvider(RuntimeProvider):
         )
 
     def image_for(self, runtime_type: str) -> str:
-        from services.cloud_runtime import manifests
-        return manifests.RUNTIME_IMAGES.get(runtime_type, self.image)
+        from services.runtime_env.engines import engine_image
+        return engine_image(runtime_type, fallback=self.image)
 
     def terminate(self, agent_id) -> bool:
         result = self._run(['rm', '-f', self.container_name(agent_id)])

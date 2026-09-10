@@ -60,7 +60,7 @@ class Config:
     SESSION_KEY_PREFIX = 'todo-for-ai:'
     SESSION_FILE_DIR = '/tmp/flask-sessions'
 
-    # Agent 运行时环境后端（k8s | docker | compose | baremetal）
+    # Agent 运行时环境后端（k8s | docker | compose | baremetal | remote）
     RUNTIME_PROVIDER = os.environ.get('RUNTIME_PROVIDER', 'k8s')
     DOCKER_RUNTIME_IMAGE = os.environ.get('DOCKER_RUNTIME_IMAGE', 'todo4ai/agent-runtime:latest')
     DOCKER_RUNTIME_NETWORK = os.environ.get('DOCKER_RUNTIME_NETWORK', '')
@@ -69,6 +69,8 @@ class Config:
     BAREMETAL_STATE_DIR = os.environ.get('BAREMETAL_STATE_DIR', '/tmp/todo4ai-baremetal')
     BAREMETAL_RUNTIME_COMMAND = os.environ.get('BAREMETAL_RUNTIME_COMMAND', '')
     BAREMETAL_RUNTIME_CWD = os.environ.get('BAREMETAL_RUNTIME_CWD', '')
+    # remote 后端：daemon 心跳新鲜窗（秒），超过视为离线
+    REMOTE_ONLINE_WINDOW_SECONDS = int(os.environ.get('REMOTE_ONLINE_WINDOW_SECONDS', '90'))
 
     
     # 数据库配置

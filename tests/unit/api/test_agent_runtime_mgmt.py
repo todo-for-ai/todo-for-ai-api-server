@@ -77,7 +77,8 @@ def outsider(_isolated_app):
 
 @pytest.fixture
 def fake_controller(monkeypatch):
-    """替换业务层引用的 get_runtime_provider（按 name 查找处打桩）。"""
+    """替换业务层引用的后端获取入口（部署级 get_runtime_provider 与
+    按 Agent 解析的 get_runtime_provider_for_agent 都指向同一个桩）。"""
     from unittest.mock import MagicMock
     from services.cloud_runtime import management
 
@@ -87,7 +88,9 @@ def fake_controller(monkeypatch):
     controller.list_runtimes.return_value = []
     controller.spawn.return_value = {"pod_name": "agent-1-abc", "status": "creating"}
     controller.terminate.return_value = True
-    monkeypatch.setattr(management, "get_runtime_provider", lambda: controller)
+    monkeypatch.setattr(management, "get_runtime_provider", lambda kind=None: controller)
+    monkeypatch.setattr(management, "get_runtime_provider_for_agent",
+                        lambda agent: controller)
     return controller
 
 

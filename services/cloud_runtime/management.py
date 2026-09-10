@@ -6,7 +6,7 @@
 
 from models import db
 from models.agent_key import AgentKey
-from services.runtime_env import get_runtime_provider
+from services.runtime_env import get_runtime_provider, get_runtime_provider_for_agent
 from services.workspace_runtime_policy import (
     active_agent_count,
     get_workspace_runtime_setting,
@@ -93,8 +93,12 @@ def spawn_runtime(agent, workspace_id, user_id, payload):
 
 
 def terminate_runtime(agent):
-    """终止云端运行时并回切外部拉取模式；无在岗 Pod 时 404。"""
-    if not get_runtime_provider().terminate(agent.id):
+    """终止运行时并回切外部拉取模式；无在岗实例时 404。
+
+    按 Agent 执行模式解析后端：managed_runner → 部署级后端；
+    反连型 → remote（向在线 daemon 下发 shutdown）。
+    """
+    if not get_runtime_provider_for_agent(agent).terminate(agent.id):
         raise NoRunningRuntimeError('No running runtime found for this agent')
     agent.runner_enabled = False
     agent.execution_mode = 'external_pull'
@@ -103,17 +107,22 @@ def terminate_runtime(agent):
 
 
 def runtime_status(agent):
+    provider = get_runtime_provider_for_agent(agent)
+    status = provider.get_runtime_status(agent.id)
     return {
         'agent_id': agent.id,
         'execution_mode': agent.execution_mode,
         'runner_enabled': agent.runner_enabled,
-        'pod': get_runtime_provider().get_runtime_status(agent.id),
-        'runtime': get_runtime_provider().get_runtime_status(agent.id),
+        'environment': getattr(provider, 'name', None),
+        'pod': status,
+        'runtime': status,
     }
 
 
 def list_runtime_pods(workspace_id):
+    """聚合两个执行平面的实例：部署级后端（托管）+ remote（反连）。"""
     runtimes = get_runtime_provider().list_runtimes(workspace_id=workspace_id)
+    runtimes += get_runtime_provider('remote').list_runtimes(workspace_id=workspace_id)
     # API 键名沿用 pods（历史兼容），内容为归一化后的运行时状态
     return {'pods': runtimes, 'total': len(runtimes)}
 

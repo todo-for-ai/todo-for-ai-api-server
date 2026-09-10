@@ -195,13 +195,15 @@ def assign_task_to_agent(task, agent: Agent):
 
 
 def ensure_cloud_executor(loop, executor: Agent):
-    """编排↔云端联动：managed_runner 执行者不在岗时按需拉起其 Pod。
+    """编排↔执行环境联动：执行者不在岗时按其执行模式解析后端拉起。
 
-    任意失败（无集群配置/无密钥/工作区 Pod 超限）都只降级为 external_pull
-    兜底派发，绝不阻塞循环推进；云端拉起结果记录在日志。
+    managed_runner → 部署级后端（k8s/docker/...）按需创建运行时；
+    external_pull 反连 → remote 后端（在线即已岗，离线仅登记待反连）。
+    任意失败（无集群配置/无密钥/工作区超限）都只降级为 external_pull
+    兜底派发，绝不阻塞循环推进；确保结果记录在日志。
     """
     try:
-        if not executor or (executor.execution_mode or '') != 'managed_runner':
+        if not executor:
             return
         if executor.workspace_id != loop.workspace_id:
             return
@@ -211,8 +213,8 @@ def ensure_cloud_executor(loop, executor: Agent):
         if not agent_key:
             log.warning("goal_loop.cloud_executor_no_key", extra={"agent_id": executor.id})
             return
-        from services.runtime_env import get_runtime_provider
-        result = get_runtime_provider().ensure_runtime(executor, agent_key)
+        from services.runtime_env import get_runtime_provider_for_agent
+        result = get_runtime_provider_for_agent(executor).ensure_runtime(executor, agent_key)
         log.info("goal_loop.cloud_executor_ensured",
                  extra={"agent_id": executor.id, "result": result.get('status')})
     except Exception:  # noqa: BLE001

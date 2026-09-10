@@ -48,8 +48,9 @@ class ComposeRuntimeProvider(DockerRuntimeProvider):
 
     def _write_compose_file(self, agent, agent_key, sandbox_profile=None) -> str:
         from services.cloud_runtime import manifests
+        from services.runtime_env.engines import resolve_engine
 
-        runtime = manifests.runtime_type(agent)
+        runtime = resolve_engine(agent).key
         profile = sandbox_profile or agent.sandbox_profile or 'standard'
         resources = manifests.SANDBOX_RESOURCES.get(
             profile, manifests.SANDBOX_RESOURCES['standard'])
