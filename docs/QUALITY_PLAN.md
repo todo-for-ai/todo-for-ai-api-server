@@ -1093,3 +1093,41 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   上下文管理器，async post 返回的协程对象不支持 __aenter__）。
 - **本轮遵守用户新约束**：未删任何代码；helpers/isolation 等零引用模块
   一律保留+钉行为。
+
+### 迭代 54（2026-09-12）跨仓 webpage 前端首修：tsc -b 188 错清零 ✅
+（约束延续：不删码只捋顺；本轮全部是类型/接线修复，零业务删除）
+- **主根因：`Agent` 接口与后端序列化脱节**（~100 错）。以
+  `models/agent.py::to_dict` 为准补齐前端 `Agent` 类型：display_name/
+  avatar_url/homepage_url/contact_email/workspace_id/creator_user_id/
+  capability_tags/allowed_project_ids/llm_provider/llm_model/temperature/
+  top_p/reasoning_mode/system_prompt/soul_markdown/五类 policy/execution_mode/
+  runner_enabled/sandbox_*/max_concurrency/max_retry/timeout_seconds/
+  heartbeat_interval_seconds/soul_version/config_version/runner_config_version/
+  notification_channels/role_template_id/role/skill_profile/is_system/is_owner。
+- **第二根因：双 API 层撞名**——`api/agents/index.ts`（全局 agentsApi）与
+  `api/agents/agents.ts`（工作区 agentsApi，路径 /workspaces/:id/agents）。
+  useAgentsPage/AgentsPage/AgentCreate/AgentEdit/AgentSecretsCard/
+  AgentWorkspaceActivityCenter 等按工作区层编写却 import 全层层，
+  arity 全对不上。逐文件改接正确层。
+- **第三根因：`Promise<unknown>` ×166** 遍布 api/agents 方法层，把 unknown
+  传染所有消费方 → 与 apiClient 默认 `T = any` 对齐放宽为 Promise<any>。
+- 类型补齐：AgentRun 增 run_id/attempt/trigger_reason/failure_reason/
+  failure_code；ExperiencesReuseTrendBucket 增 decay_rate；
+  WorkspaceAgent 增 is_owner。
+- **缺件补齐**：taskStore 增 createTask（三个 hook 都在调、store 从未实现，
+  这意味着前端"创建任务"在此路径上一直是运行时报错）；deleteTask 补返回
+  true（调用方判 void 真值导致成功提示与刷新从未执行）；
+  useActivityHeatmap 接受调用方传入的 options。
+- 零散修复：APITokenManager useEffect 先于 useCallback 声明（TDZ）；
+  AIAssistant `Input.Number`→`InputNumber`（antd v5）、SparklesOutlined→
+  ThunderboltOutlined（v6 无此图标）；AuditTrail 补 dayjs 导入；
+  agentTeams 列表 get 不支持第二参 → 手拼 query；githubService 的
+  `window.__API_BASE_URL__` 加安全取值；本地 Text shim 补 style 透传；
+  Tag 去掉不存在的 size prop。
+- **验证**：`tsc -b` 0 错误（原 188）；vitest 35 passed；`npm run build`
+  （标准脚本，含类型检查）首次通过——此前只能走 build:no-check 绕过。
+  webpage 9d2197f，主仓随后续 ref 提交。
+- **经验**：①前端"类型腐烂"主因是单点类型定义落后于后端序列化——对齐
+  一个接口即消百错，改类型比改调用方便宜两个数量级；②同名导出双 API 层
+  是 import 错接温床，捋顺优先于修补调用方；③`Promise<unknown>` 是
+  类型版 of `except: pass`，把错误推迟到每个消费方。
