@@ -1024,3 +1024,46 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   0 次执行；③测试内定义 fake_sleep 忘装 monkeypatch 不会报错而是真睡 30s
   （心跳/收集循环类测试挂死先查这个）；④python-socketio 的 handler 可经
   `sio.handlers[namespace][event]` 直接触发，不必起真连接。
+
+### 迭代 52（2026-09-12）跨仓 agent-runtime 第二轮：安全极性修复 + 五模块 100% ✅
+- **修安全级 bug（sandbox/executor）**：strict 模式 nsjail 的
+  `--disable_clone_newnet`（= 不建网络命名空间 = **共享宿主网络**）被加在
+  `isolated` 模式上——隔离沙箱反而拿到宿主网络、full 模式反而断网，极性完全
+  颠倒（初版提交引入，出生即错）。现仅 `full` 模式携带该 flag，测试钉住
+  isolated/whitelist/full 三种 argv。
+- **修 standard 模式两处必坏**：①RestrictedPython 从未声明进 requirements，
+  上线即 ImportError；②代码按 RPy 4/5 API 写（`compiled.errors`），RPy≥7
+  返回裸 code 对象、语法错误走 SyntaxError——按新 API 重写（print 经
+  PrintCollector 收集，不再全局换 sys.stdout）。补 `RestrictedPython>=8.0`。
+- **修调度器取消竞态（core/openclaw）**：RUNNING 中被 cancel 的任务会在完成
+  路径被覆盖回 COMPLETED 并计入 completed 统计（失败路径还会重试已取消任务）。
+  现完成/失败路径先查 CANCELLED 即尊重取消。同时：任务只被分派 worker 执行
+  （新增 Task.assigned_worker，旧实现任意 worker 抢 SCHEDULED 任务）、同步/
+  抛错回调不再炸状态机（_invoke_callback 收口）、_worker_loop 对缺失 worker
+  记录干净返回而非 KeyError。
+- **修旧版 api client（src/api/client.py）**：`close()` 调不存在的
+  httpx `close()`（应为 aclose()），一关就 AttributeError。
+- **五文件 100% 行覆盖**（原 32%/39%/45%/54%/64%）：openclaw（269 语句：
+  提交/取消递归/调度优先级/worker 分派/重试/取消竞态/路由/统计全矩阵）、
+  sandbox/executor（三模式+超时+环境最小化+nsjail 缺失降级+RPy 缺失降级）、
+  profiler（上下文/装饰器/调度器/LLM 三个 profiler 全量）、circuit_breaker
+  （状态机全转换路径）、api/client（传输层 MockTransport + 全方法分支）。
+- 新增 test_openclaw_scheduler(40)/test_sandbox_executor(19)/
+  test_circuit_breaker_full(16)/test_profiler_full(25)/
+  test_api_client_branches(28)。
+- agent-runtime 全量门禁：525 passed 1 skipped（基线 398），src 覆盖
+  76.4%→**81.1%**（两轮稳定）。agent-runtime 8f2c60e，主仓随后续 ref 提交。
+- **死基建候选（待用户裁决）**：src/api/client.py 在 src/ 生产代码零引用，
+  与 runtime/platform_client.py 平行且协议对不上真实平台（X-Agent-Key +
+  /api/v1/agents/register vs 真实 /agent/auth/introspect）；本轮保留并以
+  测试钉行为。src/resilience/circuit_breaker.py 目前唯一生产引用方就是该
+  死基建（utils/helpers.py 另有一份独立实现）。
+- **经验**：①`deque([...]) == [...]` 恒为 False（deque 只与 deque 比较相等）
+  ——断言队列内容必须 `list(q)`；②测试替换被调方法时同步/异步形态必须与源
+  一致，async 替换 sync 方法会拿到永不 await 的协程对象（真值）走进错误分支
+  且计数器永不触发=紧密空转挂死测试进程；③类体内 `attr = attr` 因 LOAD_NAME
+  作用域规则拿不到闭包变量 → NameError，属性挂类外赋值即可；④
+  monkeypatch.setitem(sys.modules, "X", None) 可测可选依赖缺失的降级路径。
+- 剩余队列：runtime/main.py（41%）+ task_executor.py（70%，CLI 引擎并行会话
+  WIP 区勿动）、events/bus.py（69%）、utils/helpers.py、security/isolation.py
+  （77%）。
