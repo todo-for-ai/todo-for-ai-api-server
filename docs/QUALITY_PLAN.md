@@ -991,3 +991,36 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 
 
 
+
+### 迭代 51（2026-09-11）跨仓 agent-runtime：运行模块死代码清零 + 三文件 100% ✅
+- **删死代码两处**（均出生即零引用，git log + 全仓扫描定性）：
+  `src/runtime/agent_runner.py`（初版直连草稿，被 platform_client/task_executor
+  架构取代，125 语句 0%）；`src/runtime/websocket.py`（未接线的服务端
+  WebSocketManager，被平台侧 WS 取代，137 语句 0%；其内部 dataclass 与真客户端
+  `WebSocketClient` 撞名是误导入陷阱）。
+- **修真 bug（RetryableHTTPClient.request）**：401 重认证后的重试会丢调用方
+  自定义头——headers 先被 `kwargs.pop` 再于 reauth 分支从 `kwargs.get` 回取
+  （已被 pop，恒空）。后果：commit 的 `Idempotency-Key` 在 token 过期瞬间的
+  重试中消失，平台幂等去重失效可能重复提交。修法：extra_headers 提前保存、
+  两次合并。回归测试钉住两次尝试都带 Idempotency-Key + Authorization 刷新。
+- **修重复定义**：`websocket_client.py` 的 `_heartbeat_payload` 定义两次
+  （内容相同，后者遮蔽前者）。
+- **三文件 100% 行覆盖**（原 62%/52%/67%）：
+  platform_client.py（355 语句：重试循环全矩阵——5xx 退避重试/4xx 即抛/
+  401 reauth 一次语义/超时耗尽上抛/全动词转发；commit/lease/interactions
+  （409 三态）/events/logs/metrics/heartbeat/config/health 的 404 优雅降级
+  与 5xx 上抛分界逐端点钉住）、websocket_client.py（153 语句：socketio
+  handler 直接触发、回调矩阵 sync/async/主循环/异常吞掉、start/stop/心跳
+  循环分支、send_event/ack_task 负载）、metrics_collector.py（227 语句：
+  后台循环存活/终止、stop 收尾上报、psutil 降级分支、HealthChecker 全分支）。
+- 新增 test_retryable_http_client.py（15）、test_platform_client_methods.py（60）、
+  test_metrics_lifecycle.py（19）、test_websocket_client.py 扩 31。
+- agent-runtime 全量门禁：398 passed 1 skipped（基线 270），src 覆盖
+  63.4%→**76.4%**。agent-runtime 2292f7c，主仓随后续 ref 提交。
+- **经验**：①conftest 自定义 session 级 event_loop 下，同步 fixture 里构造的
+  asyncio.Event 在 py3.9 绑定错误循环（wait 时 "attached to a different loop"）
+  ——含 Event/循环的组件要在 async fixture 内构造，或构造后重建 Event；
+  ②直接调 `while self._running` 循环协程前必须手动 `_running=True`，否则静默
+  0 次执行；③测试内定义 fake_sleep 忘装 monkeypatch 不会报错而是真睡 30s
+  （心跳/收集循环类测试挂死先查这个）；④python-socketio 的 handler 可经
+  `sio.handlers[namespace][event]` 直接触发，不必起真连接。
