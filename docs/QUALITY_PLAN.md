@@ -1067,3 +1067,29 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 剩余队列：runtime/main.py（41%）+ task_executor.py（70%，CLI 引擎并行会话
   WIP 区勿动）、events/bus.py（69%）、utils/helpers.py、security/isolation.py
   （77%）。
+
+### 迭代 53（2026-09-12）跨仓 agent-runtime 第三轮（用户约束：不删码，只捋顺）✅
+- **修 webhook 重试风暴（events/bus）**：HTTP 状态码失败（≥400）分支此前
+  无退避直接紧循环重试，只有异常分支有指数退避——现两条路径一致退避。
+- **捋顺**：WebSocketEventHandler 的 `_session` 补进 `__init__`（close 不再
+  靠 hasattr 兜底）；EventBus._process_events 拆为「等待取事件」+
+  `_process_one_event`（单条投递失败只记录不拖死处理器）。
+- **三文件收口**：utils/helpers.py **100%**（180 语句——全仓首次被导入，
+  生产零引用，含 RateLimiter/第二套同步 CircuitBreaker/RetryPolicy/
+  memoize_ttl 等，按用户裁决保留并钉行为）；security/isolation.py **100%**
+  （124 语句：租户隔离 env/paths、审计裁剪 10000 条与四类专用日志、
+  get_events 三过滤、SecurityManager 越权 import 检测/行号/审计联动/
+  资源三限）；events/bus.py **99%**（Event/handler 三件套/总线全生命周期/
+  投递矩阵，唯一缺行 294 是 py3.9 追踪器怪癖——except 头行从 await 链
+  收到异常时 tracer 无法归属，行为已由 trace 脚本日志 `event_processing_error`
+  实证，与 api-server 迭代 31 同类）。
+- 新增 test_event_bus_full(36)/test_utils_helpers_full(31)/
+  test_isolation_branches(20)。
+- agent-runtime 全量门禁：**612 passed** 1 skipped（基线 525），src 覆盖
+  81.1%→**84.1%**（两轮稳定）。agent-runtime c60d80d，主仓随后续 ref 提交。
+- **经验×2**：①全局 patch `time.monotonic` 会冻结 asyncio 循环的调度时钟
+  导致挂死——只替换目标模块命名空间里的 time 引用；②fake aiohttp session
+  的 `post` 必须是同步函数（`async with session.post(...)` 需要的是异步
+  上下文管理器，async post 返回的协程对象不支持 __aenter__）。
+- **本轮遵守用户新约束**：未删任何代码；helpers/isolation 等零引用模块
+  一律保留+钉行为。
