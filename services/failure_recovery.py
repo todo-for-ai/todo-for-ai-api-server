@@ -10,6 +10,7 @@
 3. 幂等：同一 attempt 只生成一次修复/升级动作
 """
 
+import os
 import uuid
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -64,8 +65,20 @@ CATEGORY_LABELS = {
     "unknown": "未分类失败",
 }
 
-# 默认重试封顶（可被 agent.max_retry / 预算覆盖，此处为服务级缺省）
+# 默认重试封顶（可被 agent.max_retry / 预算覆盖，此处为服务级缺省；
+# 部署可用 FAILURE_REPAIR_MAX_ATTEMPTS 调节，长跑场景建议放宽）
 DEFAULT_MAX_REPAIR_ATTEMPTS = 2
+
+
+def _max_repair_attempts() -> int:
+    """服务级重试封顶：环境变量 FAILURE_REPAIR_MAX_ATTEMPTS 优先。"""
+    raw = os.environ.get('FAILURE_REPAIR_MAX_ATTEMPTS')
+    if not raw:
+        return DEFAULT_MAX_REPAIR_ATTEMPTS
+    try:
+        return max(1, min(10, int(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_REPAIR_ATTEMPTS
 
 
 def _record_failure_experience(task, agent, category: str,
@@ -137,14 +150,19 @@ def _has_recovery_event(task_id: int, attempt_id: str) -> bool:
 def handle_failed_commit(task, agent, attempt_id: str,
                          failure_code: Optional[str] = None,
                          failure_reason: Optional[str] = None,
-                         max_attempts: int = DEFAULT_MAX_REPAIR_ATTEMPTS) -> Dict[str, Any]:
+                         max_attempts: Optional[int] = None,
+                         auto_repair: bool = True) -> Dict[str, Any]:
     """commit 协议 failed 提交的自愈入口（P2.3）。
 
     - 幂等：同一 attempt_id 只处理一次
     - 未达重试封顶：自动生成修复子任务（继承 DoD，回流派发池）
     - 达到封顶：写 repair_escalation interaction_request（审批队列可见），
       人工批准后在任务上重置状态重新派发
+    - auto_repair=False：只做归因/经验沉淀，不生成修复子任务也不升级人工
+      （目标循环任务的失败由循环规划器重规划，双通道会重复派发）
     """
+    if max_attempts is None:
+        max_attempts = _max_repair_attempts()
     category = classify_failure(failure_code, failure_reason)
     failed_attempts = count_failed_attempts(task.id)
 
@@ -169,6 +187,14 @@ def handle_failed_commit(task, agent, attempt_id: str,
 
         structlog.get_logger().warning("recovery.curation_proposal_failed", error=str(e))
         db.session.rollback()
+
+    if not auto_repair:
+        db.session.commit()
+        return {
+            "action": "loop_replan",
+            "category": category,
+            "failed_attempts": failed_attempts,
+        }
 
     # 封顶：升级人工（interaction_request 审批事件，budget/pr 审批同一队列可见）
     if failed_attempts >= max_attempts:

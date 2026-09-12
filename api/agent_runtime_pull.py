@@ -23,6 +23,7 @@ from .agent_common import generate_id, now_utc, write_agent_audit, agent_session
 from services.agent_working_schedule import evaluate_working_window
 from services.workspace_runtime_policy import check_dispatch_capacity
 from services.budget_service import check_budgets, raise_budget_exceeded
+from services.lease_policy import effective_lease_ttl
 
 
 agent_runtime_pull_bp = Blueprint('agent_runtime_pull', __name__)
@@ -280,7 +281,7 @@ def pull_tasks():
 
         attempt_id = generate_id('att')
         lease_id = generate_id('lea')
-        lease_exp = now + timedelta(seconds=60)
+        lease_exp = now + timedelta(seconds=effective_lease_ttl(agent_id=agent.id))
 
         # Expire any stale active lease on this task to satisfy unique constraint.
         # The DB has a unique index on (task_id, active) so we must avoid duplicate
@@ -403,7 +404,7 @@ def renew_lease(task_id):
         db.session.commit()
         return ApiResponse.error('LEASE_EXPIRED', 409).to_response()
 
-    lease.expires_at = now + timedelta(seconds=60)
+    lease.expires_at = now + timedelta(seconds=effective_lease_ttl(agent_id=agent.id))
     lease.version += 1
     db.session.commit()
 

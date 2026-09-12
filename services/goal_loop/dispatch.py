@@ -5,6 +5,8 @@ from datetime import timedelta
 
 from models import Agent, AgentTaskAttempt, AgentTaskLease, Task, TaskStatus, db
 
+from services.lease_policy import effective_lease_ttl
+
 log = logging.getLogger(__name__)
 
 
@@ -167,7 +169,7 @@ def assign_task_to_agent(task, agent: Agent):
         attempt_id=attempt_id,
         agent_id=agent.id,
         workspace_id=agent.workspace_id,
-        expires_at=now + timedelta(seconds=60),
+        expires_at=now + timedelta(seconds=effective_lease_ttl(agent_id=agent.id)),
         active=True,
         created_by='system',
     ))

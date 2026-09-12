@@ -548,7 +548,8 @@ class AgentRuntimeController(RuntimeProvider):
         now = now_utc()
         attempt_id = generate_id('att')
         lease_id = generate_id('lea')
-        lease_exp = now + timedelta(seconds=60)
+        from services.lease_policy import effective_lease_ttl
+        lease_exp = now + timedelta(seconds=effective_lease_ttl(agent_id=agent.id))
 
         attempt = AgentTaskAttempt(
             attempt_id=attempt_id,

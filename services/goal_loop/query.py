@@ -27,12 +27,58 @@ def rounds_done(loop_id) -> int:
     return loop_task_query(loop_id).count()
 
 
+def active_loop_id_for_task(task):
+    """任务 tags 反查其所属且未终态（running/paused）的循环 ID；无则 None。
+
+    供 commit 失败路径判断「该任务由目标循环驱动」——循环任务的失败
+    应交给循环规划器重规划（任务置终态推进下一轮），而不是进 REVIEW
+    等人处置把循环挂死。
+    """
+    from models import GoalLoop, GoalLoopStatus, db
+
+    for tag in (task.tags or []):
+        s = str(tag)
+        if not s.startswith(tag_prefix()):
+            continue
+        try:
+            loop_id = int(s[len(tag_prefix()):])
+        except ValueError:
+            continue
+        loop = db.session.get(GoalLoop, loop_id)
+        if loop and loop.status in (GoalLoopStatus.RUNNING, GoalLoopStatus.PAUSED):
+            return loop_id
+    return None
+
+
+def _last_failure_reason(task_id: int) -> str:
+    """该任务最近一次失败 attempt 的归因摘要（供评审器重规划参考）。"""
+    from models import AgentTaskAttempt, AgentTaskAttemptState
+
+    attempt = (
+        AgentTaskAttempt.query
+        .filter_by(task_id=task_id, state=AgentTaskAttemptState.ABORTED)
+        .order_by(AgentTaskAttempt.id.desc())
+        .first()
+    )
+    if not attempt:
+        return ''
+    code = (attempt.failure_code or '').strip()
+    reason = (attempt.failure_reason or '').strip()
+    return f'{code}: {reason}'.strip(': ').strip()[:300]
+
+
 def recent_history(loop, limit=5):
     rows = loop_tasks(loop.id)[-limit:]
-    return [
-        {
+    history = []
+    for t in rows:
+        row = {
             'title': t.title,
             'status': t.status.value if t.status else None,
         }
-        for t in rows
-    ]
+        if t.status and t.status.name == 'CANCELLED':
+            failure = _last_failure_reason(t.id)
+            if failure:
+                row['failure'] = failure
+        history.append(row)
+    return history
+

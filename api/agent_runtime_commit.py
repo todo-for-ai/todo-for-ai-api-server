@@ -270,18 +270,35 @@ def commit_task(task_id):
                 agent_metadata=result_data.get('metadata'),
             )
     elif final_status == 'failed':
-        task.status = TaskStatus.REVIEW
+        # 目标循环驱动的任务：失败置终态（CANCELLED）让 maybe_advance 推进
+        # 规划器评审（extend 重试 / blocked 计 stall）——进 REVIEW 会把循环
+        # 挂死在人手里，与「朝目标持续迭代」的循环语义直接冲突。
+        # 非循环任务维持原语义：REVIEW + 失败自愈（修复子任务回流/封顶升级）。
+        from services.goal_loop.query import active_loop_id_for_task
+
+        loop_driven = False
+        try:
+            loop_driven = active_loop_id_for_task(task) is not None
+        except Exception:  # noqa: BLE001 - 反查失败按非循环任务处理
+            loop_driven = False
+
+        if loop_driven:
+            task.status = TaskStatus.CANCELLED
+        else:
+            task.status = TaskStatus.REVIEW
         attempt.state = AgentTaskAttemptState.ABORTED
         attempt.failure_code = str(data.get('failure_code') or 'FAILED')
         attempt.failure_reason = str(data.get('failure_reason') or 'Agent reported failure')
 
         # P2.3 失败自愈：归因 + 修复子任务回流 / 封顶升级人工
+        # （循环任务跳过修复子任务——重规划是循环规划器的职责，双通道会重复派发）
         recovery = None
         try:
             recovery = handle_failed_commit(
                 task, agent, attempt_id=data['attempt_id'],
                 failure_code=attempt.failure_code,
                 failure_reason=attempt.failure_reason,
+                auto_repair=not loop_driven,
             )
         except Exception as recovery_error:
             # 自愈失败不影响失败提交本身

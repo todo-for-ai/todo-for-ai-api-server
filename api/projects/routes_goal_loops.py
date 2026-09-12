@@ -113,9 +113,10 @@ def create_goal_loop(project_id: int):
         title = (data.get('title') or '').strip()
         goal_text = (data.get('goal_text') or '').strip()
         done_definition = (data.get('done_definition') or '').strip()
-        rounds_limit = data.get('rounds_limit') or 10
+        from services.goal_loop.constants import DEFAULT_ROUNDS_LIMIT, DEFAULT_STALL_LIMIT
+        rounds_limit = data.get('rounds_limit') or DEFAULT_ROUNDS_LIMIT
         time_budget_hours = data.get('time_budget_hours')
-        stall_limit = data.get('stall_limit')
+        stall_limit = data.get('stall_limit') or DEFAULT_STALL_LIMIT
         agent_id = data.get('agent_id')
 
         if not title:
