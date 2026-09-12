@@ -1131,3 +1131,19 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   一个接口即消百错，改类型比改调用方便宜两个数量级；②同名导出双 API 层
   是 import 错接温床，捋顺优先于修补调用方；③`Promise<unknown>` 是
   类型版 of `except: pass`，把错误推迟到每个消费方。
+
+### 迭代 55（2026-09-12）webpage：Agents.tsx 拆出第一个领域缝 ✅
+- Agents.tsx（2317 行单组件、~138 个 useState/useCallback、混杂约 10 个
+  领域块）开始按注释分缝拆解。**第一刀：沙盒面板领域块**（17 个状态 +
+  19 个处理函数 + 模板实例化，~170 行，只依赖 agentsApi 与 message，
+  完全自洽）原样搬移为 `src/pages/agents/hooks/useAgentSandboxPanel.ts`，
+  主文件以解构承接，逻辑零改动。
+- Agents.tsx 2317→2160 行；已搬移块在代码中留有分缝注释，后续依次切
+  channels / workflow-step overrides / conflict resolution。
+- 验证：tsc -b 0 错、vitest 35 passed、npm run build 通过。
+- webpage 3c8db74，主仓随后续 ref 提交。
+- **经验**：①按文件内既有的 `// ---- XXX ----` 分缝注释切块，每块只依赖
+  自身状态 + 单一 api 对象时即可安全原样搬移；②搬运前用 grep 校验"跨段
+  引用为零"（搬出函数只被段内与 JSX 使用）；③行号切片搬运务必逐锚点
+  assert（含行内缩进），本轮两次因边界差一行/锚点格式失败被断言拦下，
+  未污染文件。
