@@ -1354,3 +1354,11 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 对 Workflows.tsx 尝试「数据 hook + Modals 组件」双切，脚本切割时发现该文件 **逻辑区与视图区深度交织**：部分 JSX-returning 的 useMemo（如冲突趋势段落）位于 states 与 handlers 之间，纯 .ts 数据 hook 无法容纳；且 restore 时误删了 workflows/ 目录内先前轮次已抽取的组件（git checkout 即时恢复，未造成损失）。**结论维持 iter88-91 判断：Workflows 的 RunDetail/Version 双 Modal 与逻辑交织需人工逐段处理，机械脚本不适配**。已完整回滚至 origin/main 等价状态并验证 190 tests 全绿。
 
 **新增教训**：①回滚恢复用 `git checkout -- <path>`，严禁 `rm -rf` 域目录（内含历史轮次成果）；②"Target cannot be null or undefined"（chai）→ toHaveLength 收到 undefined = 组合对象键缺失/断言时机过早，先探针后修补。
+
+## 2026-09-14 迭代 113（webpage）：CollaborationGraphView 渲染助手沉淀
+
+**做法**：kind 配色/渐变引用/声誉环色与描边粗细等纯渲染助手（28 行）从 CollaborationGraphView 沉淀为 collaboration-graph/collaborationGraphShared.ts + 5 个边界矩阵单测（40/70/80/50 阈值、空值回退）；主组件 713 → 688。
+
+**结论（CollaborationGraphView 剩余部分单列）**：688 行剩余为力导向 rAF 模拟、拖拽/缩放指针交互与 SVG 单元渲染的紧耦合体——**无组件级行为测试安全网前不做深拆**（拆分收益 < 回归风险）。后续路径：先补 RTL 渲染冒烟 + 交互回归测试，再按 nodePos/力导向/指针交互三刀拆分。
+
+**结果**：tsc + vitest 195 passed + build 全绿；webpage 877a784 已推。
