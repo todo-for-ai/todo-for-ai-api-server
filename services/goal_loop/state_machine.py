@@ -8,12 +8,14 @@ from models.agent import Agent
 from .constants import (
     ACTIVE_TASK_STATUSES,
     DEFAULT_NO_PROGRESS_ROUNDS,
+    DEFAULT_PLANNER_TRANSIENT_LIMIT,
     DEFAULT_ROUNDS_LIMIT,
     DEFAULT_STALL_LIMIT,
     MAX_ROUNDS_LIMIT,
     MAX_TIME_BUDGET_HOURS,
     clamp_int,
     naive_utc_now,
+    planner_backoff_seconds,
 )
 from .dispatch import (
     auto_assign,
@@ -30,6 +32,45 @@ def time_budget_exceeded(loop) -> bool:
         return False
     elapsed = naive_utc_now() - loop.started_at
     return elapsed.total_seconds() >= loop.time_budget_hours * 3600
+
+
+# 瞬时故障：LLM 调用层失败（网络/超时/5xx/限流），供应商恢复即自愈；
+# 但密钥/额度类（401/403/quota 等）需要人工处理，按语义受阻立即计。
+_TRANSIENT_PLANNER_PREFIXES = ('llm_failed',)
+_PLANNER_HARD_MARKERS = ('401', '403', 'unauthorized', 'forbidden', 'invalid api key',
+                         'api key', 'quota', 'billing', 'credit', 'insufficient')
+
+
+def _is_transient_planner_error(exc: Exception) -> bool:
+    text = str(exc)
+    if not text.startswith(_TRANSIENT_PLANNER_PREFIXES):
+        return False
+    lowered = text.lower()
+    return not any(marker in lowered for marker in _PLANNER_HARD_MARKERS)
+
+
+def _planner_failure(loop, reason: str, exc: Exception) -> dict:
+    """规划器故障的分流记账：瞬时 → 退避等待（不烧受阻预算）；其余照常计 stall。
+
+    退避中连续失败超过容忍上限后回落到既有 stall 计数（stall_limit 到点
+    仍走 STALLED，人工出口不变）。
+    """
+    if _is_transient_planner_error(exc):
+        loop.transient_streak = (loop.transient_streak or 0) + 1
+        if loop.transient_streak >= DEFAULT_PLANNER_TRANSIENT_LIMIT:
+            loop.retry_after = None
+            return _register_stall(loop, f'{reason}（瞬时故障 {loop.transient_streak} 次超容忍上限）')
+        wait = planner_backoff_seconds(loop.transient_streak)
+        loop.retry_after = naive_utc_now() + timedelta(seconds=wait)
+        loop.last_error = f'{reason}；退避 {wait}s 后自动重试'[:2000]
+        db.session.commit()
+        return {
+            'advanced': False,
+            'reason': 'planner_backoff',
+            'transient_streak': loop.transient_streak,
+            'retry_after': loop.retry_after.isoformat(),
+        }
+    return _register_stall(loop, reason)
 
 
 def maybe_advance(loop_id, trigger_task_id=None) -> dict:
@@ -83,12 +124,17 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         if trigger is not None:
             last_status = trigger.status.value if trigger.status else None
 
+    # 退避窗口内不调规划器（watchdog 巡检/任务钩子的重复推进在此快速跳过）
+    if loop.retry_after and naive_utc_now() < loop.retry_after:
+        return {'advanced': False, 'reason': 'planner_backoff_wait',
+                'retry_after': loop.retry_after.isoformat()}
+
     # ── ① 无计划：先拆解 ──
     if not loop.plan:
         try:
             steps = call_decompose(loop)
         except Exception as exc:  # noqa: BLE001
-            return _register_stall(loop, f'decompose_failed: {exc}')
+            return _planner_failure(loop, f'decompose_failed: {exc}', exc)
         db.session.expire(loop)
         if loop.status != GoalLoopStatus.RUNNING:
             return {'advanced': False, 'reason': 'not_running_after_planner'}
@@ -111,6 +157,8 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         loop.plan_index = plan_index + 1
         loop.last_task_id = task.id
         loop.stall_count = 0
+        loop.transient_streak = 0
+        loop.retry_after = None
         loop.last_error = None
         if loop.started_at is None:
             loop.started_at = naive_utc_now()
@@ -123,7 +171,7 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
     try:
         decision = call_review(loop, last_status or 'unknown')
     except Exception as exc:  # noqa: BLE001
-        return _register_stall(loop, f'review_failed: {exc}')
+        return _planner_failure(loop, f'review_failed: {exc}', exc)
 
     db.session.expire(loop)
     if loop.status != GoalLoopStatus.RUNNING:
@@ -169,6 +217,8 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         task = create_round_task(loop, step, executor)
         loop.plan_index += 1
         loop.stall_count = 0
+        loop.transient_streak = 0
+        loop.retry_after = None
         loop.last_error = None
         db.session.commit()
         ensure_cloud_executor(loop, executor)
@@ -314,8 +364,10 @@ def set_status(loop_id: int, status: GoalLoopStatus) -> GoalLoop:
         raise LookupError('goal_loop_not_found')
     loop.status = status
     if status in (GoalLoopStatus.PAUSED, GoalLoopStatus.RUNNING):
-        # 人工干预重置受阻计数
+        # 人工干预重置受阻计数与瞬时退避（resume 即重新起跑）
         loop.stall_count = 0
+        loop.transient_streak = 0
+        loop.retry_after = None
     if status in (GoalLoopStatus.STOPPED, GoalLoopStatus.DONE):
         loop.finished_at = naive_utc_now()
     db.session.commit()

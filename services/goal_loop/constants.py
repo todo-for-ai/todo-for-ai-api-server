@@ -38,6 +38,20 @@ DEFAULT_STUCK_TASK_HOURS = _env_int('GOAL_LOOP_STUCK_TASK_HOURS', 6, 1, 24 * 7)
 # 不允许再 extend（宣告 complete 仍允许），强制计 stall 走 STALLED 退出
 DEFAULT_NO_PROGRESS_ROUNDS = _env_int('GOAL_LOOP_NO_PROGRESS_LIMIT', 3, 2, 50)
 
+# 规划器瞬时故障容忍：LLM 调用层失败（网络/超时/5xx/限流）按指数退避重试，
+# 不烧语义受阻预算（stall_limit 只有 2，一次 10 分钟的供应商抖动就把全平台
+# 循环打成 STALLED 是长跑大忌）。容忍上限内退避自愈，超限才回落计 stall。
+DEFAULT_PLANNER_TRANSIENT_LIMIT = _env_int('GOAL_LOOP_PLANNER_TRANSIENT_LIMIT', 12, 2, 200)
+
+_PLANNER_BACKOFF_BASE_SECONDS = 300   # 与 watchdog 默认巡检间隔对齐
+_PLANNER_BACKOFF_CAP_SECONDS = 3600   # 退避上限 1 小时
+
+
+def planner_backoff_seconds(streak: int) -> int:
+    """瞬时故障退避时长：5min → 10min → 20min → 40min → 封顶 1h。"""
+    return min(_PLANNER_BACKOFF_BASE_SECONDS * (2 ** max(0, streak - 1)),
+               _PLANNER_BACKOFF_CAP_SECONDS)
+
 
 def naive_utc_now() -> datetime:
     return datetime.utcnow()

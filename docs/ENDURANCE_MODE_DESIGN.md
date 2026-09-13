@@ -206,3 +206,38 @@ API `to_dict` 暴露 `has_context_digest` 布尔（不回传全文，保持载�
 `tests/unit/services/test_goal_loop_context.py`（12 用例）：走廊三层/空历史零开销/
 硬上界截断、压缩增量+幂等、LLM 语义压缩与降级、节奏控制、异常不阻断、
 create_round_task 注入与首轮豁免。迁移脚本 SQLite/MySQL 双方言 + 幂等冒烟。
+
+## 10. v4（2026-09-13，feat/memory-user-api 同轮）：规划器瞬时故障指数退避
+
+### 10.1 问题
+
+规划器 LLM 调用层故障（网络抖动/超时/5xx/限流）此前直接计入语义受阻预算：
+`stall_limit` 默认 2，watchdog 默认 5 分钟推进一次 → 一次约 10 分钟的
+供应商故障就把全平台 RUNNING 循环打成 STALLED，只能逐个人工 resume。
+这与"额度熔断"是两类故障：额度耗尽需要人充值（快速停车上报是对的），
+瞬时抖动会自愈（停车是错的，白白中断长跑）。
+
+### 10.2 语义
+
+- **分类**：`llm_failed` 前缀且不含密钥/额度标记（401/403/quota/billing/
+  invalid api key…）→ 瞬时；坏输出类（llm_bad_plan/llm_bad_action/…）与
+  密钥/额度类 → 硬故障照常计 stall（快速暴露给人）。
+- **退避**：瞬时故障递增 `transient_streak` 并设 `retry_after = now +
+  min(300s·2^(n-1), 3600s)`（5min→10→20→40→封顶 1h），不消耗 stall_count；
+  `retry_after` 之前所有推进请求（watchdog 巡检/任务终态钩子/kick）在
+  maybe_advance 入口快速跳过，不调规划器。
+- **兜底**：连续瞬时故障达 `GOAL_LOOP_PLANNER_TRANSIENT_LIMIT`（默认 12，
+  约可扛 8~12 小时级供应商事故）后回落既有 stall 计数，STALLED 人工出口不变。
+- **清零**：成功推进（建任务/extend）或人工 pause/resume 时重置。
+
+### 10.3 存储与开关
+
+迁移 000028：`goal_loops` 增加 `transient_streak`（INT）/`retry_after`
+（DATETIME）；`to_dict` 透出（前端可显示"规划器退避至 xx:xx"）。
+容忍上限仅环境变量级别，逐循环可经既有 guardrails API 调 stall_limit。
+
+### 10.4 测试
+
+`tests/unit/services/test_goal_loop_planner_backoff.py`（9 用例）：退避调度表、
+分类边界（超时/5xx/限流 vs 401/额度/坏输出）、退避不烧 stall、窗口内跳过、
+窗口过后自愈重建任务并清零、持续故障回落 STALLED、resume 清零。

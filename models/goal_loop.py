@@ -58,6 +58,12 @@ class GoalLoop(BaseModel):
     completion_summary = Column(Text, comment='目标达成时的总结（规划器给出）')
     last_task_id = Column(Integer, comment='最近一轮生成的任务ID')
 
+    # 规划器瞬时故障退避：LLM 调用层失败（超时/5xx/限流）不烧语义受阻预算，
+    # 指数退避等供应商自愈；retry_after 之前 watchdog/钩子的推进请求直接跳过。
+    # 连续瞬时失败超过容忍上限后才回落到 stall_count 计 STALLED（仍有人工出口）。
+    transient_streak = Column(Integer, nullable=False, default=0, comment='连续瞬时规划器故障次数')
+    retry_after = Column(DateTime, comment='瞬时故障退避截止时间（UTC），NULL=不在退避中')
+
     # 计划式拆解：先由规划器把目标拆成有序步骤，再逐轮物化为任务
     plan = Column(JSON, comment='拆解出的有序计划步骤 [{title, content}]')
     plan_index = Column(Integer, nullable=False, default=0, comment='下一个待执行步骤下标')
@@ -91,4 +97,6 @@ class GoalLoop(BaseModel):
         data['director_agent_id'] = self.director_agent_id
         data['time_budget_hours'] = self.time_budget_hours
         data['has_context_digest'] = bool(self.context_digest)
+        data['transient_streak'] = self.transient_streak or 0
+        data['retry_after'] = self.retry_after.isoformat() if self.retry_after else None
         return data
