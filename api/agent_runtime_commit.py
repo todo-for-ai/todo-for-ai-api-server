@@ -329,6 +329,9 @@ def commit_task(task_id):
                         )
                         _loop.finished_at = now
                         db.session.commit()
+                        # 记忆沉淀：项目级「额度曾耗尽」教训
+                        from services.memory.loop_hooks import on_loop_blocked
+                        on_loop_blocked(_loop, _loop.last_error)
             except Exception:  # noqa: BLE001 - 停车失败不影响失败提交本身
                 import structlog
                 structlog.get_logger().warning(

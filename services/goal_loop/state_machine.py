@@ -138,6 +138,9 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         loop.finished_at = naive_utc_now()
         _record_success_experience(loop)
         db.session.commit()
+        # 记忆沉淀：会话级总结 + 项目级持久结论（失败不影响循环终态）
+        from services.memory.loop_hooks import on_loop_completed
+        on_loop_completed(loop, loop.completion_summary, rounds_done(loop.id))
         return {'advanced': False, 'reason': 'completed'}
 
     if action == 'extend':
@@ -185,6 +188,10 @@ def _register_stall(loop, reason: str) -> dict:
         loop.finished_at = naive_utc_now()
         status_changed = True
     db.session.commit()
+    if status_changed:
+        # 记忆沉淀：项目级受阻教训（同类目标重跑时被召回，避免重蹈覆辙）
+        from services.memory.loop_hooks import on_loop_blocked
+        on_loop_blocked(loop, reason)
     return {
         'advanced': False,
         'reason': 'stalled' if status_changed else 'stall_counted',
