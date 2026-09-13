@@ -162,10 +162,41 @@ def _resolve_accessible_project_ids(agent):
     return None
 
 
+# 依赖门（dependency gate）：阻塞者到达任一终态即视为依赖解除。
+# 语义取「排序约束」而非「价值前提」——任务图（如 epic 展开的目标任务图）
+# 只用 blocked_by 保证先后序；阻塞者被取消后是否连带取消下游由规划者/人裁决，
+# 派发不因幽灵前提让下游任务永久饥饿。
+_DEPENDENCY_TERMINAL_STATUSES = (TaskStatus.DONE, TaskStatus.CANCELLED)
+
+
+def _unsatisfied_blocker_ids(task):
+    """返回该任务 blocked_by 中尚未解除的引用 id 列表（解除条件见 _DEPENDENCY_TERMINAL_STATUSES）。
+
+    指向已删除任务的失效引用视为解除——依赖图残骸不应卡死派发。
+    """
+    blocker_ids = []
+    for raw in (task.blocked_by_task_ids or []):
+        try:
+            blocker_ids.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not blocker_ids:
+        return []
+
+    rows = db.session.query(Task.id, Task.status).filter(Task.id.in_(blocker_ids)).all()
+    status_by_id = {int(row[0]): row[1] for row in rows}
+    return [
+        blocker_id for blocker_id in blocker_ids
+        if status_by_id.get(blocker_id) is not None
+        and status_by_id[blocker_id] not in _DEPENDENCY_TERMINAL_STATUSES
+    ]
+
+
 def _fetch_next_task(agent):
+    """返回 (task, blocked_skipped)：候选中因依赖未解除被跳过的任务数。"""
     project_ids = _resolve_accessible_project_ids(agent)
     if project_ids == []:
-        return None
+        return None, 0
 
     now = now_utc()
     filters = [
@@ -178,16 +209,21 @@ def _fetch_next_task(agent):
     # Newest tasks first so performance-test backfill does not starve real tasks
     query = Task.query.filter(*filters).order_by(Task.id.desc())
 
+    blocked_skipped = 0
     for task in query.limit(30).all():
         active_lease = AgentTaskLease.query.filter(
             AgentTaskLease.task_id == task.id,
             AgentTaskLease.active.is_(True),
             AgentTaskLease.expires_at > now,
         ).first()
-        if not active_lease:
-            return task
+        if active_lease:
+            continue
+        if _unsatisfied_blocker_ids(task):
+            blocked_skipped += 1
+            continue
+        return task, blocked_skipped
 
-    return None
+    return None, blocked_skipped
 
 
 @agent_runtime_pull_bp.route('/agent/tasks/pull', methods=['POST'])
@@ -259,7 +295,7 @@ def pull_tasks():
 
     # ── 预算门（P2.6）：agent/workspace 维度超限则停止派发并走审批队列 ──
     budget_block = None
-    next_task = _fetch_next_task(agent)
+    next_task, blocked_skipped_total = _fetch_next_task(agent)
     if next_task:
         violations = check_budgets(
             workspace_id=int(agent.workspace_id),
@@ -292,7 +328,11 @@ def pull_tasks():
     now = now_utc()
     for round_index in range(max_tasks):
         # 第一轮复用预算门已取的任务，后续轮重新拉取
-        task = next_task if round_index == 0 else _fetch_next_task(agent)
+        if round_index == 0:
+            task = next_task
+        else:
+            task, skipped_blocked = _fetch_next_task(agent)
+            blocked_skipped_total += skipped_blocked
         if not task:
             break
 
@@ -388,11 +428,20 @@ def pull_tasks():
             }
         )
 
+    response_data = {
+        'agent_profile': _build_agent_profile(agent),
+        'tasks': items,
+    }
+    if blocked_skipped_total:
+        # 依赖门可观测性：本次有候选任务因前置依赖未解除被跳过（非阻塞，仅告知）。
+        # Agent/调用方可据此理解「明明有 TODO 却没派到任务」的空手而归。
+        response_data['dependency_gate'] = {
+            'blocked': True,
+            'skipped_blocked': blocked_skipped_total,
+        }
+
     return ApiResponse.success(
-        {
-            'agent_profile': _build_agent_profile(agent),
-            'tasks': items,
-        },
+        response_data,
         'Tasks pulled successfully',
     ).to_response()
 

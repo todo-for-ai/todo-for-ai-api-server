@@ -410,7 +410,7 @@ class TestFetchNextTask:
         agent = SimpleNamespace(allowed_project_ids=[], workspace_id=runtime_ctx["org"].id)
         # 空列表 falsy → 无项目限制语义（与 None 一致）
         assert _resolve_accessible_project_ids(agent) is None
-        assert _fetch_next_task(agent) is None
+        assert _fetch_next_task(agent) == (None, 0)
 
     def test_allowed_ids_filter(self, runtime_ctx):
         from api.agent_runtime_pull import (
@@ -420,13 +420,14 @@ class TestFetchNextTask:
                                 workspace_id=runtime_ctx["org"].id)
         assert _resolve_accessible_project_ids(agent) is not None
         _make_task_in(runtime_ctx)
-        task = _fetch_next_task(agent)
+        task, blocked_skipped = _fetch_next_task(agent)
         assert task is not None
+        assert blocked_skipped == 0
 
     def test_no_tasks_returns_none(self, runtime_ctx):
         from api.agent_runtime_pull import _fetch_next_task
         agent = SimpleNamespace(allowed_project_ids=None, workspace_id=runtime_ctx["org"].id)
-        assert _fetch_next_task(agent) is None
+        assert _fetch_next_task(agent) == (None, 0)
 
     def test_active_lease_skips_task(self, runtime_ctx):
         from models import AgentTaskLease, db
@@ -440,7 +441,7 @@ class TestFetchNextTask:
             active=True, created_by="test",
         ))
         db.session.commit()
-        assert _fetch_next_task(agent) is None
+        assert _fetch_next_task(agent) == (None, 0)
 
 
 # ── renew / release 租约矩阵 ─────────────────────────────────────────
