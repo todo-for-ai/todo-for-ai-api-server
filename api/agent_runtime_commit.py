@@ -400,6 +400,14 @@ def commit_task(task_id):
     except Exception:
         pass
 
+    # 任务图实时刷新：Agent 提交翻转任务终态，下游任务就绪态随之变化，
+    # 推送项目房间让 DAG 可视化实时跟上多 Agent 执行（失败不回传调用方）
+    try:
+        from api.user_websocket import notify_task_graph_changed
+        notify_task_graph_changed(task.project_id, [task.id], f'agent_commit:{final_status}')
+    except Exception:
+        pass
+
     return ApiResponse.success(
         {
             'task_id': task.id,

@@ -224,6 +224,13 @@ def update_task_status(arguments):
     except Exception:
         pass
 
+    # 任务图实时刷新：外部 Agent 经 MCP 翻转状态同样驱动 DAG 视图更新
+    try:
+        from api.user_websocket import notify_task_graph_changed
+        notify_task_graph_changed(task.project_id, [task.id], 'mcp_status_changed')
+    except Exception:
+        pass
+
     from models import UserActivity
     try:
         UserActivity.record_activity(g.current_user.id, 'task_status_changed')

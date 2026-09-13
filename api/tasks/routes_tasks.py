@@ -24,6 +24,7 @@ from core.auth import unified_auth_required, get_current_user
 from ..agent_trigger_engine import emit_task_event
 from ..notification_service import create_task_notifications, enqueue_pending_deliveries_for_events
 from api.organizations.events import record_organization_event
+from api.user_websocket import notify_task_graph_changed
 
 from . import tasks_bp
 from .shared import (
@@ -709,6 +710,10 @@ def update_task(task_id):
         db.session.commit()
         enqueue_pending_deliveries_for_events(queued_notification_event_ids)
         _invalidate_project_users(task.project_id)
+
+        # 任务图实时刷新：状态翻转改变 DAG 就绪态，通知项目房间（TaskGraphTab 订阅）
+        if status_change:
+            notify_task_graph_changed(task.project_id, [task.id], 'status_changed')
 
         # 记录变更历史
         status_changed = False

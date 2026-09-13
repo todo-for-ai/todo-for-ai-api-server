@@ -2,14 +2,36 @@
 
 from flask import request
 
-from models import db, Task
+from models import db, Task, TaskStatus
 from api.base import ApiResponse
 from core.auth import unified_auth_required
 from services.task_graph import find_dependency_cycle
+from api.user_websocket import notify_task_graph_changed
 
 from . import tasks_bp
 
 MAX_BATCH_SIZE = 100
+
+
+def _coerce_status(new_status):
+    """状态字符串兼容枚举 name（DONE）与 value（done）：其余端点（人工更新/MCP）
+    均按 value 校验，批量接口此前裸赋值导致 value 触发 Enum KeyError 500。"""
+    try:
+        return TaskStatus(new_status)
+    except ValueError:
+        try:
+            return TaskStatus[str(new_status).strip().upper()]
+        except KeyError:
+            return None
+
+
+def _notify_graph_by_project(tasks, reason):
+    """按项目分组推送任务图刷新事件（跨项目批量时每个项目各推一次）。"""
+    by_project = {}
+    for task in tasks:
+        by_project.setdefault(task.project_id, []).append(task.id)
+    for project_id, ids in by_project.items():
+        notify_task_graph_changed(project_id, ids, reason)
 
 
 @tasks_bp.route('/batch/update-status', methods=['POST'])
@@ -24,10 +46,17 @@ def batch_update_status():
     if len(task_ids) > MAX_BATCH_SIZE:
         return ApiResponse.error(f'Max {MAX_BATCH_SIZE} tasks per batch').to_response()
 
+    status_enum = _coerce_status(new_status)
+    if status_enum is None:
+        return ApiResponse.error(f'Invalid status: {new_status}').to_response()
+
     tasks = db.session.query(Task).filter(Task.id.in_(task_ids)).all()
     for task in tasks:
-        task.status = new_status
+        task.status = status_enum
     db.session.commit()
+
+    # 任务图实时刷新：批量状态变更按项目分组通知（TaskGraphTab 订阅）
+    _notify_graph_by_project(tasks, 'batch_status_changed')
 
     return ApiResponse.success(data={'updated': len(tasks)}).to_response()
 
@@ -125,5 +154,8 @@ def update_dependencies(task_id):
     task.blocking_task_ids = blocking
     task.blocked_by_task_ids = blocked_by
     db.session.commit()
+
+    # 任务图实时刷新：依赖边变化通知项目房间（TaskGraphTab 订阅）
+    notify_task_graph_changed(task.project_id, [task.id], 'dependencies_changed')
 
     return ApiResponse.success(data=task.to_dict()).to_response()
