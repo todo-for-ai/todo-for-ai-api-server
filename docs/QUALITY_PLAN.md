@@ -1219,3 +1219,27 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - 子组件 import 块整块复制后必须删「指向主页面簇」的行（自导入/重名，同 100 轮）；Bundle props 里的 tn/navigate 用 `(...args: any[])`，never[] 会在调用点炸 TS2345。
 
 **结果**：tsc + vitest 134 passed + vite build 全绿；webpage 20566fa 已推。该页簇 5 文件全部 ≤469 行。>500 台账 webpage 15 个。
+
+## 2026-09-14 迭代 102（webpage）：agents index 桶文件瘦身
+
+**做法**：src/api/agents/index.ts 613 行实为「类型桶 + 组合客户端」混合体——把 7 个方法工厂导入、AgentsApi 接口、AgentsApiImpl 组合类与单例整段原样迁至 agents-client.ts（305 行）；index.ts 变纯桶（320 行，仅类型重导出 + `export { agentsApi } from './agents-client'`）。消费方导入路径零变化。
+
+**测试**：10 个用例（总计 134→144）：单例双导入路径同一实例、七方法域代表方法挂载、8 个方法经真实工厂链路委派到 mock apiClient 的透传断言。
+
+**经验**：桶文件里「接口 extends 七工厂 + 类逐个一行委派」是既有的好结构，本轮只做物理分离；方法名以迁出文件实测为准（getExperiences 想当然不存在，listAgentExperiences 才是）。
+
+**结果**：tsc + vitest 144 passed + build 全绿；webpage aa5e1f8 已推。agents/ 目录 4 文件全部 <500（analytics-types 546 另行处理）。
+
+## 2026-09-14 迭代 103（webpage）：TaskCollaborationTimeline 767 行拆分
+
+**做法**：按数据/动作/视图三层拆——useTaskCollaborationData.ts（175 行：事件与指派状态、8s 轮询+SSE 订阅、运行日志缓存）、useTaskAssignmentActions.ts（242 行：指派更新/人工反馈/派发/交接/发帖动作，tp 以参数注入）、TaskCollaborationModals.tsx（183 行：反馈/派发/交接三 Modal，Props extends 双 hook 返回类型）；主组件 470 行（渲染助手 + composer + Timeline JSX）。
+
+**测试**：6 个 renderHook 用例（总计 144→150）：fake timers 下轮询启停（liveMode 关停后 120s 零请求）、runId 日志缓存、updateAssignment/postTaskEvent/claimTask 派发链路。
+
+**坑与经验**：
+- **renderHook 双重包裹**：helper 里已调 renderHook 再 `renderHook(helper)` → result.current 拿到的是 renderHook 结果对象而非 hook 返回值，断言全变 undefined（chai 的 "Target cannot be null or undefined"）；调用处直接 `withData()`；
+- **afterEach 用 clearAllMocks 不要 restoreAllMocks**：后者会把 vi.hoisted 桩的实现一并清掉（mockRestore 语义），后续测试拿到 undefined 返回值，被动进入 silent-catch 路径造成假绿/误红并存；
+- **重复副本自检**：大段搬移后 grep 目标块在源/目标的出现次数（本轮视图渲染器在组件内出现两份，tsc redeclare 即刻暴露）；
+- **props 群传子组件**：`<Child {...({ ...data, ...actions, tp })} as any />` 仅作临时通道时集中标注 as any，正式 Props 仍取双 hook ReturnType 交集。
+
+**结果**：tsc + vitest 150 passed + build 全绿；webpage 5063af8 已推。TaskDetail 组件簇 4 文件全部 ≤470 行。>500 台账 webpage 14 个。
