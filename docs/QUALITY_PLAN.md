@@ -1147,3 +1147,41 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
   引用为零"（搬出函数只被段内与 JSX 使用）；③行号切片搬运务必逐锚点
   assert（含行内缩进），本轮两次因边界差一行/锚点格式失败被断言拦下，
   未污染文件。
+
+## 2026-09-14 迭代 98（webpage）：useDashboardData 上帝 hook 拆分
+
+**目标**：src/pages/dashboard/useDashboardData.ts 831 行、~15 个领域共置一 hook、返回 170 键——典型的"逻辑混乱"目标；拆分为高内聚领域 hook。
+
+**做法**：
+- 按领域拆 8 个 hook：hooks/useDashboardStats（统计+派生口径）/useCollabMetricsPanel/useAgentMonitorPanel/useSecurityPanel（沙箱+安全事件+导出）/useUnifiedTrendPanel/useCollabGraphPanel（图数据+视图态+三种导出，228 行）/useOrchestrationPanel/useAdvancedAnalytics（15 组分析数据 state 对）；组合根 useDashboardData 降到 133 行，跨面板联动（SSE 实时刷新、编排→安全事件刷新）集中在组合根接线。
+- 纯逻辑沉淀两模块：dashboardFormatters.ts（32 行）与 collabGraphExport.ts（78 行：CSV 构建/图筛选/SVG 序列化）。
+- **对外返回键集合零变化**（170 键），24→31 个消费方（Dashboard.tsx）无感迁移。
+
+**测试**：55 个新用例（总计 44→99）：①契约测试——用拆分前文件机械提取的 170 键全量断言返回对象键集合相等（防丢键/改名）；②纯函数 100% 行覆盖（CSV 转义矩阵、图筛选矩阵、formatDuration 边界）；③面板行为——拉取参数矩阵/失败静默/导出成功与失败（stub URL.createObjectURL、fake Image、fake canvas、toBlob null、getContext null 全分支）/力导向参数 localStorage 持久化三路/SSE 三类事件分支。
+
+**坑与经验**：
+- **SSE 回调依赖必须是稳定值**：onEvent 的 useCallback 依赖若写成面板对象（每渲染新身份），useCollaborationSSE 的 connect 依赖链会导致 EventSource 每渲染重连——解构出面板内稳定值（setter/useCallback/标量）作依赖，与拆分前逐值一致。
+- **vi.mock 提升坑**：mock 工厂引用顶层桩变量报 TDZ，一律 `vi.hoisted()` 创建；hook 返回键全量断言的期望列表用脚本从拆分前文件机械提取，勿手抄（两次踩 171 键里混入 '}' 与漏 loadDashboardStats）。
+- **契约测试抓真问题**：keys 断言第一版即抓到提取脚本混入 `'}'`；openHistory 测试暴露闭包语义（openHistory 捕获所在渲染轮的 historyFilter，先 set 后需重渲染再调——原实现即如此，测试修正而非代码）。
+- jsdom 无 SVG viewBox/canvas 上下文：preparePngSvgSource 用 fake svg 对象（cloneNode+viewBox.baseVal+clientWidth=0 走 380 回退）；PNG 全链路用 fake Image（src setter 触发 onload）+ fake canvas；**window.Image 必须每测试自包含赋值并在 afterEach 清理**（类 FakeImage 泄漏导致兄弟测试误触发 onload 分支）。
+
+**结果**：tsc + vitest 99 passed + vite build 全绿；touched 模块行覆盖 ~100%（仅 2 处构造性不可达的外层防御 catch 留档）。webpage d509716 已推。
+
+## 2026-09-14 迭代 99（webpage）：tasks.ts 单文件 API 拆目录
+
+**目标**：src/api/tasks.ts 606 行（40 接口 + 35 方法大类），24 个消费方。
+
+**做法**：转 tasks/ 目录（沿用 agents/ 目录先例，目录 index 解析让消费方 import 路径零变化）：
+- types.ts（187 行，核心接口）/analytics-types.ts（216 行，分析统计接口）——**python 按行号原样机械迁移，勿手改**；
+- analytics.ts（89 行）：TasksAnalyticsApi 13 个分析端点方法原样搬移；
+- index.ts（165 行）：核心 CRUD/历史/证据/PR 审批/附件/日志/批量/子任务 + `class TasksApi extends TasksAnalyticsApi` 聚合 + `export *` 类型重导出 + 单例；
+- 顺手修正历史注释错位（"// 获取任务附件"挂错在 evidence 方法上）。
+
+**测试**：21 个新用例（总计 99→120）：apiClient 全量 mock（vi.hoisted），覆盖 getTasks 参数序列化（undefined/null 过滤）、35 个方法的 URL/谓词/payload 逐一断言、FormData 上传、下载地址拼接、15 个分析端点默认/自定义参数矩阵、单例继承关系。
+
+**坑与经验**：
+- 行号切片搬移**先打印边界前后 3 行 assert 再写盘**（本轮类声明行被切进方法体，tsc TS1068 立即暴露）；
+- 目录化后相对路径变化：`./client/index.js` → `../client/index.js`、`../utils/apiConfig` → `../../utils/apiConfig`；
+- index.ts 别忘 `export { TasksAnalyticsApi }`——类型 `export *` 不会带出类值，继承关系测试当场抓住。
+
+**结果**：tsc + vitest 120 passed + vite build 全绿。webpage 6a83eeb 已推。>500 行台账 webpage 17 个。
