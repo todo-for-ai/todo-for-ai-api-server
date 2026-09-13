@@ -496,6 +496,13 @@ class AgentRuntimeController(RuntimeProvider):
                     )
                     continue
 
+                from services.quota_guard import has_pending_quota_block
+                if has_pending_quota_block(candidate.id):
+                    logger.info(
+                        "runtime.auto_assign_quota_blocked agent_id=%s", candidate.id,
+                    )
+                    continue
+
                 violations = check_budgets(
                     workspace_id=int(scope_workspace_id),
                     agent_id=int(candidate.id),

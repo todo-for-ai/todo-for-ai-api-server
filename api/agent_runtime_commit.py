@@ -306,6 +306,34 @@ def commit_task(task_id):
             structlog.get_logger().warning(
                 "commit.recovery_failed", task_id=task.id, error=str(recovery_error),
             )
+
+        # 资源级故障（LLM token 额度/计费耗尽）：循环立即 STALLED 停车，
+        # 不进规划器重规划——重试/换思路都解决不了没额度，继续只会空转。
+        if (
+            loop_driven
+            and isinstance(recovery, dict)
+            and recovery.get('action') == 'escalated_quota_exhausted'
+        ):
+            try:
+                from models import GoalLoop, GoalLoopStatus
+                from services.goal_loop.query import active_loop_id_for_task as _loop_id
+
+                _lid = _loop_id(task)
+                if _lid:
+                    _loop = db.session.get(GoalLoop, _lid)
+                    if _loop and _loop.status == GoalLoopStatus.RUNNING:
+                        _loop.status = GoalLoopStatus.STALLED
+                        _loop.last_error = (
+                            'LLM API 额度/计费已耗尽，循环停车：'
+                            f'{(attempt.failure_reason or "")[:300]}'
+                        )
+                        _loop.finished_at = now
+                        db.session.commit()
+            except Exception:  # noqa: BLE001 - 停车失败不影响失败提交本身
+                import structlog
+                structlog.get_logger().warning(
+                    "commit.loop_quota_stall_failed", task_id=task.id, exc_info=True,
+                )
     elif final_status == 'cancelled':
         task.status = TaskStatus.CANCELLED
         attempt.state = AgentTaskAttemptState.ABORTED

@@ -240,6 +240,23 @@ def pull_tasks():
             'Workspace agent concurrency limit reached',
         ).to_response()
 
+    # ── 额度熔断门：该 Agent 的 LLM token 额度/计费耗尽时停止派发 ──
+    from services.quota_guard import has_pending_quota_block
+
+    if has_pending_quota_block(agent.id):
+        return ApiResponse.success(
+            {
+                'agent_profile': _build_agent_profile(agent),
+                'tasks': [],
+                'quota_block': {
+                    'blocked': True,
+                    'reason': 'token_quota_exhausted',
+                    'hint': '该 Agent 的 LLM API 额度/计费已耗尽，派发已熔断；请充值或更换 key 后复跑。',
+                },
+            },
+            'Task dispatch blocked: token quota exhausted',
+        ).to_response()
+
     # ── 预算门（P2.6）：agent/workspace 维度超限则停止派发并走审批队列 ──
     budget_block = None
     next_task = _fetch_next_task(agent)

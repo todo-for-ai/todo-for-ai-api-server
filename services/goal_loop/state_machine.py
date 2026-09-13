@@ -7,6 +7,7 @@ from models.agent import Agent
 
 from .constants import (
     ACTIVE_TASK_STATUSES,
+    DEFAULT_NO_PROGRESS_ROUNDS,
     DEFAULT_ROUNDS_LIMIT,
     DEFAULT_STALL_LIMIT,
     MAX_ROUNDS_LIMIT,
@@ -21,7 +22,7 @@ from .dispatch import (
     pick_executor,
 )
 from .planning import call_decompose, call_review
-from .query import loop_tasks, rounds_done
+from .query import loop_tasks, rounds_done, trailing_failure_streak
 
 
 def time_budget_exceeded(loop) -> bool:
@@ -139,6 +140,16 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         from .planning import valid_steps
         if not valid_steps(steps, loop.rounds_limit):
             return _register_stall(loop, 'extend_without_valid_steps')
+        # 无进展护栏：用户要"死循环"也必须有退出点——连续 N 轮失败后
+        # 拒绝继续 extend（宣告 complete 仍被允许），强制计 stall 走
+        # STALLED 退出，避免规划器无限换着花样空转烧预算。
+        streak = trailing_failure_streak(loop.id)
+        if streak >= DEFAULT_NO_PROGRESS_ROUNDS:
+            return _register_stall(
+                loop,
+                f'no_progress: 连续 {streak} 轮失败（阈值 {DEFAULT_NO_PROGRESS_ROUNDS}），'
+                '拒绝继续 extend；请人工介入或调整目标后 resume',
+            )
         remaining = list(plan[max(plan_index, 0):])
         loop.plan = remaining + steps
         loop.plan_index = max(plan_index, 0)

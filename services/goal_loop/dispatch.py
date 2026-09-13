@@ -116,7 +116,8 @@ def create_round_task(loop, step: dict, executor: Agent = None) -> Task:
 def assign_task_to_agent(task, agent: Agent):
     """把任务直接派给指定执行者（建 attempt+lease 并推送）。
 
-    派发前过两道门（与 pull 路径同语义）：
+    派发前过三道门（与 pull 路径同语义）：
+    - 额度熔断——该 Agent 的 LLM token 额度/计费耗尽时不派（任务留 TODO）；
     - 工作区编排并发上限（「同时干活」Agent 数）——到上限且该 Agent 不在岗
       则不派（任务留 TODO，等容量释放后由 pull 兜底）；
     - token/时长预算——超限走审批队列事件并跳过派发。
@@ -124,6 +125,13 @@ def assign_task_to_agent(task, agent: Agent):
     from api.agent_common import generate_id, now_utc
     from api.agent_runtime_websocket import push_task_to_agent
     from services.workspace_runtime_policy import check_dispatch_capacity
+
+    from services.quota_guard import has_pending_quota_block
+
+    if has_pending_quota_block(agent.id):
+        log.warning("goal_loop.dispatch_quota_blocked",
+                    extra={"agent_id": agent.id, "task_id": task.id})
+        return
 
     capacity = check_dispatch_capacity(agent.workspace_id, agent.id)
     if not capacity['allowed']:

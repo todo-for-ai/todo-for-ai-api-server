@@ -27,6 +27,23 @@ def rounds_done(loop_id) -> int:
     return loop_task_query(loop_id).count()
 
 
+def trailing_failure_streak(loop_id) -> int:
+    """末尾连续失败（CANCELLED）轮数；遇到 DONE 清零。
+
+    无进展护栏的输入：规划器可以不断 extend，但连续失败轮数只增不减，
+    达到阈值后状态机拒绝 extend，保证「死循环」也有退出点。
+    """
+    from models import TaskStatus
+
+    streak = 0
+    for t in reversed(loop_tasks(loop_id)):
+        if t.status == TaskStatus.CANCELLED:
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def active_loop_id_for_task(task):
     """任务 tags 反查其所属且未终态（running/paused）的循环 ID；无则 None。
 

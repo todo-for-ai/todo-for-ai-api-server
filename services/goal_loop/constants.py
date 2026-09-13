@@ -34,6 +34,9 @@ def _env_int(name, default, lo, hi):
 DEFAULT_ROUNDS_LIMIT = _env_int('GOAL_LOOP_DEFAULT_ROUNDS_LIMIT', 10, 1, MAX_ROUNDS_LIMIT)
 DEFAULT_STALL_LIMIT = _env_int('GOAL_LOOP_DEFAULT_STALL_LIMIT', 2, 1, 50)
 DEFAULT_STUCK_TASK_HOURS = _env_int('GOAL_LOOP_STUCK_TASK_HOURS', 6, 1, 24 * 7)
+# 无进展护栏：用户要"死循环"也必须有退出点——规划器连续看到 N 轮失败后
+# 不允许再 extend（宣告 complete 仍允许），强制计 stall 走 STALLED 退出
+DEFAULT_NO_PROGRESS_ROUNDS = _env_int('GOAL_LOOP_NO_PROGRESS_LIMIT', 3, 2, 50)
 
 
 def naive_utc_now() -> datetime:

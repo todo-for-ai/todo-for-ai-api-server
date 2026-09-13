@@ -38,6 +38,12 @@ CODE_CATEGORY_MAP = {
     "LEASE_EXPIRED": "transient",
     "RATE_LIMITED": "transient",
     "NETWORK_ERROR": "transient",
+    # 资源级故障：额度/计费耗尽——重试无意义，走熔断+上报而非自愈重试
+    "QUOTA_EXCEEDED": "quota_exhausted",
+    "INSUFFICIENT_QUOTA": "quota_exhausted",
+    "INSUFFICIENT_CREDITS": "quota_exhausted",
+    "BILLING_ERROR": "quota_exhausted",
+    "PAYMENT_REQUIRED": "quota_exhausted",
 }
 
 REASON_KEYWORDS = (
@@ -53,6 +59,15 @@ REASON_KEYWORDS = (
     ("permission", "auth_error"),
     ("rate limit", "transient"),
     ("connection", "transient"),
+    # 额度/计费关键词（各 CLI 引擎对 401/402/429 表述不一，按文本兜底）
+    ("insufficient_quota", "quota_exhausted"),
+    ("quota exceeded", "quota_exhausted"),
+    ("exceeded your current quota", "quota_exhausted"),
+    ("credit balance", "quota_exhausted"),
+    ("insufficient credits", "quota_exhausted"),
+    ("billing", "quota_exhausted"),
+    ("payment required", "quota_exhausted"),
+    ("usage limit", "quota_exhausted"),
 )
 
 CATEGORY_LABELS = {
@@ -62,8 +77,12 @@ CATEGORY_LABELS = {
     "timeout": "执行超时",
     "auth_error": "认证/权限错误",
     "transient": "瞬时错误",
+    "quota_exhausted": "API 额度/计费耗尽",
     "unknown": "未分类失败",
 }
+
+# 不可重试的资源级故障：不生成修复子任务，直接熔断派发 + 升级人工
+NON_RETRYABLE_CATEGORIES = {"quota_exhausted"}
 
 # 默认重试封顶（可被 agent.max_retry / 预算覆盖，此处为服务级缺省；
 # 部署可用 FAILURE_REPAIR_MAX_ATTEMPTS 调节，长跑场景建议放宽）
@@ -187,6 +206,23 @@ def handle_failed_commit(task, agent, attempt_id: str,
 
         structlog.get_logger().warning("recovery.curation_proposal_failed", error=str(e))
         db.session.rollback()
+
+    # 资源级故障（额度/计费耗尽）：重试无意义——熔断该 Agent 派发并上报
+    # 用户；循环/普通任务都不生成修复子任务、不计重试封顶。
+    if category in NON_RETRYABLE_CATEGORIES and workspace_id:
+        from services.quota_guard import raise_quota_exhausted
+
+        quota_report = raise_quota_exhausted(
+            workspace_id, task, agent,
+            category=category, failure_reason=failure_reason or '',
+        )
+        db.session.commit()
+        return {
+            "action": "escalated_quota_exhausted",
+            "category": category,
+            "failed_attempts": failed_attempts,
+            "quota_report": quota_report,
+        }
 
     if not auto_repair:
         db.session.commit()
