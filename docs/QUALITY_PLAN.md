@@ -1370,3 +1370,9 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **经验**：filterKinds 过滤会让失去存活边的节点级联隐藏（孤立节点随之消失），断言需按图论语义而非简单计数；jsdom 无 rAF，force 布局测试用 vi.fn 桩 + 手动触发回调。
 
 **会话最终态**：webpage >500 行 **4 个**（Agents.tsx 1508 并行会话、Workflows 770 人工专项、CollaborationGraphView 688 安全网已就绪可拆、其余均 <500）；测试 44 → 201；拆分模块行覆盖 100%。
+
+## 2026-09-14 迭代 115（webpage）：协作图过滤与布局计算沉淀共享模块
+
+**做法**：filterGraphData（kind/minCount 过滤 + 中心节点保留）与 computeStaticPositions（circular/grid 静态布局）沉淀进 collaboration-graph/collaborationGraphShared.ts（99 行）；CollaborationGraphView 内联逻辑替换为共享调用（688 → 674）。**7 个新单测**：过滤矩阵（无过滤/minCount 隐藏孤立节点/kind 过滤保留中心/centerNodeId 强保留）+ 布局几何（circular 半径 = size/2-40、grid 行列与边距、单节点顶点角度）。
+
+**结果**：tsc + vitest 208 passed + build 全绿；webpage 3586bc5 已推。协作图簇（View 674 + Shared 99 + 渲染行为测试）就绪，后续可按「力导向 rAF/指针交互」两刀继续拆分。
