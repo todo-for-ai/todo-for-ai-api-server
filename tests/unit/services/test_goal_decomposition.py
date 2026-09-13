@@ -149,6 +149,25 @@ class TestExpandEpicToTasks:
         with pytest.raises(ValueError, match="no tasks"):
             expand_epic_to_tasks(env["epic"])
 
+    def test_cyclic_dependency_edges_dropped(self, env, monkeypatch):
+        # LLM 给出的依赖可能成环（环 = 派发依赖门下互相等待）：成环边丢弃，
+        # 无环边照写，任务图保持 DAG
+        _patch_llm(monkeypatch, {"content": """{
+            "tasks": [
+                {"title": "甲", "depends_on": [2]},
+                {"title": "乙", "depends_on": [1]},
+                {"title": "丙", "depends_on": [1]}
+            ]
+        }"""})
+        expand_epic_to_tasks(env["epic"], project_id=env["project"].id)
+        by_title = {t.title: t for t in _epic_tasks(env["epic"])}
+        # 先写的 甲←乙 边合法保留；后写的 乙←甲 边闭合甲↔乙，被防环检查拦下
+        assert by_title["甲"].blocked_by_task_ids == [by_title["乙"].id]
+        assert by_title["乙"].blocked_by_task_ids == []
+        # 丙依赖甲不成环，照写
+        assert by_title["丙"].blocked_by_task_ids == [by_title["甲"].id]
+        assert by_title["甲"].blocking_task_ids == [by_title["丙"].id]
+
     def test_invalid_items_skipped(self, env, monkeypatch):
         _patch_llm(monkeypatch, {"content": """{
             "tasks": ["not-a-dict", {"description": "no title"},

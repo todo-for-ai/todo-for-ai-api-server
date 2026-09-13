@@ -5,6 +5,7 @@ from flask import request
 from models import db, Task
 from api.base import ApiResponse
 from core.auth import unified_auth_required
+from services.task_graph import find_dependency_cycle
 
 from . import tasks_bp
 
@@ -110,6 +111,16 @@ def update_dependencies(task_id):
     task = db.session.query(Task).get(task_id)
     if not task:
         return ApiResponse.error('Task not found', 404).to_response()
+
+    # 防环：依赖门语义下环 = 互相等待、永久无法派发，写侧直接拒绝。
+    # 自依赖与传递成环同拦；失效引用（已删任务）由派发门容忍，不在此校验。
+    cycle_blocker = find_dependency_cycle(task.id, blocked_by)
+    if cycle_blocker is not None:
+        return ApiResponse.error(
+            f'Dependency cycle rejected: task {task.id} cannot depend on task '
+            f'{cycle_blocker} (directly or transitively)',
+            400,
+        ).to_response()
 
     task.blocking_task_ids = blocking
     task.blocked_by_task_ids = blocked_by

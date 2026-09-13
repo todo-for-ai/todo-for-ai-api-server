@@ -9,6 +9,7 @@ Epic → 带 DoD 的任务图：复用 ai_task_split 的 LLM 生产调用生成�
 from typing import Any, Dict, List, Optional
 
 from models import Task, TaskPriority, db
+from services.task_graph import find_dependency_cycle
 
 
 def _build_prompt(epic, workspace_context: Optional[str]) -> str:
@@ -107,7 +108,9 @@ def expand_epic_to_tasks(epic, workspace_context: Optional[str] = None,
         id_by_index[index] = task.id
         created_ids.append(task.id)
 
-    # 第二遍：按 depends_on 写依赖（blocking/blocked_by）
+    # 第二遍：按 depends_on 写依赖（blocking/blocked_by）。
+    # LLM 输出的依赖可能成环（环 = 派发依赖门下互相等待），成环边直接丢弃，
+    # 保持任务图无环；其余边照写。
     for index, item in enumerate(tasks_data[:8], start=1):
         task_id = id_by_index.get(index)
         if not task_id:
@@ -116,6 +119,8 @@ def expand_epic_to_tasks(epic, workspace_context: Optional[str] = None,
         for dep in (item.get("depends_on") or []):
             dep_id = id_by_index.get(int(dep)) if str(dep).isdigit() else None
             if dep_id and dep_id != task_id:
+                if find_dependency_cycle(task_id, [dep_id]) is not None:
+                    continue
                 blocked = task.blocked_by_task_ids or []
                 if dep_id not in blocked:
                     blocked.append(dep_id)
