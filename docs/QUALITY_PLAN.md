@@ -1325,3 +1325,26 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - **webpage >500 行文件**：17 → **11**（消解 useDashboardData 831、tasks.ts 606、OrganizationDetail 1257、CommandCenter 961、TaskCollaborationTimeline 767、agents/index 613、TaskAnalyticsSection 575、AgentAnalyticsSection 1165、ExperiencesSection 529、SandboxDrawer 554、Profile 594）。剩余：Agents.tsx 1508（并行会话在改）、CollaborationGraphView 713（高内聚交互件：力导向/拖拽/缩放，单列评估）。
 - **测试**：44 → **190**（+146），拆分模块行覆盖 100%（构造性不可达防御 catch 留档）。
 - **106 轮专项**：对 99–103 拆分模块统一 --coverage 实测并补齐（审计闭环）；顺带去重协作图 hook 副本（-311 行）。
+
+## 2026-09-14 迭代 111（webpage）：AgentRuntimeTab 505 行拆分
+
+**做法**：三个 i18n 选项配置（执行模式/沙箱档位/网络模式 useMemo 块，~67 行）抽为 runtimeOptions.ts（74 行）——选项变成 tp 的纯工厂函数 + createRuntimeOptions 聚合器；组件内一个 useMemo 调用，主文件 441 行。
+
+**经验**：切片/重插脚本在同文件多锚点操作时行号会漂移——本轮插入点误入 loadConfig 回调内部 + 旧块残留 redeclare，tsc 即时暴露后用「整段重生成」（从 /tmp 原文件快照重跑干净转换）而非增量缝补。**原文件快照 (/tmp/xxx.ts) 是所有脚本的最终兜底**。
+
+**结果**：tsc + vitest 190 passed + build 全绿；webpage 39767e2 已推。
+
+## 2026-09-14 迭代 112（webpage）：agents types.ts 605 行按主题分模块
+
+**做法**：纯类型文件切 6 块（core 168/events-inbox 69/runs-logs 29/handoff-dispatch 93/query-review 51/schedule-crud 199），types.ts 保留 `export *` 聚合桶（7 行）；跨组类型引用用 type-only import（core↔schedule-crud 循环为纯类型循环，TS 允许）。
+
+**验证**：tsc + vitest 190 passed + build 全绿（纯类型搬运，名称集合不变由 tsc 对全消费方保证）。
+
+**结果**：webpage 35784ba 已推。
+
+## 2026-09-14 会话最终台账（98–112，15 轮全绿）
+
+- **webpage >500 行**：17 → **4**（Agents.tsx 1508 并行会话在改、Workflows.tsx 770 待 RunDetail/Version 专项、CollaborationGraphView 713 高内聚交互件单列、AgentRuntimeTab 已消解）。本轮消解 11 个：useDashboardData 831 / tasks.ts 606 / OrganizationDetail 1257 / CommandCenter 961 / TaskCollaborationTimeline 767 / agents-index 613 / AgentAnalyticsSection 1165 / TaskAnalyticsSection 575 / ExperiencesSection 529 / SandboxDrawer 554 / Profile 594 / agents-types 605 / runtimeOptions。
+- **测试**：44 → **190**（+146）。**覆盖实测**：迭代 106 对 99–103 全部新模块跑 --coverage 并补齐至 100% 行覆盖（仅 2 处构造性不可达防御 catch 留档）；107–110 新模块同样补齐 hook/纯函数用例。
+- **门禁基线**：tsc -b + vitest + vite build 三绿；每轮日志回写本文件；worktree/分支即清；主仓 ref 同步。
+- **剩余队列**：Workflows 770（RunDetail/Version 双 Modal 交叉，需人工逐段）/ CollaborationGraphView 713（交互件）/ Agents.tsx 1508（并行会话）。
