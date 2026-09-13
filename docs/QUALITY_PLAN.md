@@ -1205,3 +1205,17 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - **单轮完整执行（侦察→原子生成→立即 tsc→门禁→合并）是 iter93/94 失败而本轮成功的根因**：不再跨轮缝补状态。
 
 **结果**：tsc + vitest 125 passed + vite build 全绿；webpage 0ac1e34 已推。该页簇 4 文件全部 ≤499 行。>500 台账 webpage 16 个。
+
+## 2026-09-14 迭代 101（webpage）：CommandCenter 961 行拆分
+
+**做法**：与 100 轮同套原子脚本手法升级为「分块搬运」——内容锚点把组件逻辑切成 A(数据状态)/B(图状态+摘要+导出)/C(动作)/D(loadAll)/E(resize)/F(图加载器)/G(SSE 接线)/H(快捷动作)/I(图导出) 九块，按域归并生成 commandCenter/useCommandCenterData.ts（263 行，53 名）与 useCommandCenterCollabGraph.ts（311 行，46 名）；SSE 接线跨两 hook，留在主文件（依赖解构为稳定值防重连）；JSX 两大段（协作图卡片 111 行 / Modal 群 110 行）抽为 Bundle-props 子组件（201/199 行）。主文件 469 行。
+
+**测试**：9 个新 hook 用例（总计 125→134）：loadAll 单轮 11 端点并发与落状态断言、趋势三筛选重拉参数矩阵、编排/解决冲突/自动解决/导出的成功与失败路径、协作图摘要与明细子图、CSV 导出走下载。
+
+**坑与经验**：
+- **块边界必须按内容锚点 + Card 深度配对**：协作图卡片上方有页面级 `<Spin spinning={loading}>`，按注释→`</Spin>` 切会把孤儿闭合标签切进组件（tsc JSX1005 立刻暴露），改为 `<Card` 起深度配对；
+- **return (...) 直接跟 JSX 注释不合法**：Modal 群组件 `return (` 首节点是 `{/* 注释 */}` 需要 Fragment 包裹；
+- 分块搬运的「成员资格」断言要精确：搬移后 tsc 报 shorthand 缺名即清单漂移信号（本轮 3 次即时纠正：collab 4 声明行落错块、summary 派生块落错块、data return 误收块内 const 行）；
+- 子组件 import 块整块复制后必须删「指向主页面簇」的行（自导入/重名，同 100 轮）；Bundle props 里的 tn/navigate 用 `(...args: any[])`，never[] 会在调用点炸 TS2345。
+
+**结果**：tsc + vitest 134 passed + vite build 全绿；webpage 20566fa 已推。该页簇 5 文件全部 ≤469 行。>500 台账 webpage 15 个。
