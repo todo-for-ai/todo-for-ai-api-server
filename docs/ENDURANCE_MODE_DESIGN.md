@@ -128,3 +128,43 @@ LEASE_DURATION_SECONDS=300             # 更长租约，续约窗口更宽松
 - 循环任务失败不再产生修复子任务：修复能力由循环重规划承担；依赖修复子任务的审计请看
   `AgentTaskEvent.failure` 归因与 `AgentExperience.failure_pattern`。
 - 护栏 env 只影响新建循环的缺省值，存量循环不受影响；终态循环仍需 resume。
+
+## 8. v2（2026-09-13，fix/graceful-quota-and-loop-exits）：优雅停车两件套
+
+长跑的对偶问题是「停不下来」和「没油了还在空转」。
+
+### 8.1 无进展护栏（死循环必须有退出点）
+
+用户可以要"死循环"（大 rounds_limit / 长时预算），但循环不能没有体面的退出方式：
+
+- `services/goal_loop/query.py::trailing_failure_streak`：末尾连续失败（CANCELLED）轮数。
+- 状态机 extend 分支：连续失败轮数 ≥ `GOAL_LOOP_NO_PROGRESS_LIMIT`（默认 3，env 可调）时
+  **拒绝 extend**，强制计 stall（理由 `no_progress: 连续 N 轮失败`）→ 连续两次即 STALLED 终态。
+  **规划器宣告 complete 仍然允许**——验收轮失败但目标已达成是合法结局。
+- 语义：失败可以喂给规划器换思路，但换思路也要有尽头；stall_limit 兜底保证最终停车，
+  用户调整目标/修复问题后 resume 即可继续。
+
+### 8.2 额度熔断（LLM API token 额度/计费耗尽）
+
+最常见的资源级故障，之前被当成普通失败反复重试（修复子任务×2 → 升级），白烧重试还不上报。
+现在（`services/quota_guard.py` + `failure_recovery`）：
+
+1. **识别**：新增归因类别 `quota_exhausted`（failure_code：QUOTA_EXCEEDED/INSUFFICIENT_QUOTA/
+   INSUFFICIENT_CREDITS/BILLING_ERROR/PAYMENT_REQUIRED；reason 关键词：insufficient_quota/
+   quota exceeded/credit balance/billing/payment required/usage limit）。普通 429 限流仍是
+   可重试的 transient，两者区分。
+2. **不可重试**：`NON_RETRYABLE_CATEGORIES` 直接走升级，跳过修复子任务与重试封顶计数。
+3. **熔断**：`has_pending_quota_block(agent_id)` 在三道派发门生效（pull 返回
+   `quota_block`、auto_assign 跳过该候选、goal_loop dispatch 跳过），窗口
+   `QUOTA_BLOCK_WINDOW_HOURS`（默认 24h，env 可调）内不再给该 Agent 派发；
+   窗口过后自动恢复（换 key/充值即自愈）。
+4. **上报**：写 `interaction_request` 事件（`interaction_type=token_quota_exhausted`，
+   payload 带 hint「请充值或更换 key」），审批队列/open 协议可见；一窗口一 Agent 幂等只报一次。
+5. **循环停车**：循环任务的额度耗尽失败 → 循环立即 STALLED（last_error 写明
+   「LLM API 额度/计费已耗尽」），不进规划器重规划——没额度时重规划只是空转。
+
+### 8.3 测试
+
+`tests/unit/api/test_graceful_quota.py`（11 用例）：归因码/关键词、额度失败升级不生成修复子任务、
+上报幂等、窗口过期自愈、pull 熔断门、循环任务额度失败强制 STALLED、
+trailing_failure_streak、extend 拒绝/complete 放行。
