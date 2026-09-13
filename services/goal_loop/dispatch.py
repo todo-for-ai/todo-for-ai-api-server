@@ -107,9 +107,25 @@ def create_round_task(loop, step: dict, executor: Agent = None) -> Task:
     except Exception:  # noqa: BLE001 - 走廊构建失败不阻断派发
         pass
     corridor_block = f"{corridor}\n\n" if corridor else ''
+    # 相关记忆召回（可插拔后端：builtin 经验/知识库，可选 mem0 语义召回）：
+    # 按步骤文本召回历史经验与知识条目，让执行者带着机构的记忆干活；
+    # 首轮也注入（记忆与循环历史无关）。失败静默跳过。
+    memory_block = ''
+    try:
+        from services.memory import recall_for_query
+
+        memory_lines = recall_for_query(
+            f"{step.get('title') or ''} {content}",
+            workspace_id=loop.workspace_id,
+            agent_id=executor.id if executor else None,
+        )
+        if memory_lines:
+            memory_block = "【相关记忆（历史经验/知识库）】\n" + "\n".join(memory_lines) + "\n\n"
+    except Exception:  # noqa: BLE001 - 记忆召回失败不阻断派发
+        pass
     task = Task(
         title=(step.get('title') or f'{loop.title} · 下一轮').strip()[:500],
-        content=f"{corridor_block}{role_line}{content}",
+        content=f"{corridor_block}{memory_block}{role_line}{content}",
         project_id=loop.project_id,
         owner_id=loop.created_by,
         is_ai_task=True,

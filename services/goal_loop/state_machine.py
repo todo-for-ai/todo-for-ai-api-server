@@ -136,6 +136,7 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         loop.completion_summary = decision.get('reason') or ''
         loop.stall_count = 0
         loop.finished_at = naive_utc_now()
+        _record_success_experience(loop)
         db.session.commit()
         return {'advanced': False, 'reason': 'completed'}
 
@@ -197,6 +198,35 @@ def _finish(loop, status: GoalLoopStatus, last_error: str = None):
         loop.last_error = last_error
     loop.finished_at = naive_utc_now()
     db.session.commit()
+
+
+def _record_success_experience(loop):
+    """循环达成 → success_pattern 经验入库（与失败路径对称的记忆写入）。
+
+    失败经验由 failure_recovery 写入；成功经验此前没有落点，达成策略
+    （拆解方式/收敛路径）就此丢失。写入失败只记日志，绝不影响循环终态。
+    """
+    import structlog
+
+    from models import AgentExperience
+
+    logger = structlog.get_logger()
+    try:
+        rounds = rounds_done(loop.id)
+        db.session.add(AgentExperience(
+            agent_id=int(loop.agent_id),
+            experience_type='success_pattern',
+            task_type='goal_loop',
+            strategy=(loop.goal_text or '')[:200],
+            outcome_pattern=f"目标达成，共 {rounds} 轮",
+            key_learnings=(loop.completion_summary or '目标达成')[:500],
+            confidence=0.7,
+            source_task_id=loop.last_task_id,
+        ))
+        db.session.flush()
+    except Exception:  # noqa: BLE001 - 经验沉淀绝不影响循环收尾
+        logger.warning("goal_loop.success_experience_failed", exc_info=True)
+        db.session.rollback()
 
 
 def create_loop(*, project: Project, agent, title: str, goal_text: str,
