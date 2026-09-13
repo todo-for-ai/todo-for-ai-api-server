@@ -1376,3 +1376,9 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **做法**：filterGraphData（kind/minCount 过滤 + 中心节点保留）与 computeStaticPositions（circular/grid 静态布局）沉淀进 collaboration-graph/collaborationGraphShared.ts（99 行）；CollaborationGraphView 内联逻辑替换为共享调用（688 → 674）。**7 个新单测**：过滤矩阵（无过滤/minCount 隐藏孤立节点/kind 过滤保留中心/centerNodeId 强保留）+ 布局几何（circular 半径 = size/2-40、grid 行列与边距、单节点顶点角度）。
 
 **结果**：tsc + vitest 208 passed + build 全绿；webpage 3586bc5 已推。协作图簇（View 674 + Shared 99 + 渲染行为测试）就绪，后续可按「力导向 rAF/指针交互」两刀继续拆分。
+
+## 2026-09-14 迭代 116（webpage）：力导向 rAF 循环抽为 useForceSimulation hook
+
+**做法**：CollaborationGraphView 内的力导向实时坐标 effect（初始圆周坐标 + 斥力/边吸引/中心引力/阻尼 rAF 收敛循环，~70 行）原样迁至 collaboration-graph/useForceSimulation.ts（108 行，参数对象签名）；主组件 620 行。deps 语义保持一致（nodes 按 id 串、edges 按 source-target-count 串）。
+
+**结果**：tsc + vitest 208 passed + build 全绿；webpage 11e27db 已推。渲染行为测试（rAF 桩）为此拆分提供安全网。
