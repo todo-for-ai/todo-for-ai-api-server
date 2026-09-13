@@ -1266,3 +1266,20 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **做法**：纯类型文件按主题切 7 块（productivity/failure-capability/collaboration/allocation/workload/knowledge-protocol/health，47–126 行/块），analytics-types.ts 保留为 `export *` 聚合桶——对外名称集合不变（70 个导出，tsc 对全消费方验证通过）。类型搬运属零行为变更，验证 = tsc + 既有 151 用例 + build（无需新增用例）。
 
 **结果**：webpage a554dc1 已推。**会话最终台账**：>500 行文件 webpage 17 → 12 个；测试 44 → 151；门禁基线三绿。剩余队列：AgentAnalyticsSection 1165 / Agents.tsx 1508（并行会话）/ CollaborationGraphView 713 / Profile 594 / SandboxDrawer 554 / ExperiencesSection 529 / AgentRuntimeTab 505。
+
+## 2026-09-14 迭代 106（webpage）：拆分模块覆盖率补齐至 100% 行覆盖 + 协作图 hook 去重
+
+**背景**：覆盖审计发现 99–103 轮拆分模块仅 R98 实测过覆盖率——对全部新模块统一跑 `vitest --coverage` 实测。
+
+**实测结果（补齐前 → 后）**：
+- api/tasks/**（index/analytics/types/analytics-types）：100% ✓（99 轮用例本就全称量）
+- agents-client.ts：100% ✓
+- OrganizationDetailData.tsx：90.98% → **100%**（+12 用例：六加载器、成员/Agent 成员增删改、失败路径、无效 organizationId 全守卫早退、activity tab、格式化 NaN/空值分支）
+- OrganizationDetailDerived.tsx：84.05% → **100%**（+渲染回调逐格调用：项目/事件列 render 以多形态 record 驱动，覆盖 payload 详情/状态色/链接 null 分支；归档信号独立用例）
+- commandCenter/useCommandCenterData.ts：90.49% → **99.61%**（+解决冲突开/提交成败、自动解决成功、导出成败、编排失败；仅剩 1 行防御性外层 catch——loadAll 对每端点都有 .catch(()=>null)，外层 catch 构造性不可达）
+- commandCenter/useCommandCenterCollabGraph.ts：76.84% → **删除**（与 dashboard/hooks/useCollabGraphPanel 逐行重复，CommandCenter 改用共享 hook；去重 -311 行，dashboard 侧已有 99.56% 覆盖背书）
+- useTaskCollaborationData.ts：93.71% → **100%**；useTaskAssignmentActions.ts：69.54% → **100%**（+反馈/派发/交接/发帖动作成败分支用例）
+
+**测试**：151 → **180 passed**。**工具经验**：v8 text 报告的 Uncovered 行号列会被截断，精确行号用 `--coverage.reporter=json` + coverage-final.json 解析 statementMap；「expected Target cannot be null or undefined」= chai toHaveLength 收到 undefined，多为 hook 组合对象键缺失或断言时机过早。
+
+**结果**：tsc + vitest 180 passed + build 全绿；webpage 58acca0 已推。
