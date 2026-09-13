@@ -1185,3 +1185,23 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - index.ts 别忘 `export { TasksAnalyticsApi }`——类型 `export *` 不会带出类值，继承关系测试当场抓住。
 
 **结果**：tsc + vitest 120 passed + vite build 全绿。webpage 6a83eeb 已推。>500 行台账 webpage 17 个。
+
+## 2026-09-14 迭代 100（webpage）：OrganizationDetail 1257 行专项拆分（iter93/94 失败两次后的成功轮）
+
+**目标**：src/pages/OrganizationDetail.tsx 1257 行（iter93/94 连续失败，本轮流程按既定定式完整执行）。
+
+**做法（三段原子脚本，每段写盘后立即 tsc）**：
+1. **状态层**：内容锚点定位（不用行号）——导入块整块 / 模块 helpers（状态色表、extractProjectItems、getProjectTaskCount）/ 组件体（useState+loaders+effects）/ JSX 边界（`  if (pageLoading...`）。组件体内 `^  const [a, setA]`、`^  const {x, y}`、`^  const name =` 三种模式机械收集 78 个名字 → 生成 `OrganizationDetailData.tsx`（499 行，数据 hook，含表格列 JSX 故 .tsx，与页面同目录 → 相对导入零修改）。
+2. **派生层**：`mergedMemberRows` 到 `eventColumns` 的 17 个 memo/useCallback（~370 行）→ `OrganizationDetailDerived.tsx`（464 行）；签名 `data: ReturnType<typeof useOrganizationDetailData>`（**仅 type import，无运行时循环**），解构名单 = 块内标识符 ∩ 数据 hook 返回名（第一版用裸标识符差集误把对象属性键全卷进来——修正为与名单求交）。
+3. **视图层**：Tabs 三表格段（113 行，深度配对 Card 边界）→ `OrganizationDetailTabsSection.tsx`（214 行），props 直接收双 hook 合并包（Bundle 类型）。主文件 486 行。
+
+**测试**：extractProjectItems 载荷形态矩阵（items/data/data.items/非对象/空）+ getProjectTaskCount 回退链（total_tasks → stats.total_tasks → 0，0 优先于 stats）+ 状态色表键值；总计 120→125 全绿。
+
+**坑与经验（iter93/94 教训逐条验证）**：
+- **import 块整块复制**到子组件时必须删除指向本页面簇模块的行（自导入 + 与 type 导入重名），多行 import 块的行级判重/续行启发式必挂（本轮吃两记 tsc 才改整块处理）；
+- 值/类型混用拆分：模块常量在子组件里当值用 → 同模块拆两条 import（type 一条 + 值一条）；
+- 生成代码里逐名追加逗号时 `',\n'.join('    x,')` 会产出双逗号——生成后统一 `s.replace(',,', ',')` 或模板只留一个逗号；
+- 数据 hook return 名单与派生名单要在搬移后同步（搬走的 17 名从原 return 删除，tsc shorthand 报错即清单漂移信号）；
+- **单轮完整执行（侦察→原子生成→立即 tsc→门禁→合并）是 iter93/94 失败而本轮成功的根因**：不再跨轮缝补状态。
+
+**结果**：tsc + vitest 125 passed + vite build 全绿；webpage 0ac1e34 已推。该页簇 4 文件全部 ≤499 行。>500 台账 webpage 16 个。
