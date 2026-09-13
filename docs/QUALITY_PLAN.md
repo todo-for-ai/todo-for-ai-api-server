@@ -1382,3 +1382,9 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **做法**：CollaborationGraphView 内的力导向实时坐标 effect（初始圆周坐标 + 斥力/边吸引/中心引力/阻尼 rAF 收敛循环，~70 行）原样迁至 collaboration-graph/useForceSimulation.ts（108 行，参数对象签名）；主组件 620 行。deps 语义保持一致（nodes 按 id 串、edges 按 source-target-count 串）。
 
 **结果**：tsc + vitest 208 passed + build 全绿；webpage 11e27db 已推。渲染行为测试（rAF 桩）为此拆分提供安全网。
+
+## 2026-09-14 Workflows 拆分二次尝试与回滚（补充发现）
+
+第二次尝试（数据 hook .tsx + 五 Modal Bundle 组件方案）推进到 tsc 阶段后发现：**Workflows 数据区含 JSX-returning useMemo（数据 hook 必须为 .tsx）**，且子目录化后全部导入需 ../../ 深度修正（原文件导入块横跨 antd/icons/api/components 多段）。方案本身可行（.tsx 数据 hook + Bundle Modals），但完整收敛需「跨组 type 导入补全 + 路径深度修正 + 120 名解构校验」三轮迭代，窗口内未完成，已完整回滚（git checkout 恢复，0 差异）。**下次专项的现成起点**：切分锚点已勘定（states_start/ret_idx/五个 Modal 注释行），head 构造用「decl 前全量导入块 + 显式新增导入」。
+
+**回滚纪律再次验证**：git status 发现 workflows/ 目录历史组件被 rm -rf 误删 → git checkout -- 即时恢复（零损失）。
