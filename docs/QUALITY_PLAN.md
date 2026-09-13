@@ -1348,3 +1348,9 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - **测试**：44 → **190**（+146）。**覆盖实测**：迭代 106 对 99–103 全部新模块跑 --coverage 并补齐至 100% 行覆盖（仅 2 处构造性不可达防御 catch 留档）；107–110 新模块同样补齐 hook/纯函数用例。
 - **门禁基线**：tsc -b + vitest + vite build 三绿；每轮日志回写本文件；worktree/分支即清；主仓 ref 同步。
 - **剩余队列**：Workflows 770（RunDetail/Version 双 Modal 交叉，需人工逐段）/ CollaborationGraphView 713（交互件）/ Agents.tsx 1508（并行会话）。
+
+## 2026-09-14 Workflows 770 尝试回滚（迭代 111 后续）
+
+对 Workflows.tsx 尝试「数据 hook + Modals 组件」双切，脚本切割时发现该文件 **逻辑区与视图区深度交织**：部分 JSX-returning 的 useMemo（如冲突趋势段落）位于 states 与 handlers 之间，纯 .ts 数据 hook 无法容纳；且 restore 时误删了 workflows/ 目录内先前轮次已抽取的组件（git checkout 即时恢复，未造成损失）。**结论维持 iter88-91 判断：Workflows 的 RunDetail/Version 双 Modal 与逻辑交织需人工逐段处理，机械脚本不适配**。已完整回滚至 origin/main 等价状态并验证 190 tests 全绿。
+
+**新增教训**：①回滚恢复用 `git checkout -- <path>`，严禁 `rm -rf` 域目录（内含历史轮次成果）；②"Target cannot be null or undefined"（chai）→ toHaveLength 收到 undefined = 组合对象键缺失/断言时机过早，先探针后修补。
