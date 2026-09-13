@@ -1260,3 +1260,9 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - **迭代纪律**：每轮 = 拆分（内容锚点+深度配对+原子写盘）→ 立即 tsc → 单测补齐（重构处新模块行覆盖 ~100%，构造性不可达防御分支留档）→ 全量门禁 → 合并推送 → worktree/分支即清 → 本日志回写 → 主仓 ref。
 - **剩余队列（顺次）**：AgentAnalyticsSection 1165（卡抽取，2-3 刀）/ CollaborationGraphView 713 / Profile 594 / SandboxDrawer 554 / agents analytics-types 546 / ExperiencesSection 529 / AgentRuntimeTab 505 / Agents.tsx 1508（并行会话在改，勿碰）。
 - **新沉淀工具脚本**：/tmp/org_split.py、/tmp/cc_split.py、/tmp/tct_split.py（内容锚点+深度配对+名字机械提取的通用拆分脚本骨架，可复制改造）。
+
+## 2026-09-14 迭代 105（webpage）：agents analytics-types 546 行按主题分模块
+
+**做法**：纯类型文件按主题切 7 块（productivity/failure-capability/collaboration/allocation/workload/knowledge-protocol/health，47–126 行/块），analytics-types.ts 保留为 `export *` 聚合桶——对外名称集合不变（70 个导出，tsc 对全消费方验证通过）。类型搬运属零行为变更，验证 = tsc + 既有 151 用例 + build（无需新增用例）。
+
+**结果**：webpage a554dc1 已推。**会话最终台账**：>500 行文件 webpage 17 → 12 个；测试 44 → 151；门禁基线三绿。剩余队列：AgentAnalyticsSection 1165 / Agents.tsx 1508（并行会话）/ CollaborationGraphView 713 / Profile 594 / SandboxDrawer 554 / ExperiencesSection 529 / AgentRuntimeTab 505。
