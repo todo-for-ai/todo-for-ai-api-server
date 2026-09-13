@@ -1243,3 +1243,20 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 - **props 群传子组件**：`<Child {...({ ...data, ...actions, tp })} as any />` 仅作临时通道时集中标注 as any，正式 Props 仍取双 hook ReturnType 交集。
 
 **结果**：tsc + vitest 150 passed + build 全绿；webpage 5063af8 已推。TaskDetail 组件簇 4 文件全部 ≤470 行。>500 台账 webpage 14 个。
+
+## 2026-09-14 迭代 104（webpage）：TaskAnalyticsSection 575 行拆分
+
+**做法**：states+loader（10 个分析端点并发）抽为 useTaskAnalyticsData.ts（67 行，挂载即拉默认 30 天窗口）；最大卡「任务生命周期+逾期趋势」（175 行）抽为 TaskOverdueAnalyticsCard.tsx（显式双 prop）；主文件 399 行。
+
+**测试**：1 个 hook 用例（10 端点默认窗口参数逐一断言）；总计 150→151。
+
+**经验（本轮 3 次返端正视）**：脚本拼接大文件头时 `'\n'.join(lines[:a])` 后直接续接新行、缺少显式 '\n' 会把组件声明与 import 粘成一行；解构列表逐名追加逗号再 join 产生 `,,`（第 4 次踩到，统一定式：**生成后一律跑一遍 `replace(',,', ',')`**）；子组件里用到的模块级解构（const { Text } = Typography / TextArea）不随 import 块自动迁移，需显式补。连续两轮验证：**改动后先 `python` 括号平衡扫描（(){}/ 三计数）再 tsc**，能把结构坏损定位从 tsc 的错位报错缩到真实行。
+
+**结果**：tsc + vitest 151 passed + build 全绿；webpage a9082b3 已推。dashboard/ 目录簇（useDashboardData/TaskAnalyticsSection/TaskOverdueAnalyticsCard + hooks）全部 <500。
+
+## 2026-09-14 会话收尾台账（98–104，本轮 7 轮全绿）
+
+- **webpage**：>500 行文件 17 个 → **13 个**（本轮消解 useDashboardData 831、tasks.ts 606、OrganizationDetail 1257、CommandCenter 961、TaskCollaborationTimeline 767、agents/index 613、TaskAnalyticsSection 575；Agents.tsx 1508 由并行会话推进至 1508→本轮未触碰避免冲突）。测试 44 → **151**（+107，全部为拆分模块的契约/行为/纯函数覆盖）。门禁基线：tsc -b + vitest + vite build 三绿。
+- **迭代纪律**：每轮 = 拆分（内容锚点+深度配对+原子写盘）→ 立即 tsc → 单测补齐（重构处新模块行覆盖 ~100%，构造性不可达防御分支留档）→ 全量门禁 → 合并推送 → worktree/分支即清 → 本日志回写 → 主仓 ref。
+- **剩余队列（顺次）**：AgentAnalyticsSection 1165（卡抽取，2-3 刀）/ CollaborationGraphView 713 / Profile 594 / SandboxDrawer 554 / agents analytics-types 546 / ExperiencesSection 529 / AgentRuntimeTab 505 / Agents.tsx 1508（并行会话在改，勿碰）。
+- **新沉淀工具脚本**：/tmp/org_split.py、/tmp/cc_split.py、/tmp/tct_split.py（内容锚点+深度配对+名字机械提取的通用拆分脚本骨架，可复制改造）。
