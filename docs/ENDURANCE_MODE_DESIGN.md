@@ -107,9 +107,9 @@ LEASE_DURATION_SECONDS=300             # 更长租约，续约窗口更宽松
 
 ## 6. 后续路线（按杠杆排序）
 
-1. **R2 轮次上下文延续**（治根因 #6，质量关键）：GoalLoop 派发 payload 附带上一轮的
-   完成摘要 + 失败归因（数据都在 `plan`/`recent_history`/attempts 里，只差注入 prompt）；
-   workspace 级 `PROGRESS.md`/检查点 ref 跨轮持久化。
+1. **R2 轮次上下文延续**（治根因 #6，质量关键）：**服务侧已于 v3 落地（见 §9）**——
+   循环上下文走廊（目标+压缩摘要+近轮明细）注入每个轮次任务。剩余：workspace 级
+   `PROGRESS.md`/检查点 ref 跨项目持久化。
 2. **R3 turn 级续跑**：agent-runtime 已落地 turn 级 git checkpoint
    （`src/sandbox/turn_checkpoints.py`，尚未接线）。给 executor 增加「单任务多 turn」循环 +
    checkpoint 恢复 + 会话 resume 锚点（claude `--resume`），单任务内部就能跑数小时，
@@ -168,3 +168,41 @@ LEASE_DURATION_SECONDS=300             # 更长租约，续约窗口更宽松
 `tests/unit/api/test_graceful_quota.py`（11 用例）：归因码/关键词、额度失败升级不生成修复子任务、
 上报幂等、窗口过期自愈、pull 熔断门、循环任务额度失败强制 STALLED、
 trailing_failure_streak、extend 拒绝/complete 放行。
+
+## 9. v3（2026-09-13，feat/loop-context-compression）：循环上下文走廊与自动压缩
+
+问题：轮次任务逐轮物化，但执行者每轮「失忆」——不知道前几轮干了什么、失败过什么；
+全量塞历史又随轮数无限膨胀，烧 token 且稀释注意力。
+
+### 9.1 三层走廊（`services/goal_loop/context.py::build_corridor`）
+
+注入每个轮次任务内容顶部（`create_round_task`），pull/push 两条派发路径自动携带：
+
+1. **目标层**：goal_text + done_definition（每轮必带，防长跑跑偏）；
+2. **压缩层**：`goal_loops.context_digest`——早期轮次的滚动压缩摘要；
+3. **明细层**：最近 `GOAL_LOOP_CONTEXT_RECENT_ROUNDS`（默认 3）轮保留标题/状态/失败归因。
+
+无历史轮次的首轮不注入（零开销）。走廊整体有硬性上界
+`CONTEXT_MAX_CORRIDOR_CHARS=6000`，超限先裁明细、再硬截——注入 prompt 的
+上下文规模有确定性上界（自动清理的确定性保证）。
+
+### 9.2 滚动压缩（`compress_digest` / `maybe_compress`）
+
+- **增量**：只压缩 `context_digest_upto` 之后、将滑出明细层的终态轮次，摘要滚动向前；
+- **节奏**：每累积 `GOAL_LOOP_COMPRESS_EVERY`（默认 3）个新终态轮才刷一次，
+  控制压缩本身的 LLM 开销；状态机在物化下一轮前调用，新轮次拿到最新记忆；
+- **双引擎**：LLM 可用走语义压缩（保留产出/结论/失败原因/教训，输出 JSON digest），
+  失败或无 key 自动降级抽取式（紧凑清单）——长跑记忆不因 LLM 故障断档；
+- **幂等**：压缩后推进 `context_digest_upto`，重复调用零副作用；
+- 任何压缩异常只记日志，绝不阻断循环推进。
+
+### 9.3 存储
+
+迁移 000025：`goal_loops` 增加 `context_digest`（TEXT）/`context_digest_upto`（INT）；
+API `to_dict` 暴露 `has_context_digest` 布尔（不回传全文，保持载荷轻）。
+
+### 9.4 测试
+
+`tests/unit/services/test_goal_loop_context.py`（12 用例）：走廊三层/空历史零开销/
+硬上界截断、压缩增量+幂等、LLM 语义压缩与降级、节奏控制、异常不阻断、
+create_round_task 注入与首轮豁免。迁移脚本 SQLite/MySQL 双方言 + 幂等冒烟。
