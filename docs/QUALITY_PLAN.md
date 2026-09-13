@@ -1388,3 +1388,7 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 第二次尝试（数据 hook .tsx + 五 Modal Bundle 组件方案）推进到 tsc 阶段后发现：**Workflows 数据区含 JSX-returning useMemo（数据 hook 必须为 .tsx）**，且子目录化后全部导入需 ../../ 深度修正（原文件导入块横跨 antd/icons/api/components 多段）。方案本身可行（.tsx 数据 hook + Bundle Modals），但完整收敛需「跨组 type 导入补全 + 路径深度修正 + 120 名解构校验」三轮迭代，窗口内未完成，已完整回滚（git checkout 恢复，0 差异）。**下次专项的现成起点**：切分锚点已勘定（states_start/ret_idx/五个 Modal 注释行），head 构造用「decl 前全量导入块 + 显式新增导入」。
 
 **回滚纪律再次验证**：git status 发现 workflows/ 目录历史组件被 rm -rf 误删 → git checkout -- 即时恢复（零损失）。
+
+## 2026-09-14 收尾补记：CollaborationGraphView 674 → 620 力导向 hook（迭代 116 后续验证）
+
+迭代 116 的 useForceSimulation 抽取已验证：渲染行为测试（force 布局 rAF 桩）全绿，组件 688 → 620。协作图簇现状：View 620 / Shared 99 / ForceSim 108 / 渲染行为测试 6 用例。剩余 620 行为「节点/边 SVG 渲染 + 悬停/拖拽覆盖 + 缩放平移」紧耦合体——后续拆分建议：先补指针交互（拖拽/平移/滚轮）回归测试，再按「渲染单元格子组件 × 交互 hook」两刀拆分。
