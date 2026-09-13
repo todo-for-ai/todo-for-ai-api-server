@@ -38,6 +38,7 @@ notify_task_finished = _sm.notify_task_finished
 create_loop = _sm.create_loop
 update_guardrails = _sm.update_guardrails
 set_status = _sm.set_status
+set_successor = _sm.set_successor
 watchdog_sweep = _w.watchdog_sweep
 
 # ── 历史私有名别名（测试与既有内部引用）──

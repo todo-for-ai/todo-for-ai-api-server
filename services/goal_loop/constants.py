@@ -11,6 +11,10 @@ ACTIVE_TASK_STATUSES = {TaskStatus.TODO, TaskStatus.IN_PROGRESS, TaskStatus.REVI
 MAX_ROUNDS_LIMIT = 2000
 MAX_TIME_BUDGET_HOURS = 24 * 30
 
+# 目标链式接续的单次触发递归深度上限：A 终态→唤醒 B→B 若立刻终态→唤醒 C…
+# 超限的后继保持 RUNNING，由看门狗漏触发自愈兜底推进（幂等）
+MAX_CHAIN_DEPTH = 32
+
 
 def clamp_int(value, lo, hi, default=None):
     """护栏参数钳制；非法输入返回 default（None 表示调用方自行决定）。"""

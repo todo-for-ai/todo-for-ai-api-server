@@ -69,6 +69,12 @@ class GoalLoop(BaseModel):
     plan_index = Column(Integer, nullable=False, default=0, comment='下一个待执行步骤下标')
     plan_revision = Column(Integer, nullable=False, default=0, comment='计划重排次数')
 
+    # 目标链式接续：本循环到终态（done/limit_reached/stalled/stopped）后
+    # 自动唤醒后继循环（PAUSED→RUNNING 并推进第一轮），Agent 不因单目标
+    # 完成而闲置；A→B→C 串起来即 FIFO 目标流水线
+    successor_loop_id = Column(Integer, ForeignKey('goal_loops.id'), nullable=True,
+                               comment='后继循环ID（本循环终态后自动接续）')
+
     # 上下文自动压缩：历史轮次滚动压缩成摘要（context_digest）注入后续
     # 轮次的执行者走廊，最近几轮保留明细；context_digest_upto 记录摘要
     # 已覆盖到的最后一个轮次任务 ID（增量压缩 + 幂等）
@@ -99,4 +105,5 @@ class GoalLoop(BaseModel):
         data['has_context_digest'] = bool(self.context_digest)
         data['transient_streak'] = self.transient_streak or 0
         data['retry_after'] = self.retry_after.isoformat() if self.retry_after else None
+        data['successor_loop_id'] = self.successor_loop_id
         return data

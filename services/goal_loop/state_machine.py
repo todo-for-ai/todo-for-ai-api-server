@@ -11,6 +11,7 @@ from .constants import (
     DEFAULT_PLANNER_TRANSIENT_LIMIT,
     DEFAULT_ROUNDS_LIMIT,
     DEFAULT_STALL_LIMIT,
+    MAX_CHAIN_DEPTH,
     MAX_ROUNDS_LIMIT,
     MAX_TIME_BUDGET_HOURS,
     clamp_int,
@@ -49,7 +50,7 @@ def _is_transient_planner_error(exc: Exception) -> bool:
     return not any(marker in lowered for marker in _PLANNER_HARD_MARKERS)
 
 
-def _planner_failure(loop, reason: str, exc: Exception) -> dict:
+def _planner_failure(loop, reason: str, exc: Exception, _chain_depth=0) -> dict:
     """规划器故障的分流记账：瞬时 → 退避等待（不烧受阻预算）；其余照常计 stall。
 
     退避中连续失败超过容忍上限后回落到既有 stall 计数（stall_limit 到点
@@ -59,7 +60,9 @@ def _planner_failure(loop, reason: str, exc: Exception) -> dict:
         loop.transient_streak = (loop.transient_streak or 0) + 1
         if loop.transient_streak >= DEFAULT_PLANNER_TRANSIENT_LIMIT:
             loop.retry_after = None
-            return _register_stall(loop, f'{reason}（瞬时故障 {loop.transient_streak} 次超容忍上限）')
+            return _register_stall(
+                loop, f'{reason}（瞬时故障 {loop.transient_streak} 次超容忍上限）',
+                _chain_depth)
         wait = planner_backoff_seconds(loop.transient_streak)
         loop.retry_after = naive_utc_now() + timedelta(seconds=wait)
         loop.last_error = f'{reason}；退避 {wait}s 后自动重试'[:2000]
@@ -73,8 +76,12 @@ def _planner_failure(loop, reason: str, exc: Exception) -> dict:
     return _register_stall(loop, reason)
 
 
-def maybe_advance(loop_id, trigger_task_id=None) -> dict:
-    """推进一次循环（幂等、并发安全）。返回 {advanced: bool, reason: str}。"""
+def maybe_advance(loop_id, trigger_task_id=None, _chain_depth=0) -> dict:
+    """推进一次循环（幂等、并发安全）。返回 {advanced: bool, reason: str}。
+
+    _chain_depth：链式接续的内部递归深度（前驱终态自动唤醒后继时 +1），
+    防止超长链/异常环把调用栈打穿；超限的后继由看门狗漏触发自愈兜底。
+    """
     loop = db.session.get(GoalLoop, loop_id)
     if not loop:
         return {'advanced': False, 'reason': 'loop_not_found'}
@@ -88,7 +95,7 @@ def maybe_advance(loop_id, trigger_task_id=None) -> dict:
         return {'advanced': False, 'reason': 'already_advancing'}
 
     try:
-        return _advance_locked(loop_id, trigger_task_id)
+        return _advance_locked(loop_id, trigger_task_id, _chain_depth=_chain_depth)
     finally:
         try:
             GoalLoop.query.filter_by(id=loop_id).update({'advancing': 0})
@@ -97,7 +104,7 @@ def maybe_advance(loop_id, trigger_task_id=None) -> dict:
             db.session.rollback()
 
 
-def _advance_locked(loop_id, trigger_task_id=None) -> dict:
+def _advance_locked(loop_id, trigger_task_id=None, _chain_depth=0) -> dict:
     loop = db.session.get(GoalLoop, loop_id)
     if not loop or loop.status != GoalLoopStatus.RUNNING:
         return {'advanced': False, 'reason': 'not_running'}
@@ -105,12 +112,14 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
     done = rounds_done(loop.id)
     if done >= loop.rounds_limit:
         _finish(loop, GoalLoopStatus.LIMIT_REACHED,
-                last_error=f'轮数上限 {loop.rounds_limit} 已耗尽，目标未宣告完成')
+                last_error=f'轮数上限 {loop.rounds_limit} 已耗尽，目标未宣告完成',
+                _chain_depth=_chain_depth)
         return {'advanced': False, 'reason': 'rounds_limit'}
 
     if time_budget_exceeded(loop):
         _finish(loop, GoalLoopStatus.LIMIT_REACHED,
-                last_error=f'时长预算 {loop.time_budget_hours} 小时已耗尽，目标未宣告完成')
+                last_error=f'时长预算 {loop.time_budget_hours} 小时已耗尽，目标未宣告完成',
+                _chain_depth=_chain_depth)
         return {'advanced': False, 'reason': 'time_budget_exhausted'}
 
     tasks_all = loop_tasks(loop.id)
@@ -134,7 +143,7 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         try:
             steps = call_decompose(loop)
         except Exception as exc:  # noqa: BLE001
-            return _planner_failure(loop, f'decompose_failed: {exc}', exc)
+            return _planner_failure(loop, f'decompose_failed: {exc}', exc, _chain_depth)
         db.session.expire(loop)
         if loop.status != GoalLoopStatus.RUNNING:
             return {'advanced': False, 'reason': 'not_running_after_planner'}
@@ -171,7 +180,7 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
     try:
         decision = call_review(loop, last_status or 'unknown')
     except Exception as exc:  # noqa: BLE001
-        return _planner_failure(loop, f'review_failed: {exc}', exc)
+        return _planner_failure(loop, f'review_failed: {exc}', exc, _chain_depth)
 
     db.session.expire(loop)
     if loop.status != GoalLoopStatus.RUNNING:
@@ -189,13 +198,15 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         # 记忆沉淀：会话级总结 + 项目级持久结论（失败不影响循环终态）
         from services.memory.loop_hooks import on_loop_completed
         on_loop_completed(loop, loop.completion_summary, rounds_done(loop.id))
+        # 目标链式接续：唤醒后继循环（失败不影响本循环终态）
+        _promote_successor(loop, _chain_depth)
         return {'advanced': False, 'reason': 'completed'}
 
     if action == 'extend':
         steps = decision.get('steps')
         from .planning import valid_steps
         if not valid_steps(steps, loop.rounds_limit):
-            return _register_stall(loop, 'extend_without_valid_steps')
+            return _register_stall(loop, 'extend_without_valid_steps', _chain_depth)
         # 无进展护栏：用户要"死循环"也必须有退出点——连续 N 轮失败后
         # 拒绝继续 extend（宣告 complete 仍被允许），强制计 stall 走
         # STALLED 退出，避免规划器无限换着花样空转烧预算。
@@ -205,6 +216,7 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
                 loop,
                 f'no_progress: 连续 {streak} 轮失败（阈值 {DEFAULT_NO_PROGRESS_ROUNDS}），'
                 '拒绝继续 extend；请人工介入或调整目标后 resume',
+                _chain_depth,
             )
         remaining = list(plan[max(plan_index, 0):])
         loop.plan = remaining + steps
@@ -225,10 +237,10 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         auto_assign(task, executor)
         return {'advanced': True, 'reason': 'plan_extended', 'task_id': task.id}
 
-    return _register_stall(loop, f"blocked: {decision.get('reason') or '未给出原因'}")
+    return _register_stall(loop, f"blocked: {decision.get('reason') or '未给出原因'}", _chain_depth)
 
 
-def _register_stall(loop, reason: str) -> dict:
+def _register_stall(loop, reason: str, _chain_depth=0) -> dict:
     db.session.expire(loop)
     loop.stall_count = (loop.stall_count or 0) + 1
     loop.last_error = reason[:2000]
@@ -242,6 +254,8 @@ def _register_stall(loop, reason: str) -> dict:
         # 记忆沉淀：项目级受阻教训（同类目标重跑时被召回，避免重蹈覆辙）
         from services.memory.loop_hooks import on_loop_blocked
         on_loop_blocked(loop, reason)
+        # 目标链式接续：本循环受阻停车，后继目标顶上（Agent 不闲着）
+        _promote_successor(loop, _chain_depth)
     return {
         'advanced': False,
         'reason': 'stalled' if status_changed else 'stall_counted',
@@ -249,12 +263,46 @@ def _register_stall(loop, reason: str) -> dict:
     }
 
 
-def _finish(loop, status: GoalLoopStatus, last_error: str = None):
+def _finish(loop, status: GoalLoopStatus, last_error: str = None, _chain_depth=0):
     loop.status = status
     if last_error:
         loop.last_error = last_error
     loop.finished_at = naive_utc_now()
     db.session.commit()
+    _promote_successor(loop, _chain_depth)
+
+
+def _promote_successor(loop, depth=0):
+    """目标链式接续：本循环到终态后唤醒后继循环（PAUSED→RUNNING 并推进）。
+
+    CAS（status=PAUSED 才允许更新）防并发双唤醒；推进失败只记日志，
+    绝不影响本循环已落定的终态；递归深度由 maybe_advance 的 _chain_depth
+    封顶（超限后继处于 RUNNING，看门狗漏触发自愈会兜底推进）。
+    """
+    try:
+        sid = loop.successor_loop_id
+        if not sid or depth >= MAX_CHAIN_DEPTH:
+            return None
+        successor = db.session.get(GoalLoop, sid)
+        if not successor or successor.status != GoalLoopStatus.PAUSED:
+            return None
+        claimed = GoalLoop.query.filter_by(id=sid).filter(
+            GoalLoop.status == GoalLoopStatus.PAUSED
+        ).update({
+            'status': GoalLoopStatus.RUNNING,
+            'stall_count': 0,
+            'transient_streak': 0,
+            'retry_after': None,
+        })
+        db.session.commit()
+        if not claimed:
+            return None
+        db.session.expire(successor)
+        maybe_advance(sid, _chain_depth=depth + 1)
+        return sid
+    except Exception:  # noqa: BLE001 - 接续失败绝不影响前驱终态流程
+        db.session.rollback()
+        return None
 
 
 def _record_success_experience(loop):
@@ -289,7 +337,10 @@ def _record_success_experience(loop):
 def create_loop(*, project: Project, agent, title: str, goal_text: str,
                 done_definition: str = None, rounds_limit: int = DEFAULT_ROUNDS_LIMIT,
                 created_by: int = None, director: Agent = None,
-                time_budget_hours: int = None, stall_limit: int = DEFAULT_STALL_LIMIT) -> GoalLoop:
+                time_budget_hours: int = None, stall_limit: int = DEFAULT_STALL_LIMIT,
+                start: bool = True) -> GoalLoop:
+    """创建循环。start=False 时以 PAUSED 起步且不推进——供链式接续把
+    后继目标先挂起，等前驱终态再自动唤醒。"""
     loop = GoalLoop(
         workspace_id=project.organization_id,
         project_id=project.id,
@@ -298,7 +349,7 @@ def create_loop(*, project: Project, agent, title: str, goal_text: str,
         title=title.strip()[:500],
         goal_text=goal_text,
         done_definition=(done_definition or '').strip() or None,
-        status=GoalLoopStatus.RUNNING,
+        status=GoalLoopStatus.RUNNING if start else GoalLoopStatus.PAUSED,
         rounds_limit=clamp_int(rounds_limit, 1, MAX_ROUNDS_LIMIT, DEFAULT_ROUNDS_LIMIT),
         time_budget_hours=clamp_int(time_budget_hours, 1, MAX_TIME_BUDGET_HOURS, None) if time_budget_hours else None,
         stall_limit=clamp_int(stall_limit, 1, 50, DEFAULT_STALL_LIMIT),
@@ -306,7 +357,8 @@ def create_loop(*, project: Project, agent, title: str, goal_text: str,
     )
     db.session.add(loop)
     db.session.commit()
-    maybe_advance(loop.id)
+    if start:
+        maybe_advance(loop.id)
     return loop
 
 
@@ -370,5 +422,49 @@ def set_status(loop_id: int, status: GoalLoopStatus) -> GoalLoop:
         loop.retry_after = None
     if status in (GoalLoopStatus.STOPPED, GoalLoopStatus.DONE):
         loop.finished_at = naive_utc_now()
+    db.session.commit()
+    if status in (GoalLoopStatus.STOPPED, GoalLoopStatus.DONE):
+        # 人工终止/完结也接续后继（stop 的是这个目标，不是整条流水线）
+        _promote_successor(loop, 0)
+    return loop
+
+
+def set_successor(loop_id: int, successor_loop_id) -> GoalLoop:
+    """设置/清除链式接续（successor_loop_id=None 清除）。
+
+    校验：后继必须存在、非本循环、非终态且处于 PAUSED（挂起待命），
+    与本循环同工作区；沿链向前走不得回到本循环（拒绝成环）。
+    """
+    loop = db.session.get(GoalLoop, loop_id)
+    if not loop:
+        raise LookupError('goal_loop_not_found')
+    if loop.status in (GoalLoopStatus.DONE, GoalLoopStatus.STOPPED):
+        raise ValueError('goal_loop_terminal')
+    if successor_loop_id is None:
+        loop.successor_loop_id = None
+        db.session.commit()
+        return loop
+
+    successor = db.session.get(GoalLoop, int(successor_loop_id))
+    if not successor:
+        raise LookupError('successor_not_found')
+    if int(successor_loop_id) == int(loop.id):
+        raise ValueError('successor_self_reference')
+    if successor.workspace_id != loop.workspace_id:
+        raise ValueError('successor_workspace_mismatch')
+    if successor.status != GoalLoopStatus.PAUSED:
+        raise ValueError('successor_not_paused')
+
+    # 成环检测：从后继沿链向前，不允许回到本循环
+    cursor, hops = successor, 0
+    while cursor.successor_loop_id and hops < MAX_CHAIN_DEPTH:
+        if int(cursor.successor_loop_id) == int(loop.id):
+            raise ValueError('successor_chain_cycle')
+        cursor = db.session.get(GoalLoop, cursor.successor_loop_id)
+        if not cursor:
+            break
+        hops += 1
+
+    loop.successor_loop_id = int(successor_loop_id)
     db.session.commit()
     return loop

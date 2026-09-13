@@ -241,3 +241,45 @@ create_round_task 注入与首轮豁免。迁移脚本 SQLite/MySQL 双方言 + 
 `tests/unit/services/test_goal_loop_planner_backoff.py`（9 用例）：退避调度表、
 分类边界（超时/5xx/限流 vs 401/额度/坏输出）、退避不烧 stall、窗口内跳过、
 窗口过后自愈重建任务并清零、持续故障回落 STALLED、resume 清零。
+
+## 11. v5（2026-09-13，feat/goal-loop-chain）：目标链式接续
+
+### 11.1 问题
+
+单循环架构下 Agent 的断档：循环到达终态（done/limit_reached/stalled/stopped）
+后 Agent 就闲置——项目里排队的下一个目标不会自动接续，用户必须手工创建/
+resume。"持续执行"的最后一块拼图：目标做完了，Agent 不该没事干。
+
+### 11.2 语义
+
+- **数据模型**：`goal_loops.successor_loop_id`（迁移 000029，自引用 FK，
+  可空）。A→B→C 串起来即 FIFO 目标流水线；每条链一跳，建多了自然成队列。
+  不新增 QUEUED 状态：后继以既有 PAUSED 状态挂起（避免双方言 enum 手术）。
+- **提升时机**：前驱到终态的全部四条路径同步提升——DONE（评审宣告完成）、
+  LIMIT_REACHED（轮数/时长预算耗尽，目标没完成也接续下一个）、STALLED
+  （受阻停车）、人工 stop（停的是这个目标，不是整条流水线）；人工 PAUSED
+  不提升（挂起是故意的）。
+- **提升动作**：CAS（status=PAUSED 才允许 update）防并发双唤醒；成功后
+  maybe_advance(后继) 立即拆解并物化第一轮；若后继也立刻终态则递归接续，
+  递归深度 MAX_CHAIN_DEPTH=32 封顶（超限的后继保持 RUNNING，看门狗
+  漏触发自愈兜底推进——幂等）。提升失败只记日志，绝不影响前驱已落定的终态。
+- **API**：POST 创建时 `chain_next` 内联规格（title/goal_text 必填，
+  agent/director/护栏缺省继承父循环）或 `successor_loop_id` 直引既有
+  PAUSED 循环；PUT `successor_loop_id` 改链/清链（显式 null=清除）。
+  校验：后继存在、非自身、非终态且 PAUSED、同工作区、沿链向前不成环。
+
+### 11.3 派发工作时间窗门（顺手修）
+
+`assign_task_to_agent` 此前只过额度/容量/预算三道门，pick_executor 兜底
+回退绑定 Agent 时可能选中窗外执行者，立即建租约+WS 推送（在岗判断被绕过）。
+现补第四道门：窗外不派，任务留 TODO，开窗后由 pull 兜底接起（fail-open：
+区间数据异常放行）。注：跨窗 >6h 的 TODO 轮会被看门狗卡死处置取消→评审
+extend 重新物化——开窗后自然恢复，自愈路径成立。
+
+### 11.4 测试
+
+`tests/unit/api/test_goal_loop_chain.py`（12 用例）：chain_next 创建挂起
+后继/直引/校验（不存在/非 PAUSED）、四终态提升、PAUSED 不提升、三环链
+传递、改链/清链/成环拒绝/终态拒绝、派发窗口门挡下与放行。
+既有 CAS 回归测试的 `_advance_locked` 打桩签名补 **kwargs（内部签名加
+_chain_depth 关键字参数）。

@@ -100,6 +100,78 @@ def list_goal_loops(project_id: int):
         return handle_api_error(e)
 
 
+def _set_successor_or_error(loop: GoalLoop, successor_loop_id):
+    """设置链式接续并把服务层校验错误映射为 HTTP 响应。"""
+    try:
+        goal_loop_service.set_successor(loop.id, successor_loop_id)
+    except LookupError:
+        return ApiResponse.error(
+            'Successor goal loop not found', 404,
+            error_details={'code': 'SUCCESSOR_NOT_FOUND'},
+        ).to_response()
+    except ValueError as ve:
+        code = str(ve)
+        mapping = {
+            'successor_self_reference': 'successor cannot be the loop itself',
+            'successor_workspace_mismatch': 'successor workspace mismatch',
+            'successor_not_paused': 'successor must be a PAUSED (queued) loop',
+            'successor_chain_cycle': 'successor chain would form a cycle',
+        }
+        message = mapping.get(code, f'invalid successor: {code}')
+        return ApiResponse.error(message, 400,
+                                 error_details={'code': code.upper()}).to_response()
+    return None
+
+
+def _create_chained_successor(project, spec, current_user, default_agent, default_director):
+    """按 chain_next 规格创建 PAUSED 后继循环。返回 (loop, error_response)。
+
+    spec 未指定 agent/director 时缺省继承父循环的解析结果
+    （agent_id 列非空，后继必须有绑定执行者）。
+    """
+    from services.goal_loop.constants import DEFAULT_ROUNDS_LIMIT, DEFAULT_STALL_LIMIT
+
+    title = (spec.get('title') or '').strip()
+    goal_text = (spec.get('goal_text') or '').strip()
+    if not title or not goal_text:
+        return None, ApiResponse.error(
+            'chain_next requires title and goal_text', 400,
+            error_details={'code': 'CHAIN_NEXT_INVALID'},
+        ).to_response()
+
+    agent = default_agent
+    if spec.get('agent_id'):
+        agent = db.session.get(Agent, int(spec['agent_id']))
+        if not agent or agent.workspace_id != project.organization_id:
+            return None, ApiResponse.error(
+                'chain_next agent not found in workspace', 400,
+                error_details={'code': 'AGENT_WORKSPACE_MISMATCH'},
+            ).to_response()
+    director = default_director
+    if spec.get('director_agent_id'):
+        director = db.session.get(Agent, int(spec['director_agent_id']))
+        if not director or director.workspace_id != project.organization_id:
+            return None, ApiResponse.error(
+                'chain_next director not found in workspace', 400,
+                error_details={'code': 'DIRECTOR_WORKSPACE_MISMATCH'},
+            ).to_response()
+
+    successor = goal_loop_service.create_loop(
+        project=project,
+        agent=agent,
+        title=title,
+        goal_text=goal_text,
+        done_definition=spec.get('done_definition'),
+        rounds_limit=spec.get('rounds_limit') or DEFAULT_ROUNDS_LIMIT,
+        created_by=current_user.id,
+        director=director,
+        time_budget_hours=spec.get('time_budget_hours'),
+        stall_limit=spec.get('stall_limit') or DEFAULT_STALL_LIMIT,
+        start=False,
+    )
+    return successor, None
+
+
 @projects_bp.route('/<int:project_id>/goal-loops', methods=['POST'])
 @unified_auth_required
 def create_goal_loop(project_id: int):
@@ -187,8 +259,23 @@ def create_goal_loop(project_id: int):
             time_budget_hours=time_budget_hours,
             stall_limit=stall_limit,
         )
+
+        # 目标链式接续：chain_next 内联规格创建 PAUSED 后继，或直引既有循环
+        successor_loop_id = data.get('successor_loop_id')
+        chain_next = data.get('chain_next')
+        if chain_next:
+            successor, cerr = _create_chained_successor(
+                project, chain_next, current_user, agent, director)
+            if cerr:
+                return cerr
+            successor_loop_id = successor.id
+        if successor_loop_id:
+            serr = _set_successor_or_error(loop, successor_loop_id)
+            if serr:
+                return serr
+
         return ApiResponse.success(
-            data=_loop_with_tasks(loop), message='Goal loop created'
+            data=_loop_with_tasks(_get_loop(loop.id)), message='Goal loop created'
         ).to_response()
     except Exception as e:  # noqa: BLE001
         return handle_api_error(e)
@@ -235,6 +322,7 @@ def update_goal_loop(loop_id: int):
         rounds_limit = data.get('rounds_limit')
         time_budget_hours = data.get('time_budget_hours')
         stall_limit = data.get('stall_limit')
+        successor_loop_id = data.get('successor_loop_id')  # 显式传 None=清除接续
 
         try:
             if rounds_limit is not None and not (1 <= int(rounds_limit) <= 2000):
@@ -246,7 +334,8 @@ def update_goal_loop(loop_id: int):
         except (TypeError, ValueError):
             return ApiResponse.error('rounds_limit/time_budget_hours/stall_limit must be integers', 400).to_response()
 
-        if rounds_limit is None and time_budget_hours is None and stall_limit is None:
+        if (rounds_limit is None and time_budget_hours is None and stall_limit is None
+                and 'successor_loop_id' not in data):
             return ApiResponse.error('nothing to update', 400).to_response()
 
         try:
@@ -263,6 +352,11 @@ def update_goal_loop(loop_id: int):
                 'Terminal loops (done/stopped) cannot be adjusted', 409,
                 error_details={'code': 'GOAL_LOOP_TERMINAL'},
             ).to_response()
+
+        if 'successor_loop_id' in data:
+            serr = _set_successor_or_error(_get_loop(loop_id), successor_loop_id)
+            if serr:
+                return serr
 
         return ApiResponse.success(
             data=_loop_with_tasks(_get_loop(loop_id)), message='Goal loop updated'

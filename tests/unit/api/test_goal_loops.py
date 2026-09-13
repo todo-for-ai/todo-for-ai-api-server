@@ -900,7 +900,7 @@ class TestStateMachineGuards:
         loop = svc.create_loop(project=env["project"], agent=env["agent"],
                                title="CAS", goal_text="g", created_by=env["user"].id)
 
-        def boom(loop_id, trigger_task_id=None):
+        def boom(loop_id, trigger_task_id=None, **kwargs):
             raise RuntimeError("inner boom")
 
         monkeypatch.setattr("services.goal_loop.state_machine._advance_locked", boom)
