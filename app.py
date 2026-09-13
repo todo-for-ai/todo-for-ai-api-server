@@ -168,6 +168,7 @@ def register_blueprints(app):
     
     # 注册API蓝图
     from api.auth import auth_bp
+    from api.memory import memory_bp
     from api.projects import projects_bp
     from api.tasks import tasks_bp
     from api.context_rules import context_rules_bp
@@ -235,6 +236,7 @@ def register_blueprints(app):
     from api.system_monitor import system_monitor_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
+    app.register_blueprint(memory_bp, url_prefix='/todo-for-ai/api/v1/memory')
     app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
     app.register_blueprint(tasks_bp, url_prefix='/todo-for-ai/api/v1/tasks')
     app.register_blueprint(context_rules_bp, url_prefix='/todo-for-ai/api/v1/context-rules')

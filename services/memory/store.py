@@ -22,7 +22,8 @@ log = logging.getLogger(__name__)
 
 
 def remember(scope, kind, title, content, *, source_type='manual',
-             source_task_id=None, agent_id=None, confidence=70) -> dict:
+             source_task_id=None, agent_id=None, confidence=70,
+             human_edited=False) -> dict:
     """写一条作用域记忆（幂等）。返回 {'memory': row, 'created': bool}。"""
     key = dedupe_key_of(title, content)
     existing = AgentMemory.query.filter_by(
@@ -32,8 +33,10 @@ def remember(scope, kind, title, content, *, source_type='manual',
         dedupe_key=key,
     ).first()
     if existing:
-        # 重复验证：置信度小幅上调（封顶 95）
+        # 重复验证：置信度小幅上调（封顶 95）；人工来源补标 human_edited
         existing.confidence = min(95, int(existing.confidence or 0) + 5)
+        if human_edited:
+            existing.human_edited = 1
         db.session.commit()
         return {'memory': existing, 'created': False}
 
@@ -48,6 +51,7 @@ def remember(scope, kind, title, content, *, source_type='manual',
         source_task_id=source_task_id,
         agent_id=agent_id,
         confidence=max(0, min(100, int(confidence))),
+        human_edited=1 if human_edited else 0,
         dedupe_key=key,
         created_by=f'system:memory:{source_type}',
     )
@@ -114,7 +118,12 @@ def _recall_scope(ref, keywords, per_scope):
             matched.append({
                 'row': row,
                 'snippet': _snippet(row.content, keywords),
-                'confidence': int(row.confidence or 0) + score * 5,
+                # 人工创建/编辑过的记忆可信度更高（+10 排序加权）
+                'confidence': (
+                    int(row.confidence or 0)
+                    + (10 if row.human_edited else 0)
+                    + score * 5
+                ),
                 '_precedence': list(SCOPE_PRECEDENCE).index(
                     MemoryScopeType(row.scope_type)
                 ),
@@ -163,3 +172,85 @@ def format_memory_lines(hits) -> list:
             line += f"：{h['snippet']}"
         lines.append(line)
     return lines
+
+
+# ── 用户开放编辑（REST API 背后的存取层） ──────────────────────────────
+
+
+def list_memories(organization_id, scope_type=None, scope_id=None, kind=None,
+                  keyword=None, include_invalid=False, page=1, page_size=20) -> dict:
+    """分页列出组织内记忆（租户边界内；用户编辑界面的数据源）。"""
+    from sqlalchemy import or_
+
+    page = max(1, int(page or 1))
+    page_size = max(1, min(100, int(page_size or 20)))
+    filters = [AgentMemory.organization_id == int(organization_id)]
+    if not include_invalid:
+        filters.append(AgentMemory.is_valid == 1)
+    if scope_type:
+        filters.append(AgentMemory.scope_type == str(scope_type))
+    if scope_id is not None:
+        filters.append(AgentMemory.scope_id == int(scope_id))
+    if kind:
+        filters.append(AgentMemory.kind == str(kind))
+    if keyword and str(keyword).strip():
+        kw = f'%{str(keyword).strip()}%'
+        filters.append(or_(
+            AgentMemory.title.ilike(kw),
+            AgentMemory.content.ilike(kw),
+        ))
+
+    q = AgentMemory.query.filter(*filters).order_by(AgentMemory.id.desc())
+    total = q.count()
+    rows = q.offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        'items': [r.to_dict() for r in rows],
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+    }
+
+
+def get_memory(memory_id, organization_id):
+    """按 ID 取记忆（强制租户边界；跨组织视为不存在）。"""
+    return AgentMemory.query.filter_by(
+        id=int(memory_id), organization_id=int(organization_id),
+    ).first()
+
+
+def get_memory_any(memory_id):
+    """按 ID 直查（不带租户过滤——调用方必须自行校验组织成员资格）。"""
+    return db.session.get(AgentMemory, int(memory_id))
+
+
+def update_memory(memory_id, organization_id, *, title=None, content=None,
+                  kind=None, confidence=None) -> dict:
+    """人工编辑一条记忆（幂等去重键随新内容重算；标记 human_edited）。"""
+    row = get_memory(memory_id, organization_id)
+    if row is None or not row.is_valid:
+        return {'memory': None, 'updated': False}
+
+    if title is not None:
+        row.title = str(title).strip()[:500] or row.title
+    if content is not None:
+        new_content = str(content).strip()
+        if new_content:
+            row.content = new_content
+    if kind is not None and str(kind).strip():
+        row.kind = str(kind).strip()
+    if confidence is not None:
+        row.confidence = max(0, min(100, int(confidence)))
+    row.dedupe_key = dedupe_key_of(row.title, row.content)
+    row.human_edited = 1
+    db.session.commit()
+    return {'memory': row, 'updated': True}
+
+
+def forget_by_id(memory_id, organization_id) -> bool:
+    """按 ID 软删（遗忘）。跨组织/已失效返回 False。"""
+    row = get_memory(memory_id, organization_id)
+    if row is None or not row.is_valid:
+        return False
+    row.is_valid = 0
+    db.session.commit()
+    return True

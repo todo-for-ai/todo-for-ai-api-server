@@ -51,7 +51,7 @@ def upgrade(connection):
                 title VARCHAR(500) NOT NULL,
                 content TEXT NOT NULL,
                 source_type VARCHAR(50) NULL,
-                source_task_id INT NULL,
+                source_task_id BIGINT NULL,
                 agent_id INT NULL,
                 confidence INT NULL,
                 is_valid INT NOT NULL DEFAULT 1,

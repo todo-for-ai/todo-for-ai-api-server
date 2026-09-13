@@ -75,6 +75,8 @@ class AgentMemory(BaseModel):
                         comment='置信度 0-100（经验类默认 70，人工确认 90+）')
     is_valid = Column(Integer, nullable=False, default=1, index=True,
                       comment='1=有效，0=已遗忘（软删除）')
+    human_edited = Column(Integer, nullable=False, default=0, index=True,
+                          comment='1=被人工创建/编辑过（召回排序加权 + 治理审计）')
     access_count = Column(Integer, nullable=False, default=0, comment='被召回次数')
     last_accessed_at = Column(DateTime, comment='最近一次被召回时间')
     expires_at = Column(DateTime, nullable=True,

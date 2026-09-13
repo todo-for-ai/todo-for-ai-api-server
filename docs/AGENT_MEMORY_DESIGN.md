@@ -127,3 +127,44 @@ services/memory/
   `run_id` 可映射 session/agent 维度（Phase 2）；
 - REST API（按维度 CRUD/召回）与组织级记忆管理界面为 Phase 2；
 - 会话维度当前映射 GoalLoop 运行，未来对话式会话可直接复用该维度。
+
+## 6. Phase 2（2026-09-13，feat/memory-user-api）：记忆开放给用户编辑
+
+记忆不再是纯系统内部物——提供作用域化 REST API，用户可直接查看、创建、
+编辑、遗忘各维度的记忆。
+
+### 6.1 API（/todo-for-ai/api/v1/memory，挂载于 memory_bp）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET / | 列表 | 过滤：scope_type/scope_id/kind/q（关键词）/分页；include_invalid=true 可见已遗忘 |
+| POST / | 创建 | 人工来源（source_type=human），默认置信度 90，自动标 human_edited；同内容幂等去重 |
+| GET /\<id\> | 详情 | |
+| PUT /\<id\> | 编辑 | title/content/kind/confidence；重算 dedupe_key（后续自动写入同内容会去重命中人工版）；标 human_edited |
+| DELETE /\<id\> | 遗忘 | 软删（is_valid=0），可审计可追溯 |
+| POST /recall | 召回预览 | 给定 query + 项目/Agent/循环上下文，返回 agent 实际会看到的带维度标签记忆 |
+
+### 6.2 授权矩阵（读取=组织成员；写入按维度收紧）
+
+| 维度 | 创建/编辑/遗忘 |
+|---|---|
+| organization | 组织 owner/admin（can_manage_organization） |
+| project | 项目 owner/maintainer（can_manage_project） |
+| agent | Agent 所有者或组织管理者 |
+| user | 仅本人（scope_id == 当前用户） |
+| session | 拒绝手工写入（400 SESSION_SCOPE_SYSTEM_MANAGED，系统管理） |
+
+跨组织访问一律 404（不泄漏存在性）；普通组织成员可读不可写（项目/Agent/
+组织维度的写权与管理权对齐——治理语义与平台既有权限模型一致）。
+
+### 6.3 human_edited 信任信号
+
+人工创建/编辑的记忆：召回排序加权（+10 置信分）——用户校准过的记忆优先
+于机器沉淀；同时作为治理审计字段（哪些记忆被人动过）。
+
+### 6.4 测试
+
+`tests/unit/api/test_memory_user_api.py`（16 用例）：授权矩阵全覆盖
+（组织/项目/Agent/user/session × owner/成员/局外人）、创建去重、
+编辑重算键+标记、遗忘软删与幂等、跨组织 404、召回预览与隔离、
+human_edited 排序优先。迁移 000027（human_edited 列）双方言冒烟。
