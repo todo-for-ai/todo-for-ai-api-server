@@ -1362,3 +1362,11 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **结论（CollaborationGraphView 剩余部分单列）**：688 行剩余为力导向 rAF 模拟、拖拽/缩放指针交互与 SVG 单元渲染的紧耦合体——**无组件级行为测试安全网前不做深拆**（拆分收益 < 回归风险）。后续路径：先补 RTL 渲染冒烟 + 交互回归测试，再按 nodePos/力导向/指针交互三刀拆分。
 
 **结果**：tsc + vitest 195 passed + build 全绿；webpage 877a784 已推。
+
+## 2026-09-14 迭代 114（webpage）：CollaborationGraphView 渲染行为安全网
+
+**做法**：为交互式图组件补 6 个 RTL 渲染级行为测试（3 布局 × fixture、filterKinds 过滤使异类节点消失、minCount 过滤低消息边并隐藏孤立节点、showEdgeLabels 渲染边消息数、空数据空态、force 布局 rAF 桩）——这是 113 轮拆分前置条件「行为安全网」的落地；总计 195 → **201 passed**。
+
+**经验**：filterKinds 过滤会让失去存活边的节点级联隐藏（孤立节点随之消失），断言需按图论语义而非简单计数；jsdom 无 rAF，force 布局测试用 vi.fn 桩 + 手动触发回调。
+
+**会话最终态**：webpage >500 行 **4 个**（Agents.tsx 1508 并行会话、Workflows 770 人工专项、CollaborationGraphView 688 安全网已就绪可拆、其余均 <500）；测试 44 → 201；拆分模块行覆盖 100%。
