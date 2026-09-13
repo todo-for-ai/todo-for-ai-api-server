@@ -101,6 +101,10 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
 
     # ── ② 计划有剩余步骤 且 上轮成功（或首轮）：直接物化下一步 ──
     if plan_index < len(plan) and (last_status in (None, 'done')):
+        # 上下文自动压缩：物化前按节奏滚动刷新历史摘要，
+        # 保证新轮次的执行者拿到最新记忆（失败只记日志不阻断）
+        from .context import maybe_compress
+        maybe_compress(loop)
         step = plan[plan_index]
         executor = pick_executor(loop, step)
         task = create_round_task(loop, step, executor)
@@ -154,6 +158,8 @@ def _advance_locked(loop_id, trigger_task_id=None) -> dict:
         loop.plan = remaining + steps
         loop.plan_index = max(plan_index, 0)
         loop.plan_revision = (loop.plan_revision or 0) + 1
+        from .context import maybe_compress
+        maybe_compress(loop)
         step = loop.plan[loop.plan_index]
         executor = pick_executor(loop, step)
         task = create_round_task(loop, step, executor)

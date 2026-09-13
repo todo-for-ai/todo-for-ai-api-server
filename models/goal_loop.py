@@ -63,6 +63,12 @@ class GoalLoop(BaseModel):
     plan_index = Column(Integer, nullable=False, default=0, comment='下一个待执行步骤下标')
     plan_revision = Column(Integer, nullable=False, default=0, comment='计划重排次数')
 
+    # 上下文自动压缩：历史轮次滚动压缩成摘要（context_digest）注入后续
+    # 轮次的执行者走廊，最近几轮保留明细；context_digest_upto 记录摘要
+    # 已覆盖到的最后一个轮次任务 ID（增量压缩 + 幂等）
+    context_digest = Column(Text, comment='滚动压缩的历史轮次摘要（上下文走廊的压缩层）')
+    context_digest_upto = Column(Integer, comment='摘要已覆盖到的最后一个轮次任务 ID')
+
     started_at = Column(DateTime, comment='首次推进时间')
     finished_at = Column(DateTime, comment='进入终态时间')
 
@@ -84,4 +90,5 @@ class GoalLoop(BaseModel):
         data['plan_revision'] = self.plan_revision or 0
         data['director_agent_id'] = self.director_agent_id
         data['time_budget_hours'] = self.time_budget_hours
+        data['has_context_digest'] = bool(self.context_digest)
         return data

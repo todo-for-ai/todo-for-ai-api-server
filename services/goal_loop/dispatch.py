@@ -98,9 +98,18 @@ def create_round_task(loop, step: dict, executor: Agent = None) -> Task:
         role_name = (role_context(executor).get('role') or '').strip()
     content = (step.get('content') or step.get('title') or '').strip()
     role_line = f"【执行角色：{role_name}】\n" if role_name else ''
+    # 上下文走廊：目标 + 历史压缩摘要 + 最近轮次明细（有历史轮次才注入；
+    # 长跑的记忆层——执行者不再失忆，且规模有确定性上界）
+    corridor = ''
+    try:
+        from .context import build_corridor
+        corridor = build_corridor(loop)
+    except Exception:  # noqa: BLE001 - 走廊构建失败不阻断派发
+        pass
+    corridor_block = f"{corridor}\n\n" if corridor else ''
     task = Task(
         title=(step.get('title') or f'{loop.title} · 下一轮').strip()[:500],
-        content=f"{role_line}{content}",
+        content=f"{corridor_block}{role_line}{content}",
         project_id=loop.project_id,
         owner_id=loop.created_by,
         is_ai_task=True,
