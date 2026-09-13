@@ -1283,3 +1283,45 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **测试**：151 → **180 passed**。**工具经验**：v8 text 报告的 Uncovered 行号列会被截断，精确行号用 `--coverage.reporter=json` + coverage-final.json 解析 statementMap；「expected Target cannot be null or undefined」= chai toHaveLength 收到 undefined，多为 hook 组合对象键缺失或断言时机过早。
 
 **结果**：tsc + vitest 180 passed + build 全绿；webpage 58acca0 已推。
+
+## 2026-09-14 迭代 107（webpage）：AgentAnalyticsSection 1165 行拆分
+
+**做法**：数据层（34 组状态 + 挂载 30 端点并发 + 健康趋势/告警重载）抽为 useAgentAnalyticsData.ts（191 行）；JSX 卡片族按主题分 4 个 Bundle-props 子组件——ProductivityCards 334（按类别对比/小时热力/日历热力/运行资源/周间对比/失败原因/错误模式）、CapabilityCards 227（能力缺口/分配公平/资源趋势）、TaskAnalysisCards 375（依赖链/技能/情感/返工/工作负载/专业化/衰减/跨项目/供需）、OpsAlertCards 329（闲置/传播/协议时延/交接/低效与健康告警/状态流转/冲突监控）；阶段配色助手沉淀 agentAnalyticsShared.ts；主文件 54 行（纯组合）。
+
+**测试**：3 个 hook 用例（30 端点默认参数逐一断言、趋势按 Agent 过滤重载、告警自定义权重）；总计 183。
+
+**经验**：子组件的 Bundle 类型经 `import type` 引数据 hook（无运行时循环）；共享阶段配色进 agentAnalyticsShared.ts（G4 需要、其余不需要，按组判定导入）。
+
+**结果**：tsc + vitest 183 passed + build 全绿；webpage fab8d7f 已推。7 文件全部 ≤375 行。
+
+## 2026-09-14 迭代 108（webpage）：ExperiencesSection 529 行拆分
+
+**做法**：数据层（11 端点并发）抽 useExperiencesData.ts（93 行）；最大卡「经验库统计+低置信列表」抽 ExperiencesConfidenceCard.tsx（208 行，Bundle props）；主文件 374 行。
+
+**测试**：1 个 hook 用例（11 端点默认窗口矩阵）；总计 184。
+
+**经验**：**import 块整块复制时锚点必须落在连续导入块的边界**——本轮两处 chopped import（逐行判定 import 头）与「glue 缺 \n」（join 段直接接 import 行）导致 TS1003/TS2300 串；定式：子组件头部 = 主文件连续导入前缀（截至首个非 import 行）+ 显式新增导入，并在生成后立即检查首 20 行。
+
+**结果**：tsc + vitest 184 passed + build 全绿；webpage 95b42ee 已推。
+
+## 2026-09-14 迭代 109（webpage）：SandboxDrawer 554 行类型外置
+
+**做法**：6 个沙箱接口（SandboxData/Template/Execution/FormData/CheckFormData/StartFormData/ViolationFormData）原样迁至 sandboxDrawerTypes.ts（91 行）；SandboxDrawer.tsx 483 行（组件本体），并 `export type { ... } from './sandboxDrawerTypes'` 保持消费方导入不变。纯类型搬运零行为变更，验证 = tsc + 全量门禁。
+
+**结果**：tsc + vitest 184 passed + build 全绿；webpage f13ae25 已推。
+
+## 2026-09-14 迭代 110（webpage）：Profile 头像域抽 hook
+
+**做法**：头像选择域（本地/偏好 token 解析、内置头像分页、选择/随机/更新含失败回滚、选择器页码同步）抽为 useProfileAvatar.ts（181 行，签名 (user, updateUser, messageApi, tp)）；主文件 477 行（资料表单/标签页/令牌 JSX）。
+
+**测试**：6 个 hook 用例（装载本地 token、更新成功同步偏好、失败回滚本地 token、随机复用更新链路、同 token 仅关选择器、未登录守卫）；总计 190。
+
+**经验**：抽 hook 时**效果块与状态必须同进退**——本地 token 装载 effect 留在主文件会让 hook 的 localAvatarToken 永远为空（测试当场暴露）；剪切脚本对多行 effect 用「起始锚 + 起始锚后首个条件行」定位，避免 StopIteration 后文件已截断（本轮 hook 文件被 'w' 模式截断为 0 后整体重写恢复）。
+
+**结果**：tsc + vitest 190 passed + build 全绿；webpage dc2261e 已推。
+
+## 2026-09-14 会话台账（98–110，13 轮全绿）
+
+- **webpage >500 行文件**：17 → **11**（消解 useDashboardData 831、tasks.ts 606、OrganizationDetail 1257、CommandCenter 961、TaskCollaborationTimeline 767、agents/index 613、TaskAnalyticsSection 575、AgentAnalyticsSection 1165、ExperiencesSection 529、SandboxDrawer 554、Profile 594）。剩余：Agents.tsx 1508（并行会话在改）、CollaborationGraphView 713（高内聚交互件：力导向/拖拽/缩放，单列评估）。
+- **测试**：44 → **190**（+146），拆分模块行覆盖 100%（构造性不可达防御 catch 留档）。
+- **106 轮专项**：对 99–103 拆分模块统一 --coverage 实测并补齐（审计闭环）；顺带去重协作图 hook 副本（-311 行）。
