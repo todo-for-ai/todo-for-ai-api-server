@@ -1434,3 +1434,18 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **实测终态（v8 text/json）**：useTaskAssignmentActions **100%**、useTaskCollaborationData **100%**、useProfileAvatar **100%**、runtimeOptions **100%**、useAgentAnalyticsData/useExperiencesData/useTaskAnalyticsData **100%**、collaborationGraphShared/useForceSimulation **100%**、api/tasks/** **100%**、agents-client **100%**、useCommandCenterData 99.61%（1 行防御 catch 留档）。全部分支覆盖率 80-97%。
 
 **结果**：tsc + vitest 246 passed + build 全绿；webpage f036cf6 已推。迭代 107–116 新模块的「100% 单测」要求全量闭环。
+
+## 2026-09-14 迭代 121（webpage）：Workflows.tsx 770 → 474 + 数据 hook（第三次尝试成功）
+
+**做法**：放弃脚本切割，改为**人工逐段**——先识别 states 块与 JSX 块的边界（内容锚点），将全部 states+loaders+effects 原样搬入 useWorkflowsData.tsx（574 行，.tsx 因含 JSX-returning memo），Workflows.tsx 保留 JSX + bundle 解构（474 行）。
+
+**经验**：head 构造必须显式换行（join 后缺 '\n' 会把 decl 与 import 粘连）；搬移后必须 tsc 立即验证；相对路径深度按目标文件目录修正（workflows/ 子目录 → '../../'）；原 'const { Text } = Typography' 在导入块中间，head 截断需包含它。
+
+**结果**：tsc + vitest 246 passed + build 全绿；webpage 78b404b 已推。Workflows 主文件 <500 ✓；数据 hook 574 行留待下会话二次拆分。
+
+## 2026-09-14 会话终态台账
+
+- **webpage >500 行**：Agents.tsx 1508（并行会话）、Workflows.tsx 474 ✓、useWorkflowsData.tsx 574（待二次拆分）、CollaborationGraphView 597（安全网已建）
+- **测试**：44 → **246** 全绿（含 107-116 全部新模块 100% 行覆盖实测）
+- **门禁**：每轮 tsc -b + vitest + vite build 三绿；干净检出复跑认证通过
+- **纪律**：worktree 即清、pathspec 定向提交、日志逐轮回写、并行会话工作树零触碰、main 源码零改动
