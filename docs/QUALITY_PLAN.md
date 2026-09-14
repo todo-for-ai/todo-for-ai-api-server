@@ -1408,3 +1408,7 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **经验**：jsdom 无 SVGGraphicsElement.getScreenCTM/createSVGPoint 完整实现 → 拖拽坐标转换（svgPoint）与持久化路径无法在 jsdom 断言，已注入最小桩并单列冒烟用例；节点组定位用「textContent 最短匹配」选最内层组。**这组测试即 CollaborationGraphView 未来深拆（节点/边渲染子组件 × 交互 hook）的行为安全网。**
 
 **会话终态**：迭代 98–118 共 **21 轮全绿**；webpage 测试 44 → **230**；>500 行文件 17 → **3**（Agents.tsx 并行会话 / Workflows 770 人工专项 / CollaborationGraphView 620 已建安全网）；全部门禁（tsc + vitest + build）与日志/主仓 ref 同步完成。
+
+## 2026-09-14 终局认证
+
+origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 230 passed + vite build 通过——98–118 轮合并后的 webpage 主分支状态认证通过。会话期间未触碰并行会话工作树（agent-triggers / webpage-refactor / quality116-121b 等）与共享检出 WIP。
