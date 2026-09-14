@@ -1544,3 +1544,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **补覆盖**：新 test_mcp_task_tools_coverage.py 22 用例（HTTP /mcp/call 全链路）——create 全字段/校验四分支、get_project_tasks_by_name、get_task_by_id、submit_feedback 四分支、get_task_evidence、set_task_dod 五分支、list/search 参数分支、update revision 冲突与 DoD warning、progress 缺参。task_tools 43% → **82%**（剩余 80 行为深层分支：request_approval 完整审批流、assignee 精确校验等，下轮继续）。
 
 **结果**：全量门禁 **2448 passed**（2426→2448）全绿；api-server 047a62c 已推。**观察项**：tests 单跑 -k mcp 时 test_creates_pending_approval_visible_in_queue 失败（基线即有，全量通过）——既有测试顺序依赖待专项。
+
+## 2026-09-15 迭代 132（api-server）：mcp task_tools 覆盖 82% → 98%（32 用例）
+
+**补齐**：request_approval 完整成功路径 + WebSocket 推送块（合法/非法 created_by 两分支）+ 缺参/非法 options/无 workspace 校验；list/search 的 assignee 精确校验容错分支（非 dict/非数字 id/非 human 类型）、project_id 与 status 过滤、limit 截断 break、他人任务过滤；update/feedback/evidence/dod 的 validate_integer 分支、越权 403、UserActivity 异常吞并、DoD 完成记录、auto_assign 异常回滚。
+
+**坑（跨文件 id 污染的根治）**：本文件 _make_task 高位 id 行驻留会话级库，与 conftest task_factory 的手工 id 互相踩（UNIQUE tasks.id → PendingRollback 连锁）——autouse fixture 按高位段（>=9_300_000）purge 本文件的 Task/TaskLog/TaskEvidenceRecord/AgentTaskEvent 行；且 DeepBranches 用例全部弃用 conftest factory 改自建环境（_make_foreign_env），与 factory 的 id 分配彻底隔离。
+
+**结果**：task_tools **98%** 行覆盖（85 用例；剩余 8 行 = WebSocket 防御与跨项目 LIKE 组合尾部，留档）；全量门禁 **2480 passed**（2448→2480）全绿；api-server a3c867b 已推。
