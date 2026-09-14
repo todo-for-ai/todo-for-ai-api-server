@@ -1535,3 +1535,12 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **观察项（顺带普查发现）**：tests 单跑 `-k mcp` 时 test_creates_pending_approval_visible_in_queue 失败、全量跑通过——既有测试顺序依赖，待专项。
 
 **结果**：全量门禁 **2426 passed** 全绿；api-server a9df94f 已推。**api-server >500 行源文件仅剩 WIP 区（api/agents/* 5 个）与 WIP 关联（routes_tasks 878）**；低耦合剩余：mcp/handlers/task_tools 845（覆盖 43%，需先补测再拆）、context_rules 625 / auth 636（各 ~630/636 行，100%/99% 覆盖，可拆）。
+
+## 2026-09-15 迭代 131（api-server）：mcp task_tools 修 3 个上线级 bug + 覆盖 43% → 82%
+
+**修真 bug ×3（全部为首触达暴露的潜伏故障，MCP 工具首次真实使用即 500）**：
+①create_task 把 value 字符串 'todo' 直接赋 Task(status=...)——SQLAlchemy Enum 按 NAME 落库（记忆定式），flush 必炸 → 包 TaskStatus(status)；②priority 同款 → TaskPriority(priority)；③Task.assignee 是 relationship('User')，把字符串参数塞进去 flush 报 _sa_instance_state → 按 username/email 解析为 assignee_id，未命中则置空。submit_task_feedback 的 task.status 同款枚举赋值修复。
+
+**补覆盖**：新 test_mcp_task_tools_coverage.py 22 用例（HTTP /mcp/call 全链路）——create 全字段/校验四分支、get_project_tasks_by_name、get_task_by_id、submit_feedback 四分支、get_task_evidence、set_task_dod 五分支、list/search 参数分支、update revision 冲突与 DoD warning、progress 缺参。task_tools 43% → **82%**（剩余 80 行为深层分支：request_approval 完整审批流、assignee 精确校验等，下轮继续）。
+
+**结果**：全量门禁 **2448 passed**（2426→2448）全绿；api-server 047a62c 已推。**观察项**：tests 单跑 -k mcp 时 test_creates_pending_approval_visible_in_queue 失败（基线即有，全量通过）——既有测试顺序依赖待专项。
