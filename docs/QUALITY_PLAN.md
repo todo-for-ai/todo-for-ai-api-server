@@ -1517,3 +1517,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **坑**：①切界按 def 行号会切掉上方装饰器块——必须回溯到连续 @ 行起点；②`GitHubClientError`/`GitHubClient` 两轮 str.replace 会双前缀（第二次命中前缀内子串），用单遍正则 `\bGitHubClient(Error)?\b`；③手工造 AgentTaskEvent 必须给 attempt_id/workspace_id/seq/event_timestamp（nullable=False），否则 PendingRollback 毒化会话连锁假败；④会话级库 task id 复用，断言 AuditLog 的用例跨文件需在 autouse cleanup 清审计行。
 
 **结果**：全量门禁 **2426 passed**（2366→2426）全绿；api-server 4e51194 已推。下一批：openai_compatible.py（888，装饰器+CacheManager+RequestHandler+5 路由，测试 716 行直 import 单文件——包化需同步迁 patch 路径）；api/tasks/routes_tasks.py（878，update_task 单函数 306 行）因 api/tasks/__init__.py 在他人 WIP 区暂避。
+
+## 2026-09-15 迭代 129（api-server）：openai_compatible.py 888 行 → 包结构（测试零改动）
+
+**拆分**：api/openai_compatible/ 包（_core 89 = 蓝图+认证装饰器+常量；cache 229 = OpenAICacheManager；handler 207 = OpenAIRequestHandler；routes 384 = 五端点；__init__ shim 44）。app.py 零改动。
+
+**测试零改动的关键**：既有 716 行测试把模块当命名空间——①`oc.cache_manager` 只做**实例级**打桩（setattr 实例方法/清 _local_cache），路由 import 同一实例即可；②`patch("api.openai_compatible.get_current_user")`/redis 三件套/`SUPPORTED_MODELS` 需包属性替换生效 → cache.py 与 routes.py 经 `from api import openai_compatible as _pkg` 运行时解析（循环自引用标准模式，属性查找延迟到运行时）；③`monkeypatch.setattr(oc.time, "sleep", ...)` 打在 time 模块本体，__init__ import time 维持命名空间即可。**先全量 grep 测试的 patch/setattr 面再定运行时解析清单**——本轮由此实现测试文件 0 改动。
+
+**结果**：拆分包 5 文件 **100% 行覆盖**（72 用例）；全量门禁 **2426 passed** 全绿；api-server 02e1010 已推。api-server 源文件 >500 行队列：routes_tasks.py 878（update_task 单函数 306 行）待 api/tasks/__init__.py 他人 WIP 落地后处理；openai_compatible ✓ project_repo ✓ 出队。
