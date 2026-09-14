@@ -1459,3 +1459,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **新坑×2**：① jsdom 下 `vi.spyOn(localStorage, 'setItem')` 实例 spy 不拦截（CALLS=0 实测），必须 `vi.spyOn(Storage.prototype, 'setItem')`；② v8 对纯注释空 catch 块无法归因报 uncovered——catch 内加语义等价 `return` 即可归因（行为不变）。
 
 **结果**：tsc 0 错 + vitest **262 passed**（246→262）+ build 三绿；webpage a559d66 已推；worktree 即清。**>500 行台账：Agents.tsx 1508、useWorkflowsData.tsx 574 二者留待本轮后续；CollaborationGraphView ✓ 达标出队。**
+
+## 2026-09-15 迭代 123（webpage）：useWorkflowsData 574 → 273 + 四域 hook（二拆收官）
+
+**做法**：按域二次拆分——`useWorkflowAnalytics`（17 分析源状态 + fetchAnalytics 扇出，78 行）、`useWorkflowTriggers`（91 行）、`useWorkflowVersions`（72 行）、`useWorkflowTemplates`（50 行），组合根 useWorkflowsData.tsx 剩核心（工作流/运行加载、运行控制台、启动、URL ?run_id= 自动打开）273 行。跨域依赖（版本回滚/模板实例化后刷新列表）经 options 注入 loadData，域间零耦合。顺带删除原文件残留的死 imports（约 20 个未用 antd/图标/组件导入）与死常量副本（STEP_STATUS_MAP/WORKFLOW_STATUS_COLORS 各组件自有）。
+
+**测试**：新 useWorkflowsData.test.tsx 22 用例，含**返回键集契约测试**（ORIGINAL_KEYS 118 键逐一断言，拆分不得增删）+ 全处理器成败分支。五个文件 **100% 行覆盖**。
+
+**结果**：tsc 0 错 + vitest **284 passed**（262→284）+ build 三绿；webpage 976c87f 已推；worktree 即清。**>500 行台账仅剩 Agents.tsx 1508。**
