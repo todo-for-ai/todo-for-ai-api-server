@@ -1576,3 +1576,9 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **修 goals.py authz（迭代 128 遗留观察项）**：`if goal.workspace_id and not user.is_admin:` 缺调用括号恒 False → 任何用户可跨 workspace 读/改/删 Goal。修复为 is_admin() 并加越权钉子 ×2（非成员 403 PERMISSION_DENIED / 成员 200）。全库 grep 确认无其他 `is_admin` 非调用残留（system_settings/ai_task_assistant/openai_compatible 均为 role 比较正确写法）。
 
 **结果**：全量门禁 **2487 passed**（2480→2487）全绿；api-server 9feca2b 已推。mcp task_tools 与 goals authz 双双出队。
+
+## 2026-09-15 迭代 136（api-server）：auth 包死包装函数清理
+
+上一轮（134）auth 包化时，三个路由子模块各留了一个模块级 `def get_current_user()` 转发包装——但路由代码实际全部走 `_pkg.get_current_user()`，包装从未被调用（正是覆盖率报告里 routes_core 38 / users 37 / oauth 37 三行缺失的来源）。确认零调用后删除；oauth/users 升至 **100%**、routes_core 98%、_core 99%（剩余缺行均为防御分支留档）。75 用例零改动全过；全量门禁 **2487 passed** 全绿；api-server f0392be 已推。
+
+**经验**：包化时生成的「兼容转发函数」若与 `_pkg.` 运行时解析方案并存，前者必然成为死代码——两种机制二选一；覆盖率报告的 def/return 缺行是发现这类残留的免费探针。
