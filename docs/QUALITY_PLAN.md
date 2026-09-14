@@ -1477,3 +1477,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **坑**：①操作列两分支首按钮都是「心跳」，按记忆顺序点按钮索引会错位——先打印 BUTTONS= 实测顺序再断言；②antd 全量 mock 会砸掉 columns 的真实渲染用例，改 `importOriginal` 透传真实组件仅 mock message；③render 闭包捕获的是 spread 副本，断言须用同一引用。
 
 **结果**：tsc 0 错 + vitest **300 passed**（284→300）+ build 三绿；webpage a5208c1 已推。**Agents.tsx 剩余：states/effects 逻辑区 + JSX 骨架 ~1200 行，下一刀继续。**
+
+## 2026-09-15 迭代 125（webpage）：Agents.tsx 第二刀 1207 → 1045（CRUD 域 hook）
+
+**做法**：`agents/hooks/useAgentCrudActions.ts`（203 行）——Agent 列表/审核队列加载（含过滤参数与静默模式）、创建/编辑弹窗与保存（JSON 校验双路）、心跳、广播、声誉/历史/沙盒三加载器与重算。17 个状态 + 10 处理器原样搬移；唯一跨域依赖 selectedAgent 经 ctx 注入；form（Form.useForm）随域迁入 hook。主文件同名牌解构承接，JSX/效果零改动。误删 resolveProtocol 被 tsc 立即暴露并补回（教训：python 边界回溯遇「块尾+连续空行」会把下一块前段卷入，回溯后必须断言边界行内容属于目标块）。
+
+**测试**：agentsCrudActions.test.tsx 8 用例——loadAgents/loadReviewQueue 参数化与静默失败、openCreate/openEdit 预填、saveAgent 三路（非 JSON/更新/创建/校验异常）、heartbeat、广播守卫+成功+失败、声誉/历史独立容错、沙盒、重算早退与成败。**100% 行/函数覆盖**（分支 93.87%）。坑：hook 内部成功路径会重置状态（如广播内容清空、editingAgent 保留），后续分支用例必须重新注入状态再触发。
+
+**结果**：tsc 0 错 + vitest **308 passed**（300→308）+ build 三绿；webpage e2c123b 已推。**Agents.tsx 剩余 1045：effects ~130 + 零散 handlers + JSX 组合 ~440。**
