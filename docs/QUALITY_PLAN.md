@@ -1503,3 +1503,17 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **坑（脚本迭代缝补反面教材）**：拆分脚本三轮修补中，名字过滤误删了 `}: XProps) => (`、`interface XProps {`、`const X = ({`、`export default X` 四类含组件名的结构行（TS1128/TS2459 连环）——最终以「从现存文件提取 JSX 段 + props 名单、header 从主文件导入块重建、一次写盘」原子化重建收敛。教训升级：**生成类脚本内禁用「按组件名子串过滤行」，过滤必须锚定行首语法形态**；连续两次修补失败即应放弃缝补转整体重建。
 
 **结果**：tsc 0 错 + vitest **314 passed** + build 三绿；webpage 409b443 已推。**Agents.tsx 簇终态：1508 单文件 → 824 组合根 + 13 领域 hooks（全部 100% 行覆盖）+ 4 视图组件（≤500）。**剩余路径（下一会话）：主文件 824 中 ~290 行是三视图调用的 props 清单，改为 bag/context 传递可进 ≤500；纯接线无逻辑，风险低收益中。
+
+## 2026-09-15 迭代 128（api-server）：project_repo.py 1016 行 → 包结构 + 修越权 bug + 补历史覆盖欠账
+
+**拆分**：api/project_repo/ 包（_shared 351 = 蓝图+常量+共享 helpers；binding 153；pull_requests 236；lifecycle 429；__init__ 兼容 shim 再导出 bp/路由/_upsert_pr_evidence）。纯搬移，app.py 注册与 github_app 的函数内导入零改动。
+
+**修真 bug（越权泄漏）**：list_pending_pr_approvals 的 `if current_user.is_admin:` 缺调用括号——User.is_admin 是方法非 property（routes_task_graph.py 注释早已警示过该坑），恒 truthy → **所有用户都走全库分支，能看到任何项目待审批 PR**。改为 `is_admin()` 并加越权钉子用例。**观察项（未修）**：api/goals.py:30 `not user.is_admin` 同款恒 False，goals 不在本次重构范围，待其归属会话处理。
+
+**mock 兼容**：GitHubClient 三兄弟经 `_shared` 命名空间解析（路由内 `_shared.GitHubClient`），测试 patch 路径统一为 `api.project_repo._shared.GitHubClient`（原文件 12 处 + review_gate 1 处 sed 迁移）；mock 失效会真实联网必挂 → 全绿即证明语义保留。
+
+**补覆盖欠账**：新 test_project_repo_coverage.py 59 用例——binding/pull_requests/lifecycle 的校验分支、GitHubClientError/Exception 兜底、L0 审批执行（pr_create 422 软成功/pr_merge 执行/unsupported 类型/重复审批 409）、list 分页 break 与成员聚合。终态：binding/pull_requests/__init__ **100%**、lifecycle 99%（406 行=merge 端点无 required 字段的防御守卫，构造性不可达留档）、_shared 98%（173/319 同为防御行）。
+
+**坑**：①切界按 def 行号会切掉上方装饰器块——必须回溯到连续 @ 行起点；②`GitHubClientError`/`GitHubClient` 两轮 str.replace 会双前缀（第二次命中前缀内子串），用单遍正则 `\bGitHubClient(Error)?\b`；③手工造 AgentTaskEvent 必须给 attempt_id/workspace_id/seq/event_timestamp（nullable=False），否则 PendingRollback 毒化会话连锁假败；④会话级库 task id 复用，断言 AuditLog 的用例跨文件需在 autouse cleanup 清审计行。
+
+**结果**：全量门禁 **2426 passed**（2366→2426）全绿；api-server 4e51194 已推。下一批：openai_compatible.py（888，装饰器+CacheManager+RequestHandler+5 路由，测试 716 行直 import 单文件——包化需同步迁 patch 路径）；api/tasks/routes_tasks.py（878，update_task 单函数 306 行）因 api/tasks/__init__.py 在他人 WIP 区暂避。
