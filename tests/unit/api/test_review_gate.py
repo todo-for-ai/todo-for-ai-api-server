@@ -121,7 +121,7 @@ class TestReviewerGate:
             "html_url": "https://github.com/acme/widget/pull/10",
             "head": {"ref": "agent/x"}, "base": {"ref": "main"},
         }
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             return client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request/merge",
                 json={"merge_method": "squash"},

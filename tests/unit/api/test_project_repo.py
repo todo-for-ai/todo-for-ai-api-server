@@ -138,7 +138,7 @@ class TestTaskPullRequest:
         fake_client.ensure_branch.return_value = True
         fake_client.create_pull_request.return_value = _pr_data()
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request",
                 json={"head_branch": "agent/task-1"},
@@ -168,7 +168,7 @@ class TestTaskPullRequest:
             "services.github_client", fromlist=["GitHubClientError"]
         ).GitHubClientError("GitHub API error 422: No commits between main and agent/task-1", 422)
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request",
                 json={"head_branch": "agent/task-1"},
@@ -213,7 +213,7 @@ class TestTaskPullRequest:
         fake_client = MagicMock()
         fake_client.get_pull_request.return_value = _pr_data(state="closed", merged=True)
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.get(
                 f"{BASE_URL}/tasks/{task.id}/pull-request",
                 headers=owner_auth["headers"],
@@ -300,7 +300,7 @@ class TestTaskPullRequestMerge:
         fake_client.merge_pull_request.return_value = {"sha": "mergedsha1", "merged": True}
         fake_client.get_pull_request.return_value = _pr_data(number=9, state="closed", merged=True)
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request/merge",
                 json={"merge_method": "squash"},
@@ -391,7 +391,7 @@ class TestAutonomyLevels:
         task = task_factory(project_id=owned_org_project.id, owner_id=owner_auth["user"].id, title="L0 task")
 
         fake_client = MagicMock()
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request",
                 json={"head_branch": "agent/x"},
@@ -428,7 +428,7 @@ class TestAutonomyLevels:
         fake_client = MagicMock()
         fake_client.create_pull_request.return_value = _pr_data(number=42)
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request/approve",
                 json={"interaction_id": interaction_id, "decision": "approved"},
@@ -461,7 +461,7 @@ class TestAutonomyLevels:
         interaction_id = interaction.payload["interaction_id"]
 
         fake_client = MagicMock()
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request/approve",
                 json={"interaction_id": interaction_id, "decision": "rejected", "reason": "not ready"},
@@ -498,7 +498,7 @@ class TestAutonomyLevels:
         fake_client.get_pull_request.return_value = _pr_data(number=7, state="open", merged=False)
         fake_client.merge_pull_request.return_value = {"sha": "autoshal", "merged": True}
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.get(f"{BASE_URL}/tasks/{task.id}/pull-request", headers=owner_auth["headers"])
 
         assert resp.status_code == 200, resp.get_json()
@@ -531,7 +531,7 @@ class TestAutonomyLevels:
         fake_client = MagicMock()
         fake_client.get_pull_request.return_value = _pr_data(number=8, state="open", merged=False)
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.get(f"{BASE_URL}/tasks/{task.id}/pull-request", headers=owner_auth["headers"])
 
         assert resp.status_code == 200
@@ -565,7 +565,7 @@ class TestAutonomyLevels:
         fake_client = MagicMock()
         fake_client.get_pull_request.return_value = _pr_data(number=9, state="open", merged=False)
 
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.get(f"{BASE_URL}/tasks/{task.id}/pull-request", headers=owner_auth["headers"])
 
         data = resp.get_json()["data"]
@@ -619,7 +619,7 @@ class TestPendingPrApprovalsList:
         assert mine["head_branch"] == "agent/q"
         fake_client = MagicMock()
         fake_client.create_pull_request.return_value = _pr_data(number=55)
-        with patch("api.project_repo.GitHubClient", return_value=fake_client):
+        with patch("api.project_repo._shared.GitHubClient", return_value=fake_client):
             resp = client.post(
                 f"{BASE_URL}/tasks/{task.id}/pull-request/approve",
                 json={"interaction_id": interaction_id, "decision": "approved"},
