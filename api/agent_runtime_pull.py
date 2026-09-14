@@ -411,6 +411,15 @@ def pull_tasks():
         except Exception:
             content_payload = {"content": task.content}
 
+        # 依赖交接：上游（blocked_by）任务的 shared_context 随派发注入，
+        # 下游 Agent 无需显式拉取即可拿到上游产出（读取失败不阻断派发）
+        upstream = []
+        try:
+            from services.task_handoff import upstream_context_entries
+            upstream = upstream_context_entries(task)
+        except Exception:
+            upstream = []
+
         items.append(
             {
                 'task_id': task.id,
@@ -425,6 +434,7 @@ def pull_tasks():
                     # 平台权威字段放在展开之后，不被任务内容覆盖
                     'dod': task.dod or [],
                 },
+                **({'upstream': upstream} if upstream else {}),
             }
         )
 

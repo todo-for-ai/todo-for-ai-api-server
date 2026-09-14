@@ -391,6 +391,15 @@ def commit_task(task_id):
         risk_score=10,
     )
 
+    # 依赖交接：任务到终态后，向刚解锁的下游任务写 dependency.unlocked
+    # 事件（时间线留痕；失败不阻断提交本身）
+    unlocked_downstream = []
+    try:
+        from services.task_handoff import notify_downstream_unlocked
+        unlocked_downstream = notify_downstream_unlocked(task)
+    except Exception:
+        unlocked_downstream = []
+
     db.session.commit()
 
     # GoalLoop 目标循环：循环任务提交到终态后推进下一轮（非循环任务零开销）
@@ -414,6 +423,7 @@ def commit_task(task_id):
             'final_status': final_status,
             'committed_at': now.isoformat(),
             'evidence_count': len(evidence_items),
+            'unlocked_downstream': unlocked_downstream,
             'recovery': recovery,
         },
         'Task committed successfully',
