@@ -1485,3 +1485,13 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **测试**：agentsCrudActions.test.tsx 8 用例——loadAgents/loadReviewQueue 参数化与静默失败、openCreate/openEdit 预填、saveAgent 三路（非 JSON/更新/创建/校验异常）、heartbeat、广播守卫+成功+失败、声誉/历史独立容错、沙盒、重算早退与成败。**100% 行/函数覆盖**（分支 93.87%）。坑：hook 内部成功路径会重置状态（如广播内容清空、editingAgent 保留），后续分支用例必须重新注入状态再触发。
 
 **结果**：tsc 0 错 + vitest **308 passed**（300→308）+ build 三绿；webpage e2c123b 已推。**Agents.tsx 剩余 1045：effects ~130 + 零散 handlers + JSX 组合 ~440。**
+
+## 2026-09-15 迭代 126（webpage）：Agents.tsx 第三刀 1045 → 956（实时看板域 hook）
+
+**做法**：`agents/hooks/useAgentLiveDashboard.ts`（154 行）——liveMode/liveEvents/dashboardStats 状态 + 三个效果（10s 静默刷新、60s 自动派活定时器、SSE 事件流五类通知+事件列表上限 30）+ loadDashboardStats。跨域依赖（agents/过滤三态/drawerOpen/selectedAgent/loadAgents/loadReviewQueue/loadAssignments）经 ctx 注入。
+
+**坑**：hook 调用点必须在 dispatch 解构之后（loadAssignments TDZ）——python 脚本移动代码块两次插错位置（插进 dispatch 参数列表引发 TS1005），教训：移动代码块必须以「注释锚行 + 配对收尾行」整体为单元，插入手位要在目标锚点的**收尾行**之后并立即 tsc。
+
+**测试**：agentsLiveDashboard.test.tsx 6 用例（fake timers 驱动 10s/60s 定时器；useCollaborationSSE mock 捕获 onEvent 后手动触发五类事件 + Drawer 打开分支；liveEvents 上限裁剪；auto-dispatch 仅命中开启策略的活跃 coordinator 且失败静默）。**100% 行/函数覆盖**。
+
+**结果**：tsc 0 错 + vitest **314 passed**（308→314）+ build 三绿；webpage df65360 已推。**Agents.tsx 剩余 956：URL 自动打开效果、feedback/协议零散处理器、JSX 组合 ~450。**
