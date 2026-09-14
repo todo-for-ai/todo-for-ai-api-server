@@ -1568,3 +1568,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **运行时解析面**：get_current_user / github_service / google_service / **request**（setattr("api.auth.request") 打在包属性；路由内 request.args 等 18 处全部 _pkg.request）→ shim re-export 四符号 + 路由 _pkg 前缀。**坑：跨域函数引用**（login() 调 github_login()）拆分后 NameError —— shim/子模块 import 链要按调用图补全；flask request 这类本地代理对象也是 patch 目标，不能漏 re-export。
 
 **结果**：75 用例零改动全过，5 文件 97-100% 行覆盖（缺行为包装函数转发行与防御行）；全量门禁 **2480 passed** 全绿；api-server 250de26 已推。
+
+## 2026-09-15 迭代 135（api-server）：mcp task_tools 收口至 100% + 修 goals.py 同款 authz bug
+
+**task_tools 100% 收口**：最后 8 行全部可达——48/53-54（assignees 非 dict 条目与非法数字 id 的容错 continue，需粗筛命中+creator/owner 双非+他人项目组合数据）、157-159（search 粗筛命中 assignee LIKE 但 type=agent 精确失败且项目属他人 → skip）、437（created_by 指向其他用户时向其推送）、445-446（推送异常经外层 except Exception 吞掉）、786（evidence 任务不存在断言补齐）。**第 7 行（628）追出一个真 bug**：status_changed 用 str(枚举) 与 value 字符串比较恒不相等 → 每次反馈都误记「状态变更」活跃度；修复为 .value 语义比较 + 钉子用例（同状态反馈走 task_updated 分支）。task_tools **100% 行覆盖**（97 用例）。
+
+**修 goals.py authz（迭代 128 遗留观察项）**：`if goal.workspace_id and not user.is_admin:` 缺调用括号恒 False → 任何用户可跨 workspace 读/改/删 Goal。修复为 is_admin() 并加越权钉子 ×2（非成员 403 PERMISSION_DENIED / 成员 200）。全库 grep 确认无其他 `is_admin` 非调用残留（system_settings/ai_task_assistant/openai_compatible 均为 role 比较正确写法）。
+
+**结果**：全量门禁 **2487 passed**（2480→2487）全绿；api-server 9feca2b 已推。mcp task_tools 与 goals authz 双双出队。
