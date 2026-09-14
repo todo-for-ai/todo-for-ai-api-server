@@ -1400,3 +1400,11 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 **经验**：①fake timers 与 waitFor 冲突——waitFor 用真实定时器轮询，混用时该用例单独 vi.useRealTimers()；②describe 作用域内的 helper（withData）不可跨 describe 引用；③mockRejectedValueOnce 会被挂载期消费——自动装载型 hook 测试用 mockRejectedValue（持续）或精确计数。
 
 **台账终态（98–117，20 轮全绿）**：webpage >500 行 **17 → 3**（Agents.tsx 1508 并行会话、Workflows 770 人工专项、CollaborationGraphView 620 行为安全网已建）；测试 44 → **226**；拆分模块行覆盖 100%（防御 catch 留档）；每轮日志回写 + 主仓 ref 同步。
+
+## 2026-09-14 迭代 118（webpage）：协作图指针交互回归测试
+
+**做法**：CollaborationGraphView 补 4 个指针交互回归测试——滚轮缩放（放大 + 缩小至 0.3 下限钳制）、背景按下拖动平移、节点点击回调、拖拽冒烟。总计 230 passed。
+
+**经验**：jsdom 无 SVGGraphicsElement.getScreenCTM/createSVGPoint 完整实现 → 拖拽坐标转换（svgPoint）与持久化路径无法在 jsdom 断言，已注入最小桩并单列冒烟用例；节点组定位用「textContent 最短匹配」选最内层组。**这组测试即 CollaborationGraphView 未来深拆（节点/边渲染子组件 × 交互 hook）的行为安全网。**
+
+**会话终态**：迭代 98–118 共 **21 轮全绿**；webpage 测试 44 → **230**；>500 行文件 17 → **3**（Agents.tsx 并行会话 / Workflows 770 人工专项 / CollaborationGraphView 620 已建安全网）；全部门禁（tsc + vitest + build）与日志/主仓 ref 同步完成。
