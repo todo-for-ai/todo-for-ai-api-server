@@ -251,3 +251,47 @@ class TestEpicExpansion:
 
         resp = client.post(f"{BASE_URL}/epics/{epic.id}/expand", json={}, headers=owner_auth["headers"])
         assert resp.status_code == 409
+
+
+class TestWorkspaceAuthz:
+    """越权钉子：is_admin 须以方法调用判定——非成员不可跨 workspace 访问 Goal。"""
+
+    def test_non_member_cannot_read_workspace_goal(self, client, db_session, owner_auth, goal):
+        import uuid as _uuid
+        from models import User
+        from werkzeug.security import generate_password_hash
+        from flask_jwt_extended import create_access_token
+
+        unique_id = str(_uuid.uuid4())[:8]
+        outsider = User(username=f"outsider_{unique_id}", email=f"out_{unique_id}@example.com")
+        outsider.password_hash = generate_password_hash("password123")
+        db_session.add(outsider)
+        db_session.commit()
+        headers = {"Authorization": "Bearer " + create_access_token(identity=str(outsider.id))}
+
+        resp = client.get(f"{BASE_URL}/goals/{goal.id}", headers=headers)
+        assert resp.status_code == 403, resp.get_json()
+        assert resp.get_json()["error_details"]["code"] == "PERMISSION_DENIED"
+
+    def test_member_can_read_workspace_goal(self, client, db_session, owner_auth, goal):
+        from models import OrganizationMember, OrganizationMemberStatus
+        import uuid as _uuid
+        from models import User
+        from werkzeug.security import generate_password_hash
+        from flask_jwt_extended import create_access_token
+
+        member = User(username=f"member_{_uuid.uuid4().hex[:8]}", email=f"m_{_uuid.uuid4().hex[:8]}@example.com")
+        member.password_hash = generate_password_hash("password123")
+        db_session.add(member)
+        db_session.commit()
+        db_session.add(OrganizationMember(
+            organization_id=goal.workspace_id,
+            user_id=member.id,
+            role="MEMBER",
+            status=OrganizationMemberStatus.ACTIVE,
+        ))
+        db_session.commit()
+        headers = {"Authorization": "Bearer " + create_access_token(identity=str(member.id))}
+
+        resp = client.get(f"{BASE_URL}/goals/{goal.id}", headers=headers)
+        assert resp.status_code == 200

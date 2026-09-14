@@ -27,7 +27,7 @@ def _get_goal_or_error(goal_id: int, user):
     goal = db.session.get(Goal, goal_id)
     if not goal:
         return None, ApiResponse.error("Goal not found", 404, error_details={"code": "GOAL_NOT_FOUND"}).to_response()
-    if goal.workspace_id and not user.is_admin:
+    if goal.workspace_id and not user.is_admin():
         # workspace 成员校验（owner/admin/member 任一即可见）
         from models import OrganizationMember
         member = OrganizationMember.query.filter_by(

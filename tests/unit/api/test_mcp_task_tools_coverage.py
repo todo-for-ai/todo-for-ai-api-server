@@ -709,3 +709,107 @@ class TestFinalBranches:
             "project_id": mcp_env["project"].id, "title": "aa-boom", "is_ai_task": True,
         })
         assert "Failed to create task" in str(resp.get_json())
+
+
+class TestFinalEightLines:
+    """第八轮：收口最后 8 行（628 死分支除外，见 QUALITY_PLAN 留档）。"""
+
+    def test_list_assignee_non_dict_item_skipped(self, client, db_session, mcp_env, user_factory):
+        """48/53-54：粗筛命中后，assignees 含非 dict 条目与非法数字 id 的容错分支。"""
+        from models import Task
+
+        other = user_factory()
+        other_project = Project = None
+        from models import Project
+        other_project = Project.query.filter_by(owner_id=other.id).first()
+        if not other_project:
+            other_project = Project(name=f"nd-{uuid.uuid4().hex[:6]}", status="ACTIVE", owner_id=other.id)
+            db_session.add(other_project)
+            db_session.commit()
+        # assignees LIKE 粗筛命中 user.id；首项非 dict（48），human id 非数字（53-54）
+        task = Task(
+            id=next(_TASK_ID_SEQ), title="non-dict assignee", content="",
+            project_id=other_project.id, creator_id=other.id,
+            assignees=["junk", {"type": "human", "id": f"{mcp_env['user'].id}-bad"}],
+            is_ai_task=False,
+        )
+        db_session.add(task)
+        db_session.commit()
+        resp = call_tool(client, mcp_env["token"], "list_my_tasks", {})
+        assert "non-dict assignee" not in str(resp.get_json())
+
+    def test_search_skips_assignee_false_positive(self, client, db_session, mcp_env, user_factory):
+        """157-159：search 粗筛命中（assignee LIKE）但精确校验失败且项目属他人 → skip。"""
+        from models import Project, Task
+
+        other = user_factory()
+        other_org_project = Project.query.filter_by(owner_id=other.id).first()
+        if not other_org_project:
+            other_org_project = Project(name=f"os-{uuid.uuid4().hex[:6]}", status="ACTIVE", owner_id=other.id)
+            db_session.add(other_org_project)
+            db_session.commit()
+        # assignees JSON 含 user.id 数字 → LIKE 粗筛命中；type=agent → 精确失败；
+        # project 属 other → project_owner != user → continue
+        task = Task(
+            id=next(_TASK_ID_SEQ), title="false-positive-needle", content="",
+            project_id=other_org_project.id, creator_id=other.id,
+            assignees=[{"type": "agent", "id": mcp_env["user"].id}],
+            is_ai_task=False,
+        )
+        db_session.add(task)
+        db_session.commit()
+        resp = call_tool(client, mcp_env["token"], "search_tasks", {"keyword": "false-positive-needle"})
+        assert resp.get_json()["total_tasks"] == 0
+
+    def test_request_approval_push_variants(self, client, db_session, mcp_env, user_factory, monkeypatch):
+        """437：created_by 指向其他用户时向其推送；445-446：推送异常被外层吞掉。"""
+        from api.user_websocket import push_to_task_room
+
+        other = user_factory()
+        # 437：created_by 合法且指向其他用户
+        task = _make_task(db_session, mcp_env["project"], mcp_env["user"], title="push-other")
+        task.created_by = f"user:{other.id}"
+        db_session.commit()
+        resp = call_tool(client, mcp_env["token"], "request_approval", {
+            "task_id": task.id, "question": "to other",
+        })
+        assert resp.status_code == 200
+        # 445-446：推送抛非 (ValueError, TypeError) 异常 → 外层 except Exception 吞掉
+        def boom(*a, **k):
+            raise RuntimeError("ws down")
+        monkeypatch.setattr(push_to_task_room, "__code__", boom.__code__)
+        resp = call_tool(client, mcp_env["token"], "request_approval", {
+            "task_id": task.id, "question": "q again",
+        })
+        assert resp.status_code == 200
+
+    def test_evidence_task_not_found_asserted(self, client, mcp_env):
+        """786：get_task_evidence 的任务不存在分支。"""
+        resp = call_tool(client, mcp_env["token"], "get_task_evidence", {"task_id": 987654})
+        assert "Task with ID 987654 not found" in str(resp.get_json())
+
+
+class TestStatusChangedSemantics:
+    """第九轮：status_changed 以 .value 语义比较——同状态反馈不再误记状态变更。"""
+
+    def test_feedback_same_status_no_change(self, client, db_session, mcp_env, monkeypatch):
+        from models import UserActivity, TaskStatus
+
+        task = _make_task(db_session, mcp_env["project"], mcp_env["user"], title="same-status")
+        # 第一次：todo -> review（状态确实变更）
+        resp = call_tool(client, mcp_env["token"], "submit_task_feedback", {
+            "task_id": task.id, "project_name": mcp_env["project"].name,
+            "feedback_content": "first", "status": "review",
+        })
+        assert resp.status_code == 200
+        # 第二次：review -> review（同状态 → else 分支记录 task_updated）
+        calls = []
+        monkeypatch.setattr(UserActivity, "record_activity",
+                            lambda uid, kind: calls.append(kind))
+        resp = call_tool(client, mcp_env["token"], "submit_task_feedback", {
+            "task_id": task.id, "project_name": mcp_env["project"].name,
+            "feedback_content": "again", "status": "review",
+        })
+        assert resp.status_code == 200
+        assert "task_updated" in calls
+        assert "task_status_changed" not in calls

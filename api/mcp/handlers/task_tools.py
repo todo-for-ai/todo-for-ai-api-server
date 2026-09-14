@@ -594,9 +594,11 @@ def submit_task_feedback(arguments):
     if task.creator_id != g.current_user.id and project.owner_id != g.current_user.id:
         return {'error': 'Access denied: You can only modify your own tasks'}
 
-    # 跟踪状态变更
+    # 跟踪状态变更（Enum 列取 .value 比较：str(枚举) 是 "TaskStatus.XXX"，
+    # 与请求里的 value 字符串永不相等，会把每次反馈都误判为状态变更）
     old_status = task.status
-    status_changed = str(old_status) != str(status)
+    old_status_value = old_status.value if hasattr(old_status, 'value') else old_status
+    status_changed = str(old_status_value) != str(status)
 
     # 更新任务（Enum 列按 NAME 落库：必须赋枚举成员，value 字符串会触发 flush 异常）
     task.feedback_content = feedback_content
