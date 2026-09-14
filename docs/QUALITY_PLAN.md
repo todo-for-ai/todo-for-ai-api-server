@@ -1495,3 +1495,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **测试**：agentsLiveDashboard.test.tsx 6 用例（fake timers 驱动 10s/60s 定时器；useCollaborationSSE mock 捕获 onEvent 后手动触发五类事件 + Drawer 打开分支；liveEvents 上限裁剪；auto-dispatch 仅命中开启策略的活跃 coordinator 且失败静默）。**100% 行/函数覆盖**。
 
 **结果**：tsc 0 错 + vitest **314 passed**（308→314）+ build 三绿；webpage df65360 已推。**Agents.tsx 剩余 956：URL 自动打开效果、feedback/协议零散处理器、JSX 组合 ~450。**
+
+## 2026-09-15 迭代 127（webpage）：Agents.tsx 第四刀 956 → 824（视图层三组件 + 类型分离）
+
+**做法**：按「块内标识符 ∩ 组件作用域」机械提取 props（全 any），JSX 原样搬移——`AgentsBoardSection`（头部/卡片段/表格卡/表单 Modal，291 行）、`AgentsOpsModals`（详情 Drawer + 运行时/消息/步骤/冲突 Modal，443 行）、`AgentsCollabModals`（频道/模板/协议/沙盒/经验/跨项目，378 行）；props 接口外置 `agentsViewProps.ts`（282 行，纯类型）。主文件 = 组合根（hook 接线 + 剩余 effects + 三个视图调用）。
+
+**坑（脚本迭代缝补反面教材）**：拆分脚本三轮修补中，名字过滤误删了 `}: XProps) => (`、`interface XProps {`、`const X = ({`、`export default X` 四类含组件名的结构行（TS1128/TS2459 连环）——最终以「从现存文件提取 JSX 段 + props 名单、header 从主文件导入块重建、一次写盘」原子化重建收敛。教训升级：**生成类脚本内禁用「按组件名子串过滤行」，过滤必须锚定行首语法形态**；连续两次修补失败即应放弃缝补转整体重建。
+
+**结果**：tsc 0 错 + vitest **314 passed** + build 三绿；webpage 409b443 已推。**Agents.tsx 簇终态：1508 单文件 → 824 组合根 + 13 领域 hooks（全部 100% 行覆盖）+ 4 视图组件（≤500）。**剩余路径（下一会话）：主文件 824 中 ~290 行是三视图调用的 props 清单，改为 bag/context 传递可进 ≤500；纯接线无逻辑，风险低收益中。
