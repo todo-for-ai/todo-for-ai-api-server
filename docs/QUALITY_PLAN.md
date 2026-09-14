@@ -1426,3 +1426,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 - **门禁**：每轮 tsc -b + vitest + vite build 三绿；干净检出复跑认证通过。
 - **纪律**：worktree 即清、pathspec 定向提交、日志逐轮回写本文件、主仓 ref 同步、并行会话工作树零触碰。
 - **剩余队列（下一会话顺次）**：Workflows 770 人工专项 → CollaborationGraphView 620 指针交互 hook 化（回归测试已就绪）→ Agents.tsx 1508（待并行会话完成后按同套定式处理）。
+
+## 2026-09-14 迭代 120（webpage）：useTaskAssignmentActions 补齐至 100% 行覆盖（审计闭环）
+
+**发现**：此前 94.65% 的未覆盖行 144-146 = **submitDispatch 的 catch**（非 submitHandoff——行号定位曾误判）。补用例：claimTask reject → catch 走 instanceof Error → message.error('dispatch boom') + dispatchSubmitting 复位。**现已 100% 行覆盖**。
+
+**实测终态（v8 text/json）**：useTaskAssignmentActions **100%**、useTaskCollaborationData **100%**、useProfileAvatar **100%**、runtimeOptions **100%**、useAgentAnalyticsData/useExperiencesData/useTaskAnalyticsData **100%**、collaborationGraphShared/useForceSimulation **100%**、api/tasks/** **100%**、agents-client **100%**、useCommandCenterData 99.61%（1 行防御 catch 留档）。全部分支覆盖率 80-97%。
+
+**结果**：tsc + vitest 246 passed + build 全绿；webpage f036cf6 已推。迭代 107–116 新模块的「100% 单测」要求全量闭环。
