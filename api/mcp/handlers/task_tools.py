@@ -10,8 +10,10 @@ from models import (
     Project,
     Task,
     TaskEvidenceRecord,
+    User,
     TaskLog,
     TaskLogActorType,
+    TaskPriority,
     TaskStatus,
     db,
 )
@@ -596,10 +598,10 @@ def submit_task_feedback(arguments):
     old_status = task.status
     status_changed = str(old_status) != str(status)
 
-    # 更新任务
+    # 更新任务（Enum 列按 NAME 落库：必须赋枚举成员，value 字符串会触发 flush 异常）
     task.feedback_content = feedback_content
     task.feedback_at = datetime.utcnow()
-    task.status = status
+    task.status = TaskStatus(status)
 
     # 更新项目最后活动时间
     project.last_activity_at = datetime.utcnow()
@@ -692,15 +694,23 @@ def create_task(arguments):
             return {'error': 'Invalid due_date format. Use YYYY-MM-DD'}
 
     try:
+        # assignee 参数是用户名/邮箱字符串：解析为用户 id（Task.assignee 是
+        # relationship，直接赋字符串会在 flush 时报 _sa_instance_state）
+        assignee_user = None
+        if assignee:
+            assignee_user = User.query.filter(
+                (User.username == assignee) | (User.email == assignee)
+            ).first()
+
         # 创建任务
         task = Task(
             title=title,
             content=content,
-            status=status,
-            priority=priority,
+            status=TaskStatus(status),
+            priority=TaskPriority(priority),
             project_id=project_id,
             creator_id=g.current_user.id,
-            assignee=assignee,
+            assignee_id=assignee_user.id if assignee_user else None,
             due_date=due_date_obj,
             is_ai_task=is_ai_task,
             creator_identifier=creator_identifier,
@@ -737,7 +747,7 @@ def create_task(arguments):
             'project_id': task.project_id,
             'project_name': project.name,
             'creator_id': task.creator_id,
-            'assignee': task.assignee,
+            'assignee': assignee_user.username if assignee_user else None,
             'due_date': task.due_date.isoformat() if task.due_date else None,
             'is_ai_task': task.is_ai_task,
             'creator_identifier': task.creator_identifier,
