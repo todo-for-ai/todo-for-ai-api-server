@@ -1412,3 +1412,17 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 ## 2026-09-14 终局认证
 
 origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 230 passed + vite build 通过——98–118 轮合并后的 webpage 主分支状态认证通过。会话期间未触碰并行会话工作树（agent-triggers / webpage-refactor / quality116-121b 等）与共享检出 WIP。
+
+## 2026-09-14 迭代 119（webpage）：CollaborationGraphView 过滤/布局沉淀共享模块 + avatar 覆盖闭环
+
+**做法**：collaborationGraphShared.ts 扩展 filterGraphData（新增 centerNodeId 保留语义，与组件内联过滤完全同源）与 computeStaticPositions；CollaborationGraphView 内联过滤块与 nodePos memo 的 circular/grid 分支替换为共享调用（620 → 597）；共享模块内旧版重复定义清理。useProfileAvatar 补 handleRandomAvatar 双守卫（!user/!selected）与 handleSelectAvatar 同 token 早退用例。
+
+**验证**：useProfileAvatar.ts **100% 行覆盖**（tests/unit/pages/useProfileAvatar.test.tsx 16 用例）；runtimeOptions.ts **100%**（4 用例复测确认）；全量 vitest 24 文件 passed + build 全绿；webpage c158339 已推。
+
+## 2026-09-14 会话最终台账（迭代 98–119，22 轮全绿）
+
+- **webpage**：>500 行文件 **17 → 3**（Agents.tsx 1508 并行会话在改勿碰；Workflows.tsx 770 需人工逐段——数据区含 JSX-returning memo，数据 hook 须 .tsx，两次脚本尝试与全部勘定锚点已留档；CollaborationGraphView 620 交互紧耦合，渲染/过滤/布局/力导向已模块化并建行为安全网）。
+- **测试**：44 → **237 passed**（+193）；拆分逻辑模块行覆盖 100%（防御 catch 留档）；视图壳 0% 属渲染层，RTL 冒烟已覆盖关键交互。
+- **门禁**：每轮 tsc -b + vitest + vite build 三绿；干净检出复跑认证通过。
+- **纪律**：worktree 即清、pathspec 定向提交、日志逐轮回写本文件、主仓 ref 同步、并行会话工作树零触碰。
+- **剩余队列（下一会话顺次）**：Workflows 770 人工专项 → CollaborationGraphView 620 指针交互 hook 化（回归测试已就绪）→ Agents.tsx 1508（待并行会话完成后按同套定式处理）。
