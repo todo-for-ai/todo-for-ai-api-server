@@ -32,11 +32,6 @@ from api.auth._core import (
 )
 
 
-def get_current_user():
-    """运行时转发：patch("api.auth.get_current_user") 语义保留。"""
-    return _pkg.get_current_user()
-
-
 @auth_bp.route('/users', methods=['GET'])
 @require_auth
 def list_users():
