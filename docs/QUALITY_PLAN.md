@@ -1552,3 +1552,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **坑（跨文件 id 污染的根治）**：本文件 _make_task 高位 id 行驻留会话级库，与 conftest task_factory 的手工 id 互相踩（UNIQUE tasks.id → PendingRollback 连锁）——autouse fixture 按高位段（>=9_300_000）purge 本文件的 Task/TaskLog/TaskEvidenceRecord/AgentTaskEvent 行；且 DeepBranches 用例全部弃用 conftest factory 改自建环境（_make_foreign_env），与 factory 的 id 分配彻底隔离。
 
 **结果**：task_tools **98%** 行覆盖（85 用例；剩余 8 行 = WebSocket 防御与跨项目 LIKE 组合尾部，留档）；全量门禁 **2480 passed**（2448→2480）全绿；api-server a3c867b 已推。
+
+## 2026-09-15 迭代 133（api-server）：context_rules.py 625 行 → 包结构（测试零改动、5 文件 100%）
+
+**拆分**：api/context_rules/ 包（_core 41 = 蓝图+TTL+fallback 缓存+缓存 helpers；crud 301 = 7 条 CRUD/启停路由；builder 131 = build-context/preview；sharing 228 = marketplace/copy/global/merged；__init__ shim 39）。14 路由原样搬移，app.py 零改动。
+
+**运行时解析面（先 grep 测试 patch 面再定清单）**：ContextRule（类级打桩）/ get_current_user / get_request_args / invalidate_user_caches / _context_rules_cache_get / **redis_get_json 别名**（setattr(cr,...) 实例形式 + 字符串形式都要盘点）→ __init__ re-export + 子模块 `_pkg.X` 运行时解析。坑：包化后原 `from .base import` 必须升 `..base`（ModuleNotFoundError api.context_rules.base）。
+
+**结果**：60 用例零改动全过，5 文件 **100% 行覆盖**；全量门禁 **2480 passed** 全绿；api-server ab0090f 已推。
