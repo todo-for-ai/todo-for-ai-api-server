@@ -1560,3 +1560,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **运行时解析面（先 grep 测试 patch 面再定清单）**：ContextRule（类级打桩）/ get_current_user / get_request_args / invalidate_user_caches / _context_rules_cache_get / **redis_get_json 别名**（setattr(cr,...) 实例形式 + 字符串形式都要盘点）→ __init__ re-export + 子模块 `_pkg.X` 运行时解析。坑：包化后原 `from .base import` 必须升 `..base`（ModuleNotFoundError api.context_rules.base）。
 
 **结果**：60 用例零改动全过，5 文件 **100% 行覆盖**；全量门禁 **2480 passed** 全绿；api-server ab0090f 已推。
+
+## 2026-09-15 迭代 134（api-server）：auth.py 636 行 → 包结构（75 用例零改动）
+
+**拆分**：api/auth/ 包（_core 141 = 蓝图+5 helpers；routes_core 234 = login/guest/callback/logout/me/verify/refresh；oauth 189 = github/google；users 189 = list/get；__init__ shim 37）。app.py 零改动。
+
+**运行时解析面**：get_current_user / github_service / google_service / **request**（setattr("api.auth.request") 打在包属性；路由内 request.args 等 18 处全部 _pkg.request）→ shim re-export 四符号 + 路由 _pkg 前缀。**坑：跨域函数引用**（login() 调 github_login()）拆分后 NameError —— shim/子模块 import 链要按调用图补全；flask request 这类本地代理对象也是 patch 目标，不能漏 re-export。
+
+**结果**：75 用例零改动全过，5 文件 97-100% 行覆盖（缺行为包装函数转发行与防御行）；全量门禁 **2480 passed** 全绿；api-server 250de26 已推。
