@@ -1525,3 +1525,13 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **测试零改动的关键**：既有 716 行测试把模块当命名空间——①`oc.cache_manager` 只做**实例级**打桩（setattr 实例方法/清 _local_cache），路由 import 同一实例即可；②`patch("api.openai_compatible.get_current_user")`/redis 三件套/`SUPPORTED_MODELS` 需包属性替换生效 → cache.py 与 routes.py 经 `from api import openai_compatible as _pkg` 运行时解析（循环自引用标准模式，属性查找延迟到运行时）；③`monkeypatch.setattr(oc.time, "sleep", ...)` 打在 time 模块本体，__init__ import time 维持命名空间即可。**先全量 grep 测试的 patch/setattr 面再定运行时解析清单**——本轮由此实现测试文件 0 改动。
 
 **结果**：拆分包 5 文件 **100% 行覆盖**（72 用例）；全量门禁 **2426 passed** 全绿；api-server 02e1010 已推。api-server 源文件 >500 行队列：routes_tasks.py 878（update_task 单函数 306 行）待 api/tasks/__init__.py 他人 WIP 落地后处理；openai_compatible ✓ project_repo ✓ 出队。
+
+## 2026-09-15 迭代 130（api-server）：agent_teams.py 660 行 → 包结构
+
+**拆分**：api/agent_teams/ 包（_core 21 = 蓝图+可编辑字段工具；teams 249 / members 285 / projects 158 = 13 路由按域三文件；__init__ shim 再导出 bp 与全部路由）。app.py 与 40 个既有用例零改动，6 文件 **100% 行覆盖**。选型依据：横向覆盖率普查（agent_teams 100% / context_rules 100% / auth 99% / agent_runtime_controller 89%）后挑覆盖最完整者——拆分即闭环，无覆盖欠账。
+
+**坑**：构造 _core 头部时从 `from models import` 起切漏了 flask/sqlalchemy 导入（NameError: Blueprint）；route 子模块共用头部但漏 re-export TEAM_EDITABLE_FIELDS（NameError）——tsc/ast syntax 检查查不出 NameError，**必须 import 级冒烟（python -c "import api.agent_teams"）+ 单文件测试先行**。
+
+**观察项（顺带普查发现）**：tests 单跑 `-k mcp` 时 test_creates_pending_approval_visible_in_queue 失败、全量跑通过——既有测试顺序依赖，待专项。
+
+**结果**：全量门禁 **2426 passed** 全绿；api-server a9df94f 已推。**api-server >500 行源文件仅剩 WIP 区（api/agents/* 5 个）与 WIP 关联（routes_tasks 878）**；低耦合剩余：mcp/handlers/task_tools 845（覆盖 43%，需先补测再拆）、context_rules 625 / auth 636（各 ~630/636 行，100%/99% 覆盖，可拆）。
