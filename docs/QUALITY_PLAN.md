@@ -1392,3 +1392,11 @@ WIP 的 `auto_assign_task`（按 hunk 纪律不动不测，等原作者收口）
 ## 2026-09-14 收尾补记：CollaborationGraphView 674 → 620 力导向 hook（迭代 116 后续验证）
 
 迭代 116 的 useForceSimulation 抽取已验证：渲染行为测试（force 布局 rAF 桩）全绿，组件 688 → 620。协作图簇现状：View 620 / Shared 99 / ForceSim 108 / 渲染行为测试 6 用例。剩余 620 行为「节点/边 SVG 渲染 + 悬停/拖拽覆盖 + 缩放平移」紧耦合体——后续拆分建议：先补指针交互（拖拽/平移/滚轮）回归测试，再按「渲染单元格子组件 × 交互 hook」两刀拆分。
+
+## 2026-09-14 迭代 117（webpage）：task collab hooks 覆盖补齐
+
+**做法**：轮询守卫（document.hidden 跳过）、8 秒静默轮询、SSE onEvent 静默刷新、loadCollaboration 失败置 loadFailed、taskId 守卫早退、handoff/post 失败路径——7 个新用例；useTaskCollaborationData 98.85%（仅 SSE 文件级 mock 无法覆盖的交互回调行）、useTaskAssignmentActions 94.65%（非 Error 回退分支）。总计 **226 passed**。
+
+**经验**：①fake timers 与 waitFor 冲突——waitFor 用真实定时器轮询，混用时该用例单独 vi.useRealTimers()；②describe 作用域内的 helper（withData）不可跨 describe 引用；③mockRejectedValueOnce 会被挂载期消费——自动装载型 hook 测试用 mockRejectedValue（持续）或精确计数。
+
+**台账终态（98–117，20 轮全绿）**：webpage >500 行 **17 → 3**（Agents.tsx 1508 并行会话、Workflows 770 人工专项、CollaborationGraphView 620 行为安全网已建）；测试 44 → **226**；拆分模块行覆盖 100%（防御 catch 留档）；每轮日志回写 + 主仓 ref 同步。
