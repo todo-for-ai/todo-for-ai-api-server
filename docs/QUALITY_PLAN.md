@@ -1449,3 +1449,13 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 - **测试**：44 → **246** 全绿（含 107-116 全部新模块 100% 行覆盖实测）
 - **门禁**：每轮 tsc -b + vitest + vite build 三绿；干净检出复跑认证通过
 - **纪律**：worktree 即清、pathspec 定向提交、日志逐轮回写、并行会话工作树零触碰、main 源码零改动
+
+## 2026-09-15 迭代 122（webpage）：CollaborationGraphView 597 → 439（指针交互 hook 化收官）
+
+**做法**：按 09-14 留档路径执行——指针交互回归安全网（渲染 6 用例 + 交互 4 用例）已就绪，本轮抽 `collaboration-graph/useGraphInteraction.ts`（133 行：拖拽覆盖+localStorage 持久化+背景平移+滚轮缩放+consumeDragMoved 吞点击+resetView，原样搬移）；顺带把两块纯静态 JSX 抽为 `GraphDefs.tsx`（marker/径向渐变）与 `GraphLegends.tsx`（四组图例，零 props）。主文件只剩渲染壳 439 行。
+
+**测试**：新 `useGraphInteraction.test.tsx` 13 用例（持久化四分支/坐标换算三分支/拖拽全流程/配额抛错吞掉/缩放钳制/平移/非拖拽不落盘/空 key），渲染测试补 hover 面板/流光/dimmed 3 用例。**useGraphInteraction、GraphDefs、GraphLegends 均 100% 行/分支/函数覆盖**。
+
+**新坑×2**：① jsdom 下 `vi.spyOn(localStorage, 'setItem')` 实例 spy 不拦截（CALLS=0 实测），必须 `vi.spyOn(Storage.prototype, 'setItem')`；② v8 对纯注释空 catch 块无法归因报 uncovered——catch 内加语义等价 `return` 即可归因（行为不变）。
+
+**结果**：tsc 0 错 + vitest **262 passed**（246→262）+ build 三绿；webpage a559d66 已推；worktree 即清。**>500 行台账：Agents.tsx 1508、useWorkflowsData.tsx 574 二者留待本轮后续；CollaborationGraphView ✓ 达标出队。**
