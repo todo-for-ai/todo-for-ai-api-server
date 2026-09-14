@@ -1467,3 +1467,13 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **测试**：新 useWorkflowsData.test.tsx 22 用例，含**返回键集契约测试**（ORIGINAL_KEYS 118 键逐一断言，拆分不得增删）+ 全处理器成败分支。五个文件 **100% 行覆盖**。
 
 **结果**：tsc 0 错 + vitest **284 passed**（262→284）+ build 三绿；webpage 976c87f 已推；worktree 即清。**>500 行台账仅剩 Agents.tsx 1508。**
+
+## 2026-09-15 迭代 124（webpage）：Agents.tsx 第一刀 1508 → 1207（三块自包含域迁移）
+
+**做法**：①`agents/hooks/useAgentStepOverrides.ts`（79 行）——工作流步骤运行时重配置域（3 状态 + 4 处理器，仅依赖 agentsApi+message 完全自包含）；②`agents/hooks/useAgentConflicts.ts`（102 行）——冲突检测与解决域（6 状态 + 9 处理器，同样自包含）；③`agents/agentsTableColumns.tsx`（249 行）——Agent 列表 7 列 + 派发记录 5 列构建器 `buildAgentsTableColumns(ctx)`，15 个跨域处理器经 ctx 显式注入（iter62 定式），静态依赖（statusColor/stateColor/formatDateTime/renderCapabilities/CapabilityRadar）直连模块导入。主文件同名牌解构承接，JSX 零改动。
+
+**测试**：agentsHooks.test.tsx 16 用例——两 hook 全处理器成败/校验/归一化分支 + columns 全 render 函数触发（RTL 真渲染 + 按钮点击断言 handler 调用）。三文件 **100% 行/函数覆盖**。
+
+**坑**：①操作列两分支首按钮都是「心跳」，按记忆顺序点按钮索引会错位——先打印 BUTTONS= 实测顺序再断言；②antd 全量 mock 会砸掉 columns 的真实渲染用例，改 `importOriginal` 透传真实组件仅 mock message；③render 闭包捕获的是 spread 副本，断言须用同一引用。
+
+**结果**：tsc 0 错 + vitest **300 passed**（284→300）+ build 三绿；webpage a5208c1 已推。**Agents.tsx 剩余：states/effects 逻辑区 + JSX 骨架 ~1200 行，下一刀继续。**
