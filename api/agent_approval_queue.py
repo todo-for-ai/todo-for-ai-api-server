@@ -16,14 +16,6 @@ INTERACTION_REQUEST_EVENT_TYPE = 'interaction_request'
 INTERACTION_APPROVAL_EVENT_TYPE = 'interaction_approval'
 
 
-def _resolve_agent_name(agent_id: int) -> str:
-    """Resolve agent display name from agent_id, falling back to raw id."""
-    agent = db.session.get(Agent, agent_id)
-    if agent:
-        return agent.display_name or agent.name or f'Agent #{agent_id}'
-    return f'Agent #{agent_id}'
-
-
 @approval_queue_bp.route(
     '/workspaces/<int:workspace_id>/approvals/pending', methods=['GET']
 )
