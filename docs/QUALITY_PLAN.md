@@ -1598,3 +1598,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **补齐**：test_agent_access_control.py 26 用例——_to_int_set 容错、normalize 的 workspace 过滤与空短路、_resolve_workspace 命中/未命中、accessible projects 的 owned∪member 并集、_resolve_actor_agent 三分支（显式/RuntimeError/非 Agent g 值）、项目交集真假、同组织成员真假、owner relations（user/agent/self）、can_access_agent_detail 全分支链、ensure 的 None/403。
 
 **结果**：agent_access_control **100% 行覆盖**（88 语句 0 缺）；全量门禁 **2523 passed**（2497→2523）全绿；api-server 5ca3153 已推。api-server 覆盖率欠账清零（除 WIP 区与 K8s 依赖行）。
+
+## 2026-09-15 迭代 139（api-server）：agent_audit 覆盖 59% → 100%（list/stats/export 全分支）
+
+**补齐**：test_agent_audit_list_stats.py 12 用例——list_audit_events 全过滤参数逐一命中（event_type/actor_type/target_type/task_id/level/risk_min/start_date/end_date，含两者皆拒的非法日期回退）、分页偏移、workspace 404；audit_events_stats 聚合（total/by_type/by_level/high_risk 计数）；export_audit_events 的 workspace 404、limit 非法回退默认值、event_type+task_id 组合过滤、end_date 边界、CSV 头行；非成员 403（list 与 stats 各一，export 走同一 guard 已由 list 路径覆盖）。
+
+**JWT 401 绕过定式（沉淀）**：function-scope app 中两段式 app_context 创建的 token 在请求时校验失败恒 401——测 authz 时不要造 outsider JWT，改用 owner JWT + owner 不同的外来 workspace，同样命中 403 分支且不踩 token 生命周期坑。
+
+**结果**：agent_audit **100% 行覆盖**（131 语句 0 缺）；与既有 audit 测试合跑 24 passed；全量门禁 **2535 passed**（da2a21e 实测重跑，EXIT=0；2523 + 本批 12 = 2535，与迭代 138 口径吻合）全绿；api-server da2a21e 已推。
