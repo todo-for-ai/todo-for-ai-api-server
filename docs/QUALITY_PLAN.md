@@ -1590,3 +1590,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 **死代码**：_resolve_agent_name 零引用（list 端点自建 agent_map 基于 row.agent_id，非该 helper）→ 删除 6 行，行为零变化。
 
 **结果**：agent_approval_queue **100% 行覆盖**；全量门禁 **2497 passed**（2487→2497）全绿；api-server 13fb41f 已推。
+
+## 2026-09-15 迭代 138（api-server）：agent_access_control 覆盖 51% → 100%（真库版重做）
+
+**teardown IntegrityError 根因（上轮止损项复盘）**：user_factory teardown `db_session.delete(user)` 时，SQLAlchemy 外键置空行为把驻留行 organizations.owner_id 更新为 NULL → NOT NULL 约束炸。解法 = 权限测试完全不走 conftest factory，改用模块级自建并驻留（owner+org 一对），每用例单 app_context 块内建行+断言，杜绝跨 context DetachedInstance。
+
+**补齐**：test_agent_access_control.py 26 用例——_to_int_set 容错、normalize 的 workspace 过滤与空短路、_resolve_workspace 命中/未命中、accessible projects 的 owned∪member 并集、_resolve_actor_agent 三分支（显式/RuntimeError/非 Agent g 值）、项目交集真假、同组织成员真假、owner relations（user/agent/self）、can_access_agent_detail 全分支链、ensure 的 None/403。
+
+**结果**：agent_access_control **100% 行覆盖**（88 语句 0 缺）；全量门禁 **2523 passed**（2497→2523）全绿；api-server 5ca3153 已推。api-server 覆盖率欠账清零（除 WIP 区与 K8s 依赖行）。
