@@ -1582,3 +1582,11 @@ origin/main 干净检出全量门禁复跑：tsc -b 0 错误 + vitest 25 文件 
 上一轮（134）auth 包化时，三个路由子模块各留了一个模块级 `def get_current_user()` 转发包装——但路由代码实际全部走 `_pkg.get_current_user()`，包装从未被调用（正是覆盖率报告里 routes_core 38 / users 37 / oauth 37 三行缺失的来源）。确认零调用后删除；oauth/users 升至 **100%**、routes_core 98%、_core 99%（剩余缺行均为防御分支留档）。75 用例零改动全过；全量门禁 **2487 passed** 全绿；api-server f0392be 已推。
 
 **经验**：包化时生成的「兼容转发函数」若与 `_pkg.` 运行时解析方案并存，前者必然成为死代码——两种机制二选一；覆盖率报告的 def/return 缺行是发现这类残留的免费探针。
+
+## 2026-09-15 迭代 137（api-server）：agent_approval_queue 覆盖 72% → 100% + 删零引用死函数
+
+**补测**：test_agent_approval_queue_api.py 10 用例——pending 列表（空队列/agent 显示名解析/已决策事件排除/分页参数）、stats（pending 计数、approved_today 计数）、workspace 404、非成员 403（list 与 stats 各一）。
+
+**死代码**：_resolve_agent_name 零引用（list 端点自建 agent_map 基于 row.agent_id，非该 helper）→ 删除 6 行，行为零变化。
+
+**结果**：agent_approval_queue **100% 行覆盖**；全量门禁 **2497 passed**（2487→2497）全绿；api-server 13fb41f 已推。
