@@ -64,6 +64,7 @@ def upgrade(connection):
                     secret_encrypted VARCHAR(2000) NULL,
                     active TINYINT(1) NOT NULL DEFAULT 1,
                     description VARCHAR(200) NULL,
+                    created_by VARCHAR(100) NULL,
                     created_at DATETIME NOT NULL,
                     updated_at DATETIME NOT NULL,
                     CONSTRAINT fk_webhook_subs_ws FOREIGN KEY (workspace_id) REFERENCES organizations(id),
@@ -80,6 +81,7 @@ def upgrade(connection):
                     secret_encrypted VARCHAR(2000),
                     active BOOLEAN NOT NULL DEFAULT 1,
                     description VARCHAR(200),
+                    created_by VARCHAR(100),
                     created_at DATETIME NOT NULL,
                     updated_at DATETIME NOT NULL
                 )
@@ -102,6 +104,7 @@ def upgrade(connection):
                     attempts INT NOT NULL DEFAULT 1,
                     error VARCHAR(500) NULL,
                     duration_ms INT NULL,
+                    created_by VARCHAR(100) NULL,
                     created_at DATETIME NOT NULL,
                     updated_at DATETIME NOT NULL,
                     CONSTRAINT fk_webhook_del_sub FOREIGN KEY (subscription_id) REFERENCES webhook_subscriptions(id),
@@ -120,6 +123,7 @@ def upgrade(connection):
                     attempts INTEGER NOT NULL DEFAULT 1,
                     error VARCHAR(500),
                     duration_ms INTEGER,
+                    created_by VARCHAR(100),
                     created_at DATETIME NOT NULL,
                     updated_at DATETIME NOT NULL
                 )
