@@ -101,6 +101,8 @@ def collaboration_graph():
             "id": a.id,
             "name": a.name,
             "kind": a.kind.value if a.kind else None,
+            "avatar_url": a.avatar_url or None,
+            "display_name": a.display_name or None,
             "messages": degree.get(a.id, 0),
             "reputation": rep_map.get(a.id),
         }
