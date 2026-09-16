@@ -101,6 +101,31 @@ class TestBudgetChecks:
         concurrent = [v for v in violations if v["resource"] == "concurrent"]
         assert concurrent and concurrent[0]["used"] >= 1 and concurrent[0]["budget_id"] == budget.id
 
+    def test_concurrent_budget_ignores_expired_leases(self, db_session, budget_factory, organization_factory, agent_factory):
+        """concurrent 用量只统计未过期租约：过期未释放的陈旧租约不占额度。"""
+        from models import AgentTaskLease
+
+        org = organization_factory()
+        agent = agent_factory(workspace_id=org.id)
+        budget = budget_factory(
+            scope_type="agent", agent_id=agent.id, workspace_id=org.id,
+            resource="concurrent", limit_value=1,
+        )
+        # 一条已过期但 active=True 的陈旧租约（未被释放/续约）
+        db_session.add(AgentTaskLease(
+            lease_id="lea_stale", task_id=1, attempt_id="att_stale",
+            agent_id=agent.id, workspace_id=org.id,
+            expires_at=datetime.utcnow() - timedelta(seconds=300), active=True, created_by="test",
+        ))
+        db_session.commit()
+
+        from services.budget_service import check_budgets
+
+        violations = check_budgets(workspace_id=org.id, agent_id=agent.id)
+        concurrent = [v for v in violations if v["resource"] == "concurrent"]
+        assert not concurrent, "过期租约不应触发 concurrent 预算超限"
+        assert budget.id
+
     def test_duration_budget(self, db_session, budget_factory, organization_factory, agent_factory):
         from models import AgentRun
 

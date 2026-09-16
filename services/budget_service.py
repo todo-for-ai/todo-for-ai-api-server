@@ -106,9 +106,12 @@ def get_usage(budget: Budget, now: Optional[datetime] = None) -> Dict[str, Any]:
         return {'used': int(total_seconds // 60), 'not_tracked': False}
 
     if budget.resource == 'concurrent':
+        # 「在岗」语义与 active_agent_count 对齐：只统计未过期的活跃租约——
+        # 过期未释放的陈旧租约不应永久占用预算额度
         query = db.session.query(func.count(AgentTaskLease.id)).filter(
             AgentTaskLease.workspace_id == budget.workspace_id,
             AgentTaskLease.active.is_(True),
+            AgentTaskLease.expires_at > now,
         )
         if budget.scope_type == 'agent' and budget.agent_id:
             query = query.filter(AgentTaskLease.agent_id == budget.agent_id)
@@ -215,7 +218,7 @@ def raise_budget_exceeded(workspace_id: int, violations: List[Dict[str, Any]],
             'context': context,
             'requested_at': now.isoformat(),
         }
-        db.session.add(AgentTaskEvent(
+        _dbg_ev = AgentTaskEvent(
             task_id=int(task_id),
             attempt_id='',
             agent_id=context.get('agent_id'),
@@ -227,7 +230,16 @@ def raise_budget_exceeded(workspace_id: int, violations: List[Dict[str, Any]],
             message=f"budget exceeded {interaction_id} {violation.get('resource')} "
                     f"{violation.get('used')}/{violation.get('limit')}",
             created_by='system:budget',
-        ))
+        )
+        db.session.add(_dbg_ev)
+        from sqlalchemy import inspect as _insp
+        print('DBG_not_added=', _dbg_ev not in db.session, 'session=', id(db.session),
+              'in_new=', _insp(_dbg_ev).persistent or _insp(_dbg_ev).pending)
+        from sqlalchemy import text as _t
+        try:
+            print('DBG_pre_commit_count=', db.session.execute(_t("select count(*) from agent_task_events")).scalar())
+        except Exception as _e:
+            print('DBG_pre_commit_err=', _e)
         try:
             # write_agent_audit 读取请求头；触发引擎等非请求上下文下降级为日志
             write_agent_audit(
@@ -244,5 +256,20 @@ def raise_budget_exceeded(workspace_id: int, violations: List[Dict[str, Any]],
             logger.warning("budget.exceeded_audit_no_request_context", violation=violation)
         created.append(interaction_id)
     if created:
-        db.session.commit()
+        try:
+            db.session.flush()
+            from sqlalchemy import text as _t3
+            print('DBG_flush_count=', db.session.execute(_t3("select count(*) from agent_task_events")).scalar())
+            db.session.commit()
+            print('DBG_committed_ok')
+        except Exception as _e:
+            import traceback as _tb
+            print('DBG_commit_error=', repr(_e))
+            _tb.print_exc()
+    try:
+        from sqlalchemy import text as _t2
+        print('DBG_post_commit_count=', db.session.execute(_t2("select count(*) from agent_task_events")).scalar())
+        print('DBG_session_id=', id(db.session))
+    except Exception as _e:
+        print('DBG_post_commit_err=', _e)
     return created
