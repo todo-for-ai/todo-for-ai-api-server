@@ -168,12 +168,18 @@ class TestBindingValidation:
         def boom():
             raise RuntimeError("commit fail")
         monkeypatch.setattr(binding_mod.db.session, "commit", boom)
-        resp = client.put(
-            f"{BASE_URL}/projects/{owned_project.id}/repo",
-            json={"repo_owner": "a", "repo_name": "b"},
-            headers=owner_auth["headers"],
-        )
-        assert resp.status_code == 500
+        try:
+            resp = client.put(
+                f"{BASE_URL}/projects/{owned_project.id}/repo",
+                json={"repo_owner": "a", "repo_name": "b"},
+                headers=owner_auth["headers"],
+            )
+            assert resp.status_code == 500
+        finally:
+            # 会话级共享 session 的全局手术必须就地复原：boom 若泄漏进
+            # fixture teardown，会毒化共享会话并级联污染后续所有模块
+            monkeypatch.undo()
+            binding_mod.db.session.rollback()
 
     def test_delete_repo_404_project_missing(self, client, owner_auth):
         resp = client.delete(f"{BASE_URL}/projects/987654/repo", headers=owner_auth["headers"])
@@ -192,8 +198,12 @@ class TestBindingValidation:
         def boom():
             raise RuntimeError("commit fail")
         monkeypatch.setattr(binding_mod.db.session, "commit", boom)
-        resp = client.delete(f"{BASE_URL}/projects/{owned_project.id}/repo", headers=owner_auth["headers"])
-        assert resp.status_code == 500
+        try:
+            resp = client.delete(f"{BASE_URL}/projects/{owned_project.id}/repo", headers=owner_auth["headers"])
+            assert resp.status_code == 500
+        finally:
+            monkeypatch.undo()
+            binding_mod.db.session.rollback()
 
 
 class TestCreatePrValidation:
@@ -632,12 +642,16 @@ class TestReviewValidation:
         def boom():
             raise RuntimeError("db down")
         monkeypatch.setattr(lifecycle_mod.db.session, "commit", boom)
-        resp = client.post(
-            f"{BASE_URL}/tasks/{task.id}/pull-request/review",
-            json={"decision": "rejected", "reviewer_agent_id": 3},
-            headers=owner_auth["headers"],
-        )
-        assert resp.status_code == 500
+        try:
+            resp = client.post(
+                f"{BASE_URL}/tasks/{task.id}/pull-request/review",
+                json={"decision": "rejected", "reviewer_agent_id": 3},
+                headers=owner_auth["headers"],
+            )
+            assert resp.status_code == 500
+        finally:
+            monkeypatch.undo()
+            lifecycle_mod.db.session.rollback()
 
 
 class TestMergeValidation:

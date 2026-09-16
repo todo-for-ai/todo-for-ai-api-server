@@ -6,7 +6,7 @@ import json
 from datetime import timedelta
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
-from flask import Blueprint, g
+from flask import Blueprint, g, current_app
 from models import (
     db,
     AgentSecret,
@@ -169,10 +169,25 @@ def _resolve_accessible_project_ids(agent):
 _DEPENDENCY_TERMINAL_STATUSES = (TaskStatus.DONE, TaskStatus.CANCELLED)
 
 
-def _unsatisfied_blocker_ids(task):
+def _handoff_settle_seconds():
+    """依赖解锁的交接沉降窗口（秒），AGENT_HANDOFF_SETTLE_SECONDS，默认 0 关闭。
+
+    竞态背景：上游 commit 终态与交接产出写入（shared_context，通常由编排者
+    或上游 Agent 随后写入）之间存在时间窗——空闲 Agent 在窗口内即可抢走
+    下游任务，导致其 pull payload 里没有 upstream 交接数据。
+    """
+    try:
+        return max(0, int(current_app.config.get('AGENT_HANDOFF_SETTLE_SECONDS', 0) or 0))
+    except Exception:
+        return 0
+
+
+def _unsatisfied_blocker_ids(task, apply_settle=True):
     """返回该任务 blocked_by 中尚未解除的引用 id 列表（解除条件见 _DEPENDENCY_TERMINAL_STATUSES）。
 
     指向已删除任务的失效引用视为解除——依赖图残骸不应卡死派发。
+    apply_settle=True（派发路径）时，已终态但仍在交接沉降窗口内的上游
+    视为未解除；事件留痕路径（task_handoff）传 False，保持「终态即解锁」。
     """
     blocker_ids = []
     for raw in (task.blocked_by_task_ids or []):
@@ -183,13 +198,29 @@ def _unsatisfied_blocker_ids(task):
     if not blocker_ids:
         return []
 
-    rows = db.session.query(Task.id, Task.status).filter(Task.id.in_(blocker_ids)).all()
-    status_by_id = {int(row[0]): row[1] for row in rows}
-    return [
-        blocker_id for blocker_id in blocker_ids
-        if status_by_id.get(blocker_id) is not None
-        and status_by_id[blocker_id] not in _DEPENDENCY_TERMINAL_STATUSES
-    ]
+    settle = _handoff_settle_seconds() if apply_settle else 0
+    now = now_utc()
+    rows = db.session.query(Task.id, Task.status, Task.updated_at).filter(Task.id.in_(blocker_ids)).all()
+    rows_by_id = {int(row[0]): row for row in rows}
+
+    def _still_blocked(blocker_id):
+        row = rows_by_id.get(blocker_id)
+        if row is None:
+            # 失效引用视为解除
+            return False
+        status, updated_at = row[1], row[2]
+        if status not in _DEPENDENCY_TERMINAL_STATUSES:
+            return True
+        if settle and updated_at is not None:
+            try:
+                elapsed = (now - updated_at).total_seconds()
+            except TypeError:
+                return True
+            if elapsed < settle:
+                return True
+        return False
+
+    return [blocker_id for blocker_id in blocker_ids if _still_blocked(blocker_id)]
 
 
 def _fetch_next_task(agent):

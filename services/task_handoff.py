@@ -84,7 +84,9 @@ def downstream_unblocked_by(task):
         blocker_ids = _blocker_ids(candidate)
         if task.id not in blocker_ids:
             continue
-        if not _unsatisfied_blocker_ids(candidate):
+        # 事件留痕走「终态即解锁」语义（apply_settle=False）：解锁通知在
+        # 逻辑解锁时刻产生；交接沉降窗口只延迟派发（pull 依赖门）。
+        if not _unsatisfied_blocker_ids(candidate, apply_settle=False):
             unblocked.append(candidate)
     return unblocked
 

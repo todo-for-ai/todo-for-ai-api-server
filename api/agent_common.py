@@ -9,7 +9,7 @@ import secrets
 from datetime import datetime
 from functools import wraps
 from typing import Any, Optional
-from flask import g, request
+from flask import g, has_request_context, request
 from sqlalchemy import inspect
 from models import (
     db,
@@ -205,6 +205,17 @@ def _write_agent_activity_event(
     db.session.add(event)
 
 
+def _request_header(name):
+    """读请求头；无请求上下文（后台线程/调度器/ORM 直写路径）时返回 None。
+
+    修复：此前直接访问 request.headers，后台路径调用 write_agent_audit
+    会抛 RuntimeError 且事件静默丢失。
+    """
+    if not has_request_context():
+        return None
+    return request.headers.get(name)
+
+
 def write_agent_audit(event_type, actor_type, actor_id, target_type, target_id, workspace_id, payload=None, risk_score=0):
     payload_data = dict(payload or {}) if isinstance(payload, dict) else {}
     if payload and not isinstance(payload, dict):
@@ -214,12 +225,12 @@ def write_agent_audit(event_type, actor_type, actor_id, target_type, target_id, 
     correlation_id = _to_text_optional(
         payload_data.get('correlation_id')
         or payload_data.get('trace_id')
-        or request.headers.get('X-Correlation-ID')
-        or request.headers.get('X-Trace-ID')
+        or _request_header('X-Correlation-ID')
+        or _request_header('X-Trace-ID')
     )
     request_id = _to_text_optional(
         payload_data.get('request_id')
-        or request.headers.get('X-Request-ID')
+        or _request_header('X-Request-ID')
     )
     run_id = _to_text_optional(payload_data.get('run_id'))
     attempt_id = _to_text_optional(payload_data.get('attempt_id'))
@@ -267,8 +278,8 @@ def write_agent_audit(event_type, actor_type, actor_id, target_type, target_id, 
         duration_ms=duration_ms,
         error_code=error_code,
         payload=payload_data,
-        ip=request.remote_addr,
-        user_agent=request.headers.get('User-Agent', ''),
+        ip=(request.remote_addr if has_request_context() else None),
+        user_agent=(_request_header('User-Agent') or ''),
         occurred_at=now_utc(),
     )
     db.session.add(event)

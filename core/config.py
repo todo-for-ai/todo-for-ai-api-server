@@ -126,6 +126,12 @@ class Config:
     ORCHESTRATOR_ENABLED = os.environ.get('ORCHESTRATOR_ENABLED', 'false').lower() == 'true'
     ORCHESTRATOR_INTERVAL_SECONDS = int(os.environ.get('ORCHESTRATOR_INTERVAL_SECONDS', '300'))  # default 5 min
     ORCHESTRATOR_USER_ID = int(os.environ.get('ORCHESTRATOR_USER_ID', '0') or '0')  # owner scope; 0 = skip
+
+    # 依赖解锁的交接沉降窗口（秒）：上游任务 commit 终态后等待 N 秒才放行
+    # 下游派发，给交接产出（shared_context）写入留出时间——上游终态与交接
+    # 写入是两个动作，空闲 Agent 在窗口内抢走下游会拿不到 upstream 数据。
+    # 0 = 关闭（终态即放行，历史行为）。
+    AGENT_HANDOFF_SETTLE_SECONDS = int(os.environ.get('AGENT_HANDOFF_SETTLE_SECONDS', '0') or '0')
     
     @staticmethod
     def init_app(app):
