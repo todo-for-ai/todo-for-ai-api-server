@@ -417,6 +417,16 @@ def commit_task(task_id):
     except Exception:
         pass
 
+    # 出站 webhook 订阅推送：任务完成/失败事件（异步线程，失败不回传调用方）
+    try:
+        if final_status in ('succeeded', 'failed'):
+            from services.webhook_dispatcher import dispatch_event, task_snapshot
+            dispatch_event(agent.workspace_id,
+                           'task.completed' if final_status == 'succeeded' else 'task.failed',
+                           {'task': task_snapshot(task), 'agent_id': agent.id})
+    except Exception:
+        pass
+
     return ApiResponse.success(
         {
             'task_id': task.id,

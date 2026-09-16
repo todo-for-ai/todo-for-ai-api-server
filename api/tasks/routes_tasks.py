@@ -398,6 +398,14 @@ def create_task():
 
         db.session.commit()
 
+        # 出站 webhook 订阅推送（异步后台线程，不阻塞请求）
+        try:
+            from services.webhook_dispatcher import dispatch_event, task_snapshot
+            dispatch_event(project.organization_id, 'task.created',
+                           {'task': task_snapshot(task)})
+        except Exception:
+            pass
+
         if task.is_ai_task:
             from services.agent_runtime_controller import AgentRuntimeController
             AgentRuntimeController.auto_assign_task(task)

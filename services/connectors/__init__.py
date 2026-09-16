@@ -36,3 +36,21 @@ from services.connectors.linear import (  # noqa: F401
     LINEAR_STATE_MAP,
     ingest_linear,
 )
+from services.connectors.lark import (  # noqa: F401
+    get_tenant_access_token,
+    ingest_lark,
+    load_secrets as load_lark_secrets,
+    send_lark_task_card,
+    verify_lark_token,
+)
+from services.connectors.wecom import (  # noqa: F401
+    get_access_token as get_wecom_access_token,
+    ingest_message as ingest_wecom_message,
+    load_secrets as load_wecom_secrets,
+    send_wecom_task_notify,
+    verify_callback as verify_wecom_callback,
+)
+from services.connectors.generic import (  # noqa: F401
+    ingest_generic,
+    verify_generic_token,
+)

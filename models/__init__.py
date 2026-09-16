@@ -32,6 +32,7 @@ from .agent_memory import AgentMemory, MemoryScopeType, SCOPE_PRECEDENCE, SCOPE_
 from .knowledge_proposal import ProjectKnowledgeProposal
 from .workspace_sso_config import WorkspaceSSOConfig
 from .external_connector_config import ExternalConnectorConfig
+from .webhook_subscription import WebhookSubscription, WebhookDelivery
 from .attachment import Attachment
 from .api_token import ApiToken
 from .user_project_pin import UserProjectPin
@@ -175,6 +176,8 @@ __all__ = [
     'ProjectKnowledgeProposal',
     'WorkspaceSSOConfig',
     'ExternalConnectorConfig',
+    'WebhookSubscription',
+    'WebhookDelivery',
     'ActionType',
     'Attachment',
     'ApiToken',

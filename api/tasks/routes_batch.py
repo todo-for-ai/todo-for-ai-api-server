@@ -58,6 +58,21 @@ def batch_update_status():
     # 任务图实时刷新：批量状态变更按项目分组通知（TaskGraphTab 订阅）
     _notify_graph_by_project(tasks, 'batch_status_changed')
 
+    # 出站 webhook 订阅推送（异步后台线程，不阻塞请求）
+    try:
+        from services.webhook_dispatcher import dispatch_event, task_snapshot
+        from models import Project as _Project
+        for project_id in {t.project_id for t in tasks}:
+            project = db.session.get(_Project, project_id)
+            ws_id = project.organization_id if project else None
+            if ws_id:
+                for t in tasks:
+                    if t.project_id == project_id:
+                        dispatch_event(ws_id, 'task.status_changed',
+                                       {'task': task_snapshot(t)})
+    except Exception:
+        pass
+
     return ApiResponse.success(data={'updated': len(tasks)}).to_response()
 
 
