@@ -37,11 +37,13 @@ logger = structlog.get_logger()
 
 PROVIDER_DIFY = "dify"
 PROVIDER_COZE = "coze"
-SUPPORTED_PROVIDERS = (PROVIDER_DIFY, PROVIDER_COZE)
+PROVIDER_HTTP = "http"
+SUPPORTED_PROVIDERS = (PROVIDER_DIFY, PROVIDER_COZE, PROVIDER_HTTP)
 DEFAULT_TIMEOUT_SECONDS = 100
 MASK_PREFIX = "••••"
 _DIFY_DEFAULT_BASE = "https://api.dify.ai/v1"
 _COZE_DEFAULT_BASE = "https://api.coze.cn"
+_HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD")
 
 
 def is_external_step(step_def):
@@ -59,12 +61,28 @@ def validate_integration_config(raw):
         raise ValueError(
             f"integration provider must be one of {', '.join(SUPPORTED_PROVIDERS)}"
         )
-    if not str(raw.get("api_key") or "").strip():
+    # http 连接器允许匿名调用（api_key 可选，配置后作为 Bearer 头）
+    if provider != PROVIDER_HTTP and not str(raw.get("api_key") or "").strip():
         raise ValueError("integration api_key is required")
     if provider == PROVIDER_COZE and not str(raw.get("workflow_id") or "").strip():
         raise ValueError("integration workflow_id is required for coze")
     if raw.get("inputs") is not None and not isinstance(raw.get("inputs"), dict):
         raise ValueError("integration inputs must be an object")
+    if provider == PROVIDER_HTTP:
+        method = str(raw.get("method") or "POST").upper()
+        if method not in _HTTP_METHODS:
+            raise ValueError(f"http method must be one of {', '.join(_HTTP_METHODS)}")
+        if not str(raw.get("url") or "").strip():
+            raise ValueError("http url is required")
+        headers = raw.get("headers")
+        if headers is not None:
+            if not isinstance(headers, dict) or not all(
+                    isinstance(v, (str, int, float)) for v in headers.values()):
+                raise ValueError("http headers must be an object of string values")
+        if raw.get("body") is not None and not isinstance(raw.get("body"), (dict, str)):
+            raise ValueError("http body must be an object or string")
+        if not isinstance(raw.get("allow_private_hosts", False), bool):
+            raise ValueError("http allow_private_hosts must be a boolean")
     return raw
 
 
@@ -199,6 +217,108 @@ def render_inputs(config, wf_run, step_def):
     return rendered
 
 
+def render_inputs(config, wf_run, step_def):
+    """Deep-render ``{{...}}`` placeholders across the configured inputs."""
+    rendered = {}
+    for k, v in (config.get("inputs") or {}).items():
+        if isinstance(v, dict):
+            rendered[k] = {kk: _render_value(vv, wf_run, step_def) for kk, vv in v.items()}
+        elif isinstance(v, list):
+            rendered[k] = [_render_value(vv, wf_run, step_def) for vv in v]
+        else:
+            rendered[k] = _render_value(v, wf_run, step_def)
+    return rendered
+
+
+def render_http_request(config, wf_run, step_def):
+    """Render the http connector's url/headers/body with ``{{...}}`` placeholders."""
+    body = config.get("body")
+    if isinstance(body, dict):
+        body = {k: _render_value(v, wf_run, step_def) for k, v in body.items()}
+    elif isinstance(body, str):
+        body = _render_value(body, wf_run, step_def)
+    return {
+        "method": str(config.get("method") or "POST").upper(),
+        "url": _render_value(str(config.get("url") or ""), wf_run, step_def),
+        "headers": {str(k): _render_value(v, wf_run, step_def)
+                    for k, v in (config.get("headers") or {}).items()},
+        "body": body,
+    }
+
+
+def assert_public_url(url):
+    """SSRF 防护（借鉴 Dify http 节点的私网隔离思想）。
+
+    解析域名并拒绝解析到私网/回环/链路本地/保留段的地址，
+    防止工作流作者用 http 节点探测内网。显式允许：config.allow_private_hosts。
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"http url scheme must be http(s): {url[:200]}")
+    host = parsed.hostname
+    if not host:
+        raise ValueError(f"http url has no host: {url[:200]}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as exc:
+        raise ValueError(f"http url host unresolvable: {host} ({exc})") from exc
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast):
+            raise ValueError(
+                f"http url resolves to a non-public address ({ip}) — blocked by SSRF guard")
+
+
+def _call_http_workflow(config, request, timeout_seconds):
+    """Execute the rendered http request. Returns (ok, output_text, error)."""
+    url = str(request.get("url") or "").strip()
+    if not url:
+        return False, "", "http url is required"
+    if not config.get("allow_private_hosts"):
+        try:
+            assert_public_url(url)
+        except ValueError as exc:
+            return False, "", str(exc)
+
+    headers = dict(request.get("headers") or {})
+    body = request.get("body")
+    api_key = resolve_api_key(config)
+    if api_key and not any(k.lower() == "authorization" for k in headers):
+        headers["Authorization"] = f"Bearer {api_key}"
+    if isinstance(body, dict) and not any(k.lower() == "content-type" for k in headers):
+        headers["Content-Type"] = "application/json"
+
+    try:
+        resp = http_client.request(
+            request.get("method") or "POST",
+            url,
+            headers=headers or None,
+            json=body if isinstance(body, dict) else None,
+            data=body if isinstance(body, str) else None,
+            timeout=timeout_seconds,
+        )
+    except http_client.RequestException as exc:
+        return False, "", f"http request failed: {exc}"
+
+    text = resp.text or ""
+    if resp.status_code >= 400:
+        return False, "", f"HTTP {resp.status_code}: {text[:500]}"
+    if resp.status_code >= 200 and text:
+        try:
+            return True, json.dumps(json.loads(text), ensure_ascii=False), ""
+        except ValueError:
+            return True, text, ""
+    if resp.status_code >= 200:
+        return True, "", ""
+    return False, "", f"HTTP {resp.status_code}: unexpected status"
+
+
 def _post_json(url, headers, payload, timeout):
     resp = http_client.post(url, headers=headers, json=payload, timeout=timeout)
     body = resp.text or ""
@@ -224,9 +344,19 @@ def resolve_api_key(config):
     return decrypt_str(stored) or str(stored)
 
 
-def call_external_workflow(config, inputs, timeout_seconds):
-    """Invoke the remote workflow. Returns (ok, output_text, error)."""
+def call_external_workflow(config, wf_run, step_def, timeout_seconds):
+    """Render placeholders and invoke the remote workflow/API.
+
+    Returns (ok, output_text, error). Dify/Coze render ``inputs``;
+    http renders url/headers/body.
+    """
     provider = config["provider"]
+
+    if provider == PROVIDER_HTTP:
+        request = render_http_request(config, wf_run, step_def)
+        return _call_http_workflow(config, request, timeout_seconds)
+
+    inputs = render_inputs(config, wf_run, step_def)
     api_key = resolve_api_key(config)
     if not api_key:
         return False, "", "integration api_key missing or undecryptable"
@@ -294,8 +424,7 @@ def _execute_with_objects(wf_run, step_def, timeout_seconds=None):
             or step_def.timeout_seconds
             or DEFAULT_TIMEOUT_SECONDS
         )
-        inputs = render_inputs(config, wf_run, step_def)
-        ok, output_text, err = call_external_workflow(config, inputs, timeout)
+        ok, output_text, err = call_external_workflow(config, wf_run, step_def, timeout)
         if ok:
             # 外部步骤没有 task_id，输出只能落在 result_summary 供下游/控制台读
             sr.result_summary = output_text[:20000]

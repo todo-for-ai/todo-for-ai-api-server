@@ -49,7 +49,9 @@ def _clean_integration_config(config):
         return None
     cleaned = {
         k: v for k, v in config.items()
-        if k in ("provider", "base_url", "workflow_id", "inputs", "timeout_seconds")
+        if k in ("provider", "base_url", "workflow_id", "inputs", "timeout_seconds",
+                 # http 连接器：url/headers/body/method 可移植（api_key 仍被剔除）
+                 "method", "url", "headers", "body", "allow_private_hosts")
     }
     return cleaned or None
 

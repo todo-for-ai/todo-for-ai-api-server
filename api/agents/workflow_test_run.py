@@ -14,6 +14,7 @@ from ._shared import Agent
 from .workflow_external_steps import (
     call_external_workflow,
     is_external_step,
+    render_http_request,
     render_inputs,
 )
 from ._workflow_helpers import _pick_agent_for_step
@@ -45,18 +46,23 @@ def test_run_step(wf, step_def, instructions="", context=None, timeout_seconds=N
 
     if is_external_step(step_def):
         config = dict(step_def.integration_config or {})
-        inputs = render_inputs(config, wf_run, step_def)
         timeout = timeout_seconds or DEFAULT_TEST_TIMEOUT_SECONDS
         timeout = max(1, min(int(timeout), MAX_TEST_TIMEOUT_SECONDS))
+        # 预览请求体/输入（渲染占位符）；http 连接器展示 url/method，其余展示 inputs
+        if config.get("provider") == "http":
+            request_preview = render_http_request(config, wf_run, step_def)
+        else:
+            request_preview = {"inputs": render_inputs(config, wf_run, step_def)}
         try:
-            ok, output_text, error = call_external_workflow(config, inputs, timeout)
+            ok, output_text, error = call_external_workflow(
+                config, wf_run, step_def, timeout)
         except Exception as exc:  # noqa: BLE001 — 远端异常即测试结果
             ok, output_text, error = False, "", f"{type(exc).__name__}: {exc}"
         return {
             "mode": "external",
             "provider": config.get("provider"),
             "ok": ok,
-            "inputs": inputs,
+            "request": request_preview,
             "output": output_text if ok else "",
             "error": error,
             "note": "真实调用了远端工作流（未创建运行记录）",
