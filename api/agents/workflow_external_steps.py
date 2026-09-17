@@ -17,7 +17,11 @@ Config schema (stored encrypted-at-rest for api_key, masked in responses):
 
 Input placeholders: ``{{step_result_<key>}}`` (upstream SharedContext),
 ``{{context.<name>}}`` (run context), ``{{root_task_title}}``,
-``{{root_task_id}}``, ``{{run_id}}``, ``{{step_key}}``, ``{{step_description}}``.
+``{{root_task_id}}``, ``{{run_id}}``, ``{{step_key}}``, ``{{step_description}}``,
+以及 Dify 风格系统变量前缀 ``{{sys.run_id}}`` / ``{{sys.workflow_id}}`` /
+``{{sys.workflow_name}}`` / ``{{sys.project_id}}`` / ``{{sys.root_task_id}}`` /
+``{{sys.root_task_title}}`` / ``{{sys.step_key}}`` / ``{{sys.step_name}}`` /
+``{{sys.step_description}}``（未识别的 sys.* 解析为空串，不透传原文）。
 """
 
 import json
@@ -99,8 +103,38 @@ def normalize_incoming_integration_config(raw, previous=None):
     return cfg or None
 
 
+def _resolve_sys_placeholder(name, wf_run, step_def):
+    """Dify 风格 ``sys.*`` 系统变量（借鉴其 variable_prefixes 思路）。
+
+    返回 (resolved, handled)；未识别的 sys.* 名称 handled=True、值为空串
+    （避免把 ``{{sys.xxx}}`` 原样发到远端平台）。
+    """
+    if name == "sys.run_id":
+        return str(wf_run.id), True
+    if name == "sys.workflow_id":
+        return str(wf_run.workflow_id), True
+    if name == "sys.workflow_name":
+        return (wf_run.workflow.name if wf_run.workflow else ""), True
+    if name == "sys.project_id":
+        return str(wf_run.project_id or ""), True
+    if name == "sys.root_task_id":
+        return str(wf_run.root_task_id or ""), True
+    if name == "sys.root_task_title":
+        return (wf_run.root_task.title if wf_run.root_task else ""), True
+    if name == "sys.step_key":
+        return step_def.step_key, True
+    if name == "sys.step_name":
+        return getattr(step_def, "name", "") or "", True
+    if name == "sys.step_description":
+        return getattr(step_def, "description", "") or "", True
+    return "", True
+
+
 def _resolve_placeholder(name, wf_run, step_def):
     """Resolve one ``{{...}}`` placeholder name to its value ('' if unknown)."""
+    if name.startswith("sys."):
+        value, _ = _resolve_sys_placeholder(name, wf_run, step_def)
+        return value
     if name.startswith("step_result_"):
         from ._shared import SharedContext, WorkflowStepRun
         src_key = name[len("step_result_"):]
@@ -115,8 +149,8 @@ def _resolve_placeholder(name, wf_run, step_def):
     if name.startswith("context."):
         ctx = wf_run.context or {}
         return str(ctx.get(name[len("context."):], ""))
-    if name == "root_task_title" and wf_run.root_task:
-        return wf_run.root_task.title or ""
+    if name in ("root_task_title",):
+        return (wf_run.root_task.title if wf_run.root_task else "")
     if name == "root_task_id":
         return str(wf_run.root_task_id or "")
     if name == "run_id":

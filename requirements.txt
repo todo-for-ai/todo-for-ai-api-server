@@ -50,3 +50,4 @@ pytest-cov==4.1.0
 # Flask-Caching==2.1.0
 # flasgger==0.9.7.1
 # Flask-Mail==0.9.1
+PyYAML>=6.0
