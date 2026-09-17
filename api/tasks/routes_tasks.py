@@ -723,6 +723,14 @@ def update_task(task_id):
         if status_change:
             notify_task_graph_changed(task.project_id, [task.id], 'status_changed')
 
+        # 工作流执行闭环：人工把步骤任务置 DONE 时自动完成对应工作流步骤并推进 DAG
+        if status_change and status_change[2] == TaskStatus.DONE:
+            try:
+                from api.agents.workflow_completion import maybe_autocomplete_for_task
+                maybe_autocomplete_for_task(task.id, success=True, source='task_update')
+            except Exception:
+                pass
+
         # 记录变更历史
         status_changed = False
         for field_name, old_value, new_value in changes:

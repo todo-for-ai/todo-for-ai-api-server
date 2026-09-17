@@ -15,6 +15,7 @@ from .workflow_conditions import (
     _apply_runtime_overrides,
     _evaluate_step_condition,
 )
+from .workflow_external_steps import is_external_step
 from ._shared import (
     db,
     Agent,
@@ -205,6 +206,20 @@ def _start_step(wf_run, step_run, step_def, now):
     step_run.status = StepStatus.RUNNING
     step_run.started_at = now
 
+    # --- External platform connector (Dify / Coze): the step is executed by
+    # calling the remote workflow API — no agent task is created. Completion
+    # is written back via the shared complete_step_run core. ---
+    if is_external_step(step_def):
+        from flask import current_app
+
+        from .workflow_external_steps import dispatch_external_step
+
+        dispatch_external_step(
+            wf_run, step_run, step_def, now,
+            synchronous=bool(current_app.config.get("TESTING")),
+        )
+        return
+
     # --- Sub-workflow handling ---
     if step_def.sub_workflow_id:
         sub_wf = Workflow.query.filter_by(id=step_def.sub_workflow_id, owner_id=wf_run.owner_id).first()
@@ -225,6 +240,7 @@ def _start_step(wf_run, step_run, step_def, now):
             owner_id=wf_run.owner_id,
             status=WorkflowStatus.PENDING,
         )
+        db.session.flush()  # 立即取 sub_run.id——下方 step run 创建依赖它
         # Create step runs for sub-workflow
         for sub_step in sub_wf.steps:
             WorkflowStepRun.create(
