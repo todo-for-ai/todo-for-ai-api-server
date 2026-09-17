@@ -107,6 +107,11 @@ class WorkflowStep(BaseModel):
     condition = Column(JSON, comment="Condition for execution: {step_key, operator, value} e.g. {step_key: 'review', operator: 'succeeded', value: true}")
     # Sub-workflow: this step launches another workflow instead of a single task
     sub_workflow_id = Column(Integer, ForeignKey("workflows.id"), nullable=True, comment="Sub-workflow to launch (instead of creating a single task)")
+    # External workflow platform connector (Dify / Coze). When set, the step is
+    # executed by calling the remote platform's workflow API instead of
+    # creating an agent task. Keys: provider(dify|coze), base_url,
+    # api_key(encrypted), workflow_id(coze), inputs(placeholder templates).
+    integration_config = Column(JSON, comment="External platform connector config (dify|coze)")
     # Execution config
     timeout_seconds = Column(Integer, comment="Step-level timeout (0 = no timeout)")
     retry_count = Column(Integer, default=0, comment="Number of automatic retries on failure")
@@ -128,7 +133,21 @@ class WorkflowStep(BaseModel):
         result["depends_on"] = self.depends_on or []
         result["condition"] = self.condition or None
         result["sub_workflow_id"] = self.sub_workflow_id
+        result["integration_config"] = self.public_integration_config()
         return result
+
+    def public_integration_config(self):
+        """Integration config safe for API responses — api_key masked.
+
+        The stored api_key is an encrypt_str() ciphertext; callers round-trip
+        the masked value back on PUT and the route reuses the stored ciphertext
+        (see workflow_routes.update_workflow).
+        """
+        cfg = dict(self.integration_config or {})
+        if cfg.get("api_key"):
+            cfg["api_key"] = "••••" + str(cfg["api_key"])[-4:]
+            cfg["api_key_set"] = True
+        return cfg or None
 
 
 class WorkflowRun(BaseModel):

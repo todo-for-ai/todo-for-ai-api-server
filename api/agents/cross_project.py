@@ -173,13 +173,15 @@ def list_project_external_agents(project_id):
         return ApiResponse.error("Access denied").to_response()
 
     authorizations = CrossProjectAgent.get_active_for_project(project_id)
-    return paginate_query(
+    args = get_request_args()
+    result = paginate_query(
         CrossProjectAgent.query.filter(
             CrossProjectAgent.project_id == project_id,
             CrossProjectAgent.is_active == True,
         ).order_by(CrossProjectAgent.created_at.desc()),
-        "agents",
+        args["page"], args["per_page"],
     )
+    return ApiResponse.success(result).to_response()
 
 
 @agents_bp.route("/cross-project/discover-agents", methods=["GET"])
@@ -263,7 +265,8 @@ def find_capable_agents_cross_project():
     ))
 
     # Filter by specific project if requested
-    filter_project_id = args.get("project_id", type=int)
+    # get_request_args 返回普通 dict，带 type= 的过滤须走 request.args
+    filter_project_id = request.args.get("project_id", type=int)
     if filter_project_id:
         if filter_project_id not in project_ids:
             return ApiResponse.error("No access to specified project").to_response()
