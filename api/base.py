@@ -98,20 +98,25 @@ class ApiResponse:
 
 
 
-def paginate_query(query, page=1, per_page=20, max_per_page=100):
+def paginate_query(query, page=1, per_page=20, max_per_page=100, serializer=None):
     """
     优化的分页查询工具函数 - 使用延迟加载提升性能
-    
+
     Args:
         query: SQLAlchemy 查询对象
         page: 页码
         per_page: 每页数量
         max_per_page: 最大每页数量
-    
+        serializer: 可选的条目序列化函数（默认 item.to_dict()），
+                    需要带参序列化（如 to_dict(include_steps=True)）时传入
+
     Returns:
         分页结果字典
     """
     from sqlalchemy import func
+
+    if serializer is None:
+        serializer = lambda item: item.to_dict()  # noqa: E731
     
     # 限制每页数量
     per_page = min(per_page, max_per_page)
@@ -132,7 +137,7 @@ def paginate_query(query, page=1, per_page=20, max_per_page=100):
     next_num = page + 1 if has_next else None
     
     return {
-        'items': [item.to_dict() for item in items],
+        'items': [serializer(item) for item in items],
         'pagination': {
             'page': page,
             'per_page': per_page,

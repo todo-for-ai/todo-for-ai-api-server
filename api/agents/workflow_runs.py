@@ -121,17 +121,21 @@ def list_workflow_runs():
     user = get_current_user()
     args = get_request_args()
     query = WorkflowRun.query.filter_by(owner_id=user.id)
-    if args.get("workflow_id", type=int):
-        query = query.filter_by(workflow_id=args.get("workflow_id", type=int))
+    # get_request_args 返回普通 dict，带 type= 的过滤须走 request.args
+    workflow_id = request.args.get("workflow_id", type=int)
+    if workflow_id:
+        query = query.filter_by(workflow_id=workflow_id)
     if args.get("status"):
         try:
             query = query.filter_by(status=WorkflowStatus(args.get("status")))
         except ValueError:
             pass
     query = query.order_by(WorkflowRun.created_at.desc())
-    result = paginate_query(query, args)
-    items = [r.to_dict(include_step_runs=True) for r in result["items"]]
-    return ApiResponse.paginated(items, result["pagination"]).to_response()
+    result = paginate_query(
+        query, args["page"], args["per_page"],
+        serializer=lambda r: r.to_dict(include_step_runs=True),
+    )
+    return ApiResponse.success(result).to_response()
 
 
 @agents_bp.route("/workflow-runs/<int:run_id>", methods=["GET"])

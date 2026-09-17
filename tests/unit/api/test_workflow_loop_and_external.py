@@ -104,7 +104,11 @@ def _make_workflow(env, steps=(), definition=None):
     wf = Workflow(
         owner_id=env["user"].id,
         name=f"wf_{uuid.uuid4().hex[:6]}",
-        definition=definition if definition is not None else {"steps": [s.get("key") for s in steps]},
+        definition=definition if definition is not None else {
+            # 与路由/模板约定一致：definition.steps 是 dict 列表
+            "steps": [{"step_key": s.get("key"), "depends_on": s.get("depends_on") or []}
+                      for s in steps],
+        },
     )
     db.session.add(wf)
     db.session.flush()
@@ -556,3 +560,69 @@ class TestWorkflowRoutesIntegration:
         stored = WorkflowStep.query.filter_by(workflow_id=wf["id"], step_key="a").first()
         from services.github_app import decrypt_str
         assert decrypt_str(stored.integration_config["api_key"]) == "app-live-key"
+
+
+# ── 列表端点回归：主干上这批 GET 从未工作过 ───────────────────────────
+
+
+class TestWorkflowListEndpoints:
+    """GET /agents/workflows 与 /agents/workflow-runs 曾有三连 bug：
+    dict.get(type=) TypeError、paginate_query(query, args) 传 dict、
+    ApiResponse.paginated 不存在、分页后再 to_dict 双重序列化。"""
+
+    def _headers(self, user):
+        from flask_jwt_extended import create_access_token
+        return {"Authorization": f"Bearer {create_access_token(identity=str(user.id))}"}
+
+    def test_list_workflows_returns_steps_and_masked_config(self, client, env):
+        wf = _make_workflow(env, [
+            {"key": "a"},
+            {"key": "ext", "integration_config": {"provider": "dify", "api_key": "app-list-key"}},
+        ])
+        resp = client.get(
+            f"{BASE_URL}/agents/workflows?per_page=100",
+            headers=self._headers(env["user"]),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert "items" in data and "pagination" in data
+        mine = next(w for w in data["items"] if w["id"] == wf.id)
+        assert [s["step_key"] for s in mine["steps"]] == ["a", "ext"]
+        cfg = mine["steps"][1]["integration_config"]
+        assert cfg["api_key"].startswith("••••") and cfg["api_key_set"] is True
+
+    def test_list_workflows_is_active_filter(self, client, env):
+        wf = _make_workflow(env, [{"key": "a"}])
+        client.put(
+            f"{BASE_URL}/agents/workflows/{wf.id}",
+            json={"is_active": False},
+            headers=self._headers(env["user"]),
+        )
+        active = client.get(
+            f"{BASE_URL}/agents/workflows?is_active=true", headers=self._headers(env["user"]))
+        inactive = client.get(
+            f"{BASE_URL}/agents/workflows?is_active=false", headers=self._headers(env["user"]))
+        assert active.status_code == 200 and inactive.status_code == 200
+        assert all(w["is_active"] for w in active.get_json()["data"]["items"])
+        assert all(not w["is_active"] for w in inactive.get_json()["data"]["items"])
+
+    def test_list_workflow_runs_pagination_shape(self, client, env):
+        wf = _make_workflow(env, [{"key": "a"}])
+        _make_run(env, wf, step_keys=["a"])
+        resp = client.get(
+            f"{BASE_URL}/agents/workflow-runs?per_page=10&workflow_id={wf.id}",
+            headers=self._headers(env["user"]),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        data = resp.get_json()["data"]
+        assert len(data["items"]) == 1
+        assert data["items"][0]["workflow_id"] == wf.id
+        assert "step_runs" in data["items"][0]
+
+    def test_audit_logs_list_ok(self, client, env):
+        resp = client.get(
+            f"{BASE_URL}/agents/audit-logs?per_page=10",
+            headers=self._headers(env["user"]),
+        )
+        assert resp.status_code == 200, resp.get_json()
+        assert "items" in resp.get_json()["data"]

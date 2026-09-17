@@ -6,7 +6,7 @@ import json as _json
 from datetime import datetime, timedelta
 
 from flask import request
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from .task_escalation import escalate_overdue_tasks as _escalate_overdue_tasks  # 潜伏 NameError 修复
 from ._shared import (
@@ -89,24 +89,23 @@ def list_audit_logs():
         )
     )
 
-    # Filters
+    # Filters（get_request_args 返回普通 dict，带 type= 的过滤须走 request.args）
     if args.get("action"):
         query = query.filter(AuditLog.action == args.get("action"))
     if args.get("resource_type"):
         query = query.filter(AuditLog.resource_type == args.get("resource_type"))
-    if args.get("resource_id", type=int):
-        query = query.filter(AuditLog.resource_id == args.get("resource_id", type=int))
+    if request.args.get("resource_id", type=int):
+        query = query.filter(AuditLog.resource_id == request.args.get("resource_id", type=int))
     if args.get("actor_type"):
         query = query.filter(AuditLog.actor_type == args.get("actor_type"))
-    if args.get("actor_agent_id", type=int):
-        query = query.filter(AuditLog.actor_agent_id == args.get("actor_agent_id", type=int))
-    if args.get("project_id", type=int):
-        query = query.filter(AuditLog.project_id == args.get("project_id", type=int))
+    if request.args.get("actor_agent_id", type=int):
+        query = query.filter(AuditLog.actor_agent_id == request.args.get("actor_agent_id", type=int))
+    if request.args.get("project_id", type=int):
+        query = query.filter(AuditLog.project_id == request.args.get("project_id", type=int))
 
     query = query.order_by(AuditLog.created_at.desc())
-    result = paginate_query(query, args)
-    items = [log.to_dict() for log in result["items"]]
-    return ApiResponse.paginated(items, result["pagination"]).to_response()
+    result = paginate_query(query, args["page"], args["per_page"])
+    return ApiResponse.success(result).to_response()
 
 
 
