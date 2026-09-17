@@ -20,6 +20,7 @@ from models import (
     AgentTaskAttemptState,
     AgentTaskEvent,
     Task,
+    TaskStatus,
     db,
 )
 
@@ -231,6 +232,8 @@ def handle_failed_commit(task, agent, attempt_id: str,
         max_attempts = _max_repair_attempts()
     category = classify_failure(failure_code, failure_reason)
     root = repair_root_of(task)
+    # 锁根行：同一修复族的并发失败结算串行化，防修复预算双花
+    db.session.get(Task, root.id, with_for_update=True)
     members, prior_repairs = _family_repair_stats(root)
     # 族口径：根任务 + 全部修复后代的失败尝试总数；封顶判断与轮次都以此为准，
     # 修复链不再各自为政地嵌套（每个失败的修复又开新链）
@@ -286,6 +289,7 @@ def handle_failed_commit(task, agent, attempt_id: str,
     # 封顶：升级人工（interaction_request 审批事件，budget/pr 审批同一队列可见）。
     # 两口径任一达标即升级：①族失败尝试总数 ≥ max+1（根首败 + max 轮修复）；
     # ②族内已有修复子任务数 ≥ max。与历史嵌套链兼容（族计数含全部后代）。
+    # 判定先于并发去重：预算耗尽时即使有在途修复也必须升级。
     if failed_attempts >= max_attempts + 1 or prior_repairs >= max_attempts:
         if workspace_id:
             payload = {
@@ -323,6 +327,22 @@ def handle_failed_commit(task, agent, attempt_id: str,
             "category": category,
             "failed_attempts": failed_attempts,
             "max_attempts": max_attempts,
+        }
+
+    # 并发去重：若已有兄弟修复任务在途（TODO/IN_PROGRESS，不含刚失败的自己），
+    # 不再新建——live 实测 root 与 repair#1 并发失败时双花预算、同轮生成两个修复。
+    open_siblings = [
+        r for r in members
+        if r.id != task.id and is_repair_task(r)
+        and r.status in (TaskStatus.TODO, TaskStatus.IN_PROGRESS)
+    ]
+    if open_siblings:
+        db.session.commit()
+        return {
+            "action": "repair_pending",
+            "open_repairs": [int(r.id) for r in open_siblings],
+            "category": category,
+            "failed_attempts": failed_attempts,
         }
 
     # 未封顶：生成修复子任务回流——一律挂在根任务下（扁平化），标题取根任务
