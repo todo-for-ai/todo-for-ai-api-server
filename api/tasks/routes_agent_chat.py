@@ -49,3 +49,41 @@ def send_agent_chat(task_id):
     })
 
     return ApiResponse.created(data=log.to_dict()).to_response()
+
+
+@tasks_bp.route('/agent/<int:task_id>/chat', methods=['GET'])
+@agent_session_required
+def get_agent_chat(task_id):
+    """Agent 拉取任务聊天（游标增量）。
+
+    交互式会话的读取半边：daemon 在每次 attempt 构建 prompt 时带
+    after_id（上次已读游标，存工作区锚点）拉取新增留言，把用户在
+    平台上的追问注入引擎 prompt。返回按 id 升序。"""
+    after_id = request.args.get('after_id', 0, type=int)
+    limit = min(max(request.args.get('limit', 100, type=int), 1), 200)
+
+    query = (
+        TaskLog.query
+        .filter(TaskLog.task_id == task_id, TaskLog.id > after_id)
+        .order_by(TaskLog.id.asc())
+        .limit(limit)
+    )
+    rows = query.all()
+    messages = [
+        {
+            'id': row.id,
+            'actor_type': row.actor_type.value if row.actor_type else None,
+            'actor_user_id': row.actor_user_id,
+            'actor_agent_id': row.actor_agent_id,
+            'content': row.content,
+            'parent_id': row.parent_id,
+            'created_at': row.created_at.isoformat() if row.created_at else None,
+        }
+        for row in rows
+    ]
+    last_id = rows[-1].id if rows else after_id
+    return ApiResponse.success(data={
+        'task_id': task_id,
+        'messages': messages,
+        'last_id': last_id,
+    }).to_response()

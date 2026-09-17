@@ -69,4 +69,31 @@ def send_task_chat(task_id):
     db.session.add(log)
     db.session.commit()
 
+    # 前端任务房间实时刷新（与 agent 发送侧对称）
+    from api.user_websocket import push_to_task_room
+    push_to_task_room(task_id, 'task_comment', {
+        'task_id': task_id,
+        'message_id': log.id,
+        'actor_type': 'human',
+        'actor_user_id': user.id if user else None,
+        'content': content,
+    })
+
+    # 交互式会话：任务有在途 attempt 时把留言实时转发给执行 agent。
+    # CLI 引擎（一次性 prompt 模式）无法中途注入，daemon 侧会收下并
+    # 在下一轮执行（--resume 续跑）时经 chat 游标拉取注入 prompt。
+    try:
+        from api.agent_runtime_websocket import find_active_attempt_agent_id, send_event_to_agent
+        agent_id = find_active_attempt_agent_id(task_id)
+        if agent_id is not None:
+            send_event_to_agent(agent_id, 'user_message', {
+                'task_id': task_id,
+                'message_id': log.id,
+                'content': content,
+                'sender_user_id': user.id if user else None,
+                'sender_name': (user.nickname or user.username) if user else None,
+            })
+    except Exception:  # noqa: BLE001 — 下行通知失败不影响留言落库
+        pass
+
     return ApiResponse.created(data=log.to_dict()).to_response()

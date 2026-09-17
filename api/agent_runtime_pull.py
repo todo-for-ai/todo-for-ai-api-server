@@ -515,8 +515,20 @@ def renew_lease(task_id):
     lease.version += 1
     db.session.commit()
 
+    # 交互式取消的兜底通道：任务已被用户取消时随续约响应告知 daemon
+    # （WS cancel_task 命令只覆盖在线场景；daemon 据此终止子进程并按
+    # cancelled 提交，不必等租约超时被平台回收）。
+    cancel_requested = False
+    task_row = db.session.get(Task, task_id)
+    if task_row is not None:
+        cancel_requested = task_row.status == TaskStatus.CANCELLED
+
     return ApiResponse.success(
-        {'lease_id': lease.lease_id, 'lease_expires_at': lease.expires_at.isoformat()},
+        {
+            'lease_id': lease.lease_id,
+            'lease_expires_at': lease.expires_at.isoformat(),
+            'cancel_requested': cancel_requested,
+        },
         'Lease renewed successfully',
     ).to_response()
 

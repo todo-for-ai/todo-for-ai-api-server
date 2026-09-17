@@ -176,3 +176,26 @@ def send_command_to_agent(agent_id, command, args=None):
         'args': args or {},
         'sent_at': datetime.utcnow().isoformat()
     }, room=f'agent:{agent_id}', namespace='/agent/ws')
+
+
+def send_event_to_agent(agent_id, event, data=None):
+    """Send a named event to a specific agent（如用户留言 user_message）。
+
+    与 command 不同：command 是运维指令（重载/停机），event 是业务消息，
+    daemon 侧按事件名分发，互不挤占。"""
+    from flask_socketio import emit as broadcast_emit
+    broadcast_emit(event, {
+        **(data or {}),
+        'sent_at': datetime.utcnow().isoformat(),
+    }, room=f'agent:{agent_id}', namespace='/agent/ws')
+
+
+def find_active_attempt_agent_id(task_id):
+    """任务当前 ACTIVE attempt 的 agent_id（无则在途返回 None）。
+
+    交互式下行通道（用户留言/取消）用它定位投递目标。"""
+    from models import AgentTaskAttempt, AgentTaskAttemptState
+    attempt = AgentTaskAttempt.query.filter_by(
+        task_id=task_id, state=AgentTaskAttemptState.ACTIVE,
+    ).order_by(AgentTaskAttempt.id.desc()).first()
+    return attempt.agent_id if attempt else None

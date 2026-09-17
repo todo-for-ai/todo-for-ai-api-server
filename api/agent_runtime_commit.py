@@ -117,6 +117,7 @@ def _normalize_event_payload(data):
 
 def _persist_events(agent, raw_events, default_task_id=None):
     accepted = 0
+    rows = []
     for event in raw_events:
         if not isinstance(event, dict):
             continue
@@ -143,8 +144,35 @@ def _persist_events(agent, raw_events, default_task_id=None):
             created_by=f'agent:{agent.id}',
         )
         db.session.add(row)
+        rows.append(row)
         accepted += 1
-    return accepted
+    return accepted, rows
+
+
+def _forward_runtime_events(rows):
+    """把 runtime 事件实时转发到用户任务房间（交互式会话的输出流）。
+
+    交互式界面的「入库 → 前端」半边：daemon 流式上报的 output/progress/
+    error 等事件落库后立刻推给 join 了 task 房间的前端，驱动 Agent 运行
+    控制台。失败只降级为前端轮询兜底，绝不影响上报主链路。"""
+    try:
+        from api.user_websocket import push_to_task_room
+        for row in rows:
+            if row.task_id is None:
+                continue
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            push_to_task_room(int(row.task_id), 'task_runtime_event', {
+                'id': row.id,
+                'task_id': int(row.task_id),
+                'attempt_id': row.attempt_id,
+                'event_type': row.event_type,
+                'seq': row.seq,
+                'message': (row.message or '')[:2000],
+                'payload': {k: payload[k] for k in list(payload)[:8]},
+                'event_timestamp': row.event_timestamp.isoformat() if row.event_timestamp else None,
+            })
+    except Exception:  # noqa: BLE001 — 推送失败不影响事件入库
+        pass
 
 
 @agent_runtime_commit_bp.route('/agent/tasks/<int:task_id>/events', methods=['POST'])
@@ -159,8 +187,9 @@ def emit_events(task_id):
     if not raw_events:
         return ApiResponse.error('No valid events found', 400).to_response()
 
-    accepted = _persist_events(agent, raw_events, default_task_id=task_id)
+    accepted, rows = _persist_events(agent, raw_events, default_task_id=task_id)
     db.session.commit()
+    _forward_runtime_events(rows)
     return ApiResponse.success({'accepted': accepted}, 'Events accepted').to_response()
 
 
@@ -177,8 +206,9 @@ def emit_events_batch():
         return ApiResponse.error('events must be array', 400).to_response()
 
     raw_events = _normalize_event_payload({'events': events})
-    accepted = _persist_events(agent, raw_events)
+    accepted, rows = _persist_events(agent, raw_events)
     db.session.commit()
+    _forward_runtime_events(rows)
     return ApiResponse.success({'accepted': accepted, 'sent': accepted}, 'Events accepted').to_response()
 
 

@@ -216,7 +216,16 @@ def task_factory(db_session, project_factory, user_factory):
 
     yield _create_task
 
-    # Cleanup
+    # Cleanup：先清任务的从属行再删任务本体。交互式会话（attempt/lease/
+    # runtime 事件/任务聊天）会留下引用任务的外键行，直接删任务会撞 FK
+    # 约束静默回滚，残留行又让下一个测试的手工 id 撞 UNIQUE。
+    from models import AgentTaskAttempt, AgentTaskEvent, AgentTaskLease, TaskLog
+    for task in created_tasks:
+        db_session.query(AgentTaskLease).filter_by(task_id=task.id).delete(synchronize_session=False)
+        db_session.query(AgentTaskAttempt).filter_by(task_id=task.id).delete(synchronize_session=False)
+        db_session.query(AgentTaskEvent).filter_by(task_id=task.id).delete(synchronize_session=False)
+        db_session.query(TaskLog).filter_by(task_id=task.id).delete(synchronize_session=False)
+    db_session.commit()
     for task in created_tasks:
         db_session.delete(task)
     db_session.commit()
