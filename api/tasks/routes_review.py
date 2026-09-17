@@ -96,4 +96,14 @@ def submit_review(task_id):
     db.session.add(log)
     db.session.commit()
 
+    # 工作流执行闭环：评审通过（任务置 DONE）时自动完成对应工作流步骤并推进 DAG
+    if decision == 'approve':
+        try:
+            from api.agents.workflow_completion import maybe_autocomplete_for_task
+            maybe_autocomplete_for_task(
+                task.id, success=True, result_summary=comment or '', source='review_approve',
+            )
+        except Exception:
+            pass
+
     return ApiResponse.success(data=task.to_dict()).to_response()

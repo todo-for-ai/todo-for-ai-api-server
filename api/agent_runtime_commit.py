@@ -457,6 +457,21 @@ def commit_task(task_id):
     except Exception:
         pass
 
+    # 工作流执行闭环：步骤任务提交终态后自动回调步骤完成并推进 DAG。
+    # 此前该回调只能由人/外部经 workflow-runs API 手动触发，真实 Agent
+    # 执行的工作流步骤会永远停在 RUNNING。失败不阻断提交本身。
+    try:
+        from api.agents.workflow_completion import maybe_autocomplete_for_task
+        maybe_autocomplete_for_task(
+            task.id,
+            success=(final_status == 'succeeded'),
+            result_summary=(data.get('result') or {}).get('output', '') if final_status == 'succeeded' else '',
+            error=(attempt.failure_reason or '') if final_status != 'succeeded' else '',
+            source='agent_commit',
+        )
+    except Exception:
+        pass
+
     return ApiResponse.success(
         {
             'task_id': task.id,
