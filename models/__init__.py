@@ -80,6 +80,7 @@ from .agent_runtime_monitor import (
     AgentMetrics,
     AgentRuntimeConfig,
 )
+from .llm_call_metric import LlmCallMetric
 
 # ── 协作平台模型（原 models/agent.py 大文件拆分的子模块）──
 from .agent_core import (
@@ -241,6 +242,7 @@ __all__ = [
     'AgentHeartbeat',
     'AgentMetrics',
     'AgentRuntimeConfig',
+    'LlmCallMetric',
     # Agent 协作平台
     'AgentKind',
     'AgentRunStatus',

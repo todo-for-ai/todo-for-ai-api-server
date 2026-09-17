@@ -201,6 +201,8 @@ def register_blueprints(app):
     from api.agent_runtime_interactions import agent_runtime_interactions_bp
     from api.agent_runtime_mgmt import agent_runtime_mgmt_bp
     from api.agent_runtime_monitor import agent_runtime_monitor_bp
+    from api.agent_runtime_llm_metrics import agent_runtime_llm_metrics_bp
+    from api.llm_metrics import llm_metrics_bp
     from api.agent_runtime_notifications import agent_runtime_notifications_bp
     from api.agent_interaction_governance import agent_interaction_governance_bp
     from api.agent_approval_queue import approval_queue_bp
@@ -267,6 +269,8 @@ def register_blueprints(app):
     app.register_blueprint(agent_runtime_interactions_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_mgmt_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_monitor_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(agent_runtime_llm_metrics_bp, url_prefix='/todo-for-ai/api/v1')
+    app.register_blueprint(llm_metrics_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_runtime_notifications_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(agent_interaction_governance_bp, url_prefix='/todo-for-ai/api/v1')
     app.register_blueprint(approval_queue_bp, url_prefix='/todo-for-ai/api/v1')
