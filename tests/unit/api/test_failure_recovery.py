@@ -220,3 +220,93 @@ class TestFailedCommitRecovery:
         assert replay_data.get("recovery") is None or replay_data["recovery"]["action"] == "skipped"
 
         assert Task.query.filter(Task.parent_task_id == task.id).count() == 1
+
+
+class TestRepairChainConvergence(TestFailedCommitRecovery):
+    """修复链收敛：修复任务失败时归并到根任务，不再生成嵌套修复链（实测 4 层级联缺陷）。"""
+
+    def test_repair_failure_flattens_to_root(
+        self, client, db_session, runtime_ctx, project_factory, task_factory
+    ):
+        from models import Task
+
+        ctx = runtime_ctx()
+        project = project_factory(owner_id=ctx["user"].id, organization_id=ctx["org"].id)
+        root = task_factory(project_id=project.id, owner_id=ctx["org"].id, title="Chain me", is_ai_task=True)
+
+        # 根任务失败 → 修复#1（挂根下）
+        aid1, lid1 = self._failed_attempt(db_session, ctx["agent"], root)
+        r1 = self._commit_failed(client, root, ctx, aid1, lease_id=lid1)
+        assert r1.get_json()["data"]["recovery"]["action"] == "repair_created"
+        repair1 = db_session.get(Task, r1.get_json()["data"]["recovery"]["repair_task_id"])
+        assert repair1.parent_task_id == root.id
+
+        # 修复#1 失败 → 修复#2 必须仍挂根任务（不再嵌套挂 repair1）
+        aid2, lid2 = self._failed_attempt(db_session, ctx["agent"], repair1)
+        r2 = self._commit_failed(client, repair1, ctx, aid2, lease_id=lid2)
+        assert r2.get_json()["data"]["recovery"]["action"] == "repair_created", r2.get_json()
+        repair2 = db_session.get(Task, r2.get_json()["data"]["recovery"]["repair_task_id"])
+        assert repair2.parent_task_id == root.id, "修复必须收敛到根任务"
+        # 标题扁平：根标题 + 轮次，无 [修复][修复] 叠加
+        assert "[修复][修复]" not in repair2.title
+        assert "Chain me" in repair2.title
+        assert "第 2 次" in repair2.title
+
+    def test_chain_cap_escalates_instead_of_nesting(
+        self, client, db_session, runtime_ctx, project_factory, task_factory, monkeypatch
+    ):
+        from models import Task
+
+        monkeypatch.setenv("FAILURE_REPAIR_MAX_ATTEMPTS", "1")
+        ctx = runtime_ctx()
+        project = project_factory(owner_id=ctx["user"].id, organization_id=ctx["org"].id)
+        root = task_factory(project_id=project.id, owner_id=ctx["org"].id, title="Cap me", is_ai_task=True)
+
+        aid1, lid1 = self._failed_attempt(db_session, ctx["agent"], root)
+        r1 = self._commit_failed(client, root, ctx, aid1, lease_id=lid1)
+        assert r1.get_json()["data"]["recovery"]["action"] == "repair_created"
+        repair1 = db_session.get(Task, r1.get_json()["data"]["recovery"]["repair_task_id"])
+
+        # max=1：修复#1 再失败 → 升级人工，不再生成修复#2
+        aid2, lid2 = self._failed_attempt(db_session, ctx["agent"], repair1)
+        r2 = self._commit_failed(client, repair1, ctx, aid2, lease_id=lid2)
+        assert r2.get_json()["data"]["recovery"]["action"] == "escalated_human", r2.get_json()
+        assert Task.query.filter(
+            Task.parent_task_id == root.id,
+            Task.creator_identifier.like("recovery:%"),
+        ).count() == 1  # 只有 repair1，没有新修复
+
+    def test_legacy_nested_chain_counts_family(
+        self, client, db_session, runtime_ctx, project_factory, task_factory
+    ):
+        """历史遗留的嵌套修复链也按族计数（后代失败计入封顶）。"""
+        from models import Task
+
+        ctx = runtime_ctx()
+        project = project_factory(owner_id=ctx["user"].id, organization_id=ctx["org"].id)
+        root = task_factory(project_id=project.id, owner_id=ctx["org"].id, title="Legacy", is_ai_task=True)
+
+        aid1, lid1 = self._failed_attempt(db_session, ctx["agent"], root)
+        r1 = self._commit_failed(client, root, ctx, aid1, lease_id=lid1)
+        repair1 = db_session.get(Task, r1.get_json()["data"]["recovery"]["repair_task_id"])
+
+        # 人为构造历史嵌套：repair1 的「修复的修复」
+        aid2, lid2 = self._failed_attempt(db_session, ctx["agent"], repair1)
+        nested = Task.create(
+            project_id=project.id, owner_id=ctx["org"].id,
+            title="[修复] [修复] Legacy（旧嵌套）", content="old",
+            is_ai_task=True, parent_task_id=repair1.id,
+            creator_type="ai", creator_identifier="recovery:unknown",
+        )
+        db_session.add(nested)
+        # 嵌套任务自己也失败过一次
+        self._failed_attempt(db_session, ctx["agent"], nested)
+        db_session.commit()
+
+        # 再来一次失败：族计数（根1+嵌套1）已含 2 次失败
+        aid3, lid3 = self._failed_attempt(db_session, ctx["agent"], root)
+        r3 = self._commit_failed(client, root, ctx, aid3, lease_id=lid3)
+        recovery = r3.get_json()["data"]["recovery"]
+        # 族失败已 2 次 + 本次 = 3 >= max(2)+1 → 升级而非继续派生
+        assert recovery["action"] == "escalated_human", recovery
+        assert recovery["failed_attempts"] >= 3

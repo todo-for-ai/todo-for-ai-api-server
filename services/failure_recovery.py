@@ -156,6 +156,53 @@ def count_failed_attempts(task_id: int) -> int:
     )
 
 
+def is_repair_task(task) -> bool:
+    """该任务是否为失败自愈生成的修复子任务。"""
+    return (
+        str(getattr(task, 'creator_type', '') or '').lower() == 'ai'
+        and str(getattr(task, 'creator_identifier', '') or '').startswith('recovery:')
+    )
+
+
+def repair_root_of(task):
+    """修复任务归并到的根任务（非修复任务返回自身）。
+
+    实测缺陷：修复任务失败会再生成「修复的修复」，标题无限嵌套
+    （[修复][修复]...）。所有修复轮次必须收敛到同一个根任务上计数与挂载。
+    沿 parent 链上溯，带环与深度保护。
+    """
+    current = task
+    seen = {current.id}
+    for _ in range(20):
+        if not is_repair_task(current) or not current.parent_task_id:
+            return current
+        parent = db.session.get(Task, current.parent_task_id)
+        if parent is None or parent.id in seen:
+            return current
+        seen.add(parent.id)
+        current = parent
+    return current
+
+
+def _family_repair_stats(root):
+    """修复族统计：(成员任务列表, 已有修复子任务数)。
+
+    成员 = 根任务 + 全部修复后代（含历史遗留的嵌套链，深度限 10 防脏数据）。
+    """
+    members = [root]
+    repair_count = 0
+    frontier = [root.id]
+    depth = 0
+    while frontier and depth < 10:
+        children = Task.query.filter(Task.parent_task_id.in_(frontier)).all()
+        repairs = [c for c in children if is_repair_task(c)]
+        repair_count += len(repairs)
+        members.extend(repairs)
+        frontier = [c.id for c in repairs]
+        depth += 1
+    return members, repair_count
+
+
 def _has_recovery_event(task_id: int, attempt_id: str) -> bool:
     return (
         AgentTaskEvent.query.filter(
@@ -183,7 +230,11 @@ def handle_failed_commit(task, agent, attempt_id: str,
     if max_attempts is None:
         max_attempts = _max_repair_attempts()
     category = classify_failure(failure_code, failure_reason)
-    failed_attempts = count_failed_attempts(task.id)
+    root = repair_root_of(task)
+    members, prior_repairs = _family_repair_stats(root)
+    # 族口径：根任务 + 全部修复后代的失败尝试总数；封顶判断与轮次都以此为准，
+    # 修复链不再各自为政地嵌套（每个失败的修复又开新链）
+    failed_attempts = sum(count_failed_attempts(t.id) for t in members)
 
     now = datetime.utcnow()
     interaction_id = f"recp-{uuid.uuid4().hex[:12]}"
@@ -232,8 +283,10 @@ def handle_failed_commit(task, agent, attempt_id: str,
             "failed_attempts": failed_attempts,
         }
 
-    # 封顶：升级人工（interaction_request 审批事件，budget/pr 审批同一队列可见）
-    if failed_attempts >= max_attempts:
+    # 封顶：升级人工（interaction_request 审批事件，budget/pr 审批同一队列可见）。
+    # 两口径任一达标即升级：①族失败尝试总数 ≥ max+1（根首败 + max 轮修复）；
+    # ②族内已有修复子任务数 ≥ max。与历史嵌套链兼容（族计数含全部后代）。
+    if failed_attempts >= max_attempts + 1 or prior_repairs >= max_attempts:
         if workspace_id:
             payload = {
                 "interaction_id": interaction_id,
@@ -246,6 +299,7 @@ def handle_failed_commit(task, agent, attempt_id: str,
                     "category": category,
                     "failed_attempts": failed_attempts,
                     "max_attempts": max_attempts,
+                    "root_task_id": int(root.id),
                     "failure_summary": (failure_reason or "")[:500],
                 },
                 "requested_at": now.isoformat(),
@@ -271,29 +325,34 @@ def handle_failed_commit(task, agent, attempt_id: str,
             "max_attempts": max_attempts,
         }
 
-    # 未封顶：生成修复子任务回流
+    # 未封顶：生成修复子任务回流——一律挂在根任务下（扁平化），标题取根任务
+    # 标题并剥掉历史 [修复] 前缀，轮次按族内已有修复数递增
+    import re as _re
+
     reason_line = (failure_reason or failure_code or category)[:300]
-    # 修复 Agent 要能独立重做，必须拿到父任务的原始要求——只给失败归因
-    # 它只能靠标题猜（实测缺陷）。父任务 content 含此前尝试的产出分节，
+    # 修复 Agent 要能独立重做，必须拿到根任务的原始要求——只给失败归因
+    # 它只能靠标题猜（实测缺陷）。根任务 content 含此前尝试的产出分节，
     # 对修复同样有用，一并携带（截断防爆量）。
-    parent_brief = (task.content or "")[:3000]
+    root_brief = (root.content or "")[:3000]
+    base_title = _re.sub(r"^(?:\[修复\]\s*)+", "", root.title)
+    repair_round = prior_repairs + 1
     repair = Task.create(
         project_id=task.project_id,
         owner_id=task.owner_id,
-        title=f"[修复] {task.title}（{CATEGORY_LABELS.get(category, category)}，第 {failed_attempts + 1} 次）"[:500],
+        title=f"[修复] {base_title}（{CATEGORY_LABELS.get(category, category)}，第 {repair_round} 次）"[:500],
         content=(
-            f"父任务 #{task.id} 执行失败，自动归因：**{CATEGORY_LABELS.get(category, category)}**\n\n"
+            f"任务 #{task.id} 执行失败（修复链根任务 #{root.id}），自动归因：**{CATEGORY_LABELS.get(category, category)}**\n\n"
             f"- failure_code: `{failure_code or 'N/A'}`\n"
             f"- failure_reason: {reason_line}\n"
-            f"- 失败尝试: 第 {failed_attempts + 1}/{max_attempts + 1} 次\n"
+            f"- 修复轮次: 第 {repair_round}/{max_attempts} 次\n"
             + (f"\n附加信息: {attempt_id}" if attempt_id else "")
-            + f"\n\n## 原始任务描述（父任务 #{task.id}，含此前产出）\n\n{parent_brief}"
+            + f"\n\n## 原始任务描述（根任务 #{root.id}，含此前产出）\n\n{root_brief}"
         ),
         priority=task.priority,
         revision=1,
         is_ai_task=True,
-        dod=task.dod,  # 继承父任务 DoD
-        parent_task_id=task.id,
+        dod=root.dod,  # 继承根任务 DoD
+        parent_task_id=root.id,
         creator_id=task.creator_id,
         creator_type="ai",
         creator_identifier=f"recovery:{category}",
