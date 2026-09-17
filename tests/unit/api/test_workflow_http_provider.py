@@ -333,3 +333,30 @@ class TestHttpTestRunAndDsl:
             env["user"].id, wdsl.loads_workflow_dsl(wdsl.dumps_workflow_dsl(dsl)))
         db.session.commit()
         assert wf2.steps[0].integration_config["url"] == "https://api.example.com/x"
+
+
+class TestExternalStepWithoutRootTask:
+    """无 root_task_id 启动含外部步骤的工作流：事件留痕须跳过而非 500。"""
+
+    def test_launch_without_root_task_ok(self, client, env, monkeypatch):
+        from models import StepStatus
+        wf = _make_wf(env, [{"key": "ext", "integration_config": {
+            "provider": "http", "url": "https://93.184.216.34/hook"}}])
+
+        class R:
+            status_code = 200
+            text = '{"ok": 1}'
+
+        monkeypatch.setattr(wex.http_client, "request", lambda *a, **kw: R())
+        resp = client.post(
+            f"{BASE_URL}/agents/workflows/{wf.id}/runs",
+            json={"project_id": env["project"].id},  # 不带 root_task_id
+            headers=self._headers(env["user"]),
+        )
+        assert resp.status_code == 201, resp.get_json()
+        run = resp.get_json()["data"]
+        assert run["step_runs"][0]["status"] == "succeeded"
+
+    def _headers(self, user):
+        from flask_jwt_extended import create_access_token
+        return {"Authorization": f"Bearer {create_access_token(identity=str(user.id))}"}

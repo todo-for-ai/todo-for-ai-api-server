@@ -488,15 +488,16 @@ def dispatch_external_step(wf_run, step_run, step_def, now, synchronous=False):
         "provider": cfg.get("provider"),
         "step_name": step_def.name,
     }
-    try:
-        record_task_event(
-            task_id=wf_run.root_task_id,
-            event_type="workflow_external_step_started",
-            actor_type="system",
-            payload=payload,
-        )
-    except Exception:
-        pass  # 事件留痕失败不阻断派发
+    if wf_run.root_task_id:
+        try:
+            record_task_event(
+                task_id=wf_run.root_task_id,
+                event_type="workflow_external_step_started",
+                actor_type="system",
+                payload=payload,
+            )
+        except Exception:
+            db.session.rollback()  # 留痕失败回滚残留，不阻断派发
     _queue_sse(wf_run.owner_id, "workflow_step_started", payload)
 
     db.session.commit()  # 步骤 RUNNING 态先落库：线程安全 + commit 后对象刷新
