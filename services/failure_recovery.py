@@ -273,6 +273,10 @@ def handle_failed_commit(task, agent, attempt_id: str,
 
     # 未封顶：生成修复子任务回流
     reason_line = (failure_reason or failure_code or category)[:300]
+    # 修复 Agent 要能独立重做，必须拿到父任务的原始要求——只给失败归因
+    # 它只能靠标题猜（实测缺陷）。父任务 content 含此前尝试的产出分节，
+    # 对修复同样有用，一并携带（截断防爆量）。
+    parent_brief = (task.content or "")[:3000]
     repair = Task.create(
         project_id=task.project_id,
         owner_id=task.owner_id,
@@ -283,6 +287,7 @@ def handle_failed_commit(task, agent, attempt_id: str,
             f"- failure_reason: {reason_line}\n"
             f"- 失败尝试: 第 {failed_attempts + 1}/{max_attempts + 1} 次\n"
             + (f"\n附加信息: {attempt_id}" if attempt_id else "")
+            + f"\n\n## 原始任务描述（父任务 #{task.id}，含此前产出）\n\n{parent_brief}"
         ),
         priority=task.priority,
         revision=1,

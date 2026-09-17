@@ -218,7 +218,7 @@ def commit_task(task_id):
     agent = g.current_agent
     data = validate_json_request(
         required_fields=['attempt_id', 'lease_id', 'status'],
-        optional_fields=['result', 'failure_code', 'failure_reason', 'execution_time_ms', 'evidence'],
+        optional_fields=['result', 'failure_code', 'failure_reason', 'execution_time_ms', 'evidence', 'shared_context'],
     )
     if isinstance(data, tuple):
         return data
@@ -372,6 +372,18 @@ def commit_task(task_id):
         attempt.state = AgentTaskAttemptState.ABORTED
     else:
         return ApiResponse.error('Invalid status, expected succeeded|failed|cancelled', 400).to_response()
+
+    # 交接数据：与终态翻转同一事务落库——下游解锁后的第一次 pull 必然
+    # 拿到交接，根除「上游已解锁、交接还没写」的时序竞态（settle 窗口
+    # 退化为纯防御）。失败/取消提交同样收（部分产出对下游也有价值）。
+    try:
+        from services.task_handoff import parse_shared_context_payload, write_commit_shared_context
+
+        shared_context = parse_shared_context_payload(data.get('shared_context'))
+        if shared_context:
+            write_commit_shared_context(task.id, agent, shared_context)
+    except ValueError as e:
+        return ApiResponse.error(f'Invalid shared_context: {e}', 400).to_response()
 
     # 持久化证据（无论任务是否声明 DoD，提交的证据都保留作为审计材料）
     for item in evidence_items:

@@ -108,3 +108,53 @@ def notify_downstream_unlocked(task):
             },
         ))
     return [candidate.id for candidate in unblocked]
+
+
+def parse_shared_context_payload(value):
+    """清洗 commit 请求里的 shared_context（{key: value} dict）。
+
+    体量上限与注入侧一致（单值 2000 字符、单任务 20 键）；非法结构抛
+    ValueError 由调用方回 400。返回 None 表示无交接数据。
+    """
+    if value is None or value == {}:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError('shared_context must be an object of key: value')
+    cleaned = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key).strip()[:255]
+        if not key:
+            continue
+        if isinstance(raw_value, (dict, list)):
+            raise ValueError(f'shared_context[{key!r}] value must be a scalar')
+        cleaned[key] = str(raw_value)[:_UPSTREAM_VALUE_MAX_CHARS]
+        if len(cleaned) >= _UPSTREAM_KEYS_PER_TASK:
+            break
+    return cleaned or None
+
+
+def write_commit_shared_context(task_id, agent, payload):
+    """把 commit 携带的交接数据按 key upsert（同一事务随终态翻转落库）。
+
+    在 commit 主事务 commit 前调用——交接数据与状态变更原子生效，
+    下游解锁后的第一次 pull 必然拿到交接，根除「先解锁后补写」竞态。
+    """
+    if not payload:
+        return 0
+    written = 0
+    for key, value in payload.items():
+        row = SharedContext.query.filter_by(task_id=task_id, key=key).first()
+        if row:
+            row.value = value
+            row.author_agent_id = agent.id
+        else:
+            db.session.add(SharedContext(
+                task_id=task_id,
+                key=key,
+                value=value,
+                author_agent_id=agent.id,
+                author_user_id=None,
+                created_by=f'agent:{agent.id}',
+            ))
+        written += 1
+    return written

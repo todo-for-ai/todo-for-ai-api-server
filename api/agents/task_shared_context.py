@@ -20,6 +20,8 @@ from ._shared import (
     validate_json_request,
 )
 
+from models import Organization
+
 
 # ---------------------------------------------------------------------------
 # Shared Context — key-value store for cross-Agent collaboration
@@ -89,11 +91,24 @@ def upsert_shared_context(task_id):
         if not key or len(key) > 255:
             return ApiResponse.error("key must be 1-255 characters", 400).to_response()
 
-        # Validate agent_id if provided
+        # Validate agent_id if provided.
+        # 归属判定三通道：owner（个人 Agent）/ creator（workspace 域 Agent 的
+        # owner_id 为 NULL，只有 creator_user_id）/ 该 Agent 所属组织的成员。
+        # 之前只认 owner_id，协作侧创建的 Agent 永远 404。
         agent_id = data.get("agent_id")
         if agent_id:
-            agent = Agent.query.filter_by(id=agent_id, owner_id=current_user.id).first()
-            if not agent:
+            agent = Agent.query.filter_by(id=agent_id).first()
+            attributed = agent is not None and (
+                agent.owner_id == current_user.id
+                or agent.creator_user_id == current_user.id
+                or (
+                    agent.workspace_id is not None
+                    and current_user.can_access_organization(
+                        Organization.query.get(agent.workspace_id)
+                    )
+                )
+            )
+            if not attributed:
                 return ApiResponse.error("Agent not found or not owned by you", 404).to_response()
 
         # Upsert: find existing entry with same task_id + key
