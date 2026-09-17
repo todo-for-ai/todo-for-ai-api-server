@@ -212,7 +212,7 @@ def _by_agent(q):
             'agent_name': name or f'#{agent_id}',
             'calls': int(cnt or 0),
             'total_tokens': int(tokens or 0),
-            'success_rate': _num(succ * 1.0 / cnt, 4) if cnt else None,
+            'success_rate': _num(float(succ or 0) / float(cnt), 4) if cnt else None,
             'avg_duration_ms': _num(avg, 1),
         }
         for agent_id, name, cnt, tokens, succ, avg in rows
