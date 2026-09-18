@@ -13,6 +13,7 @@ import os
 from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_migrate import Migrate
+from flask_jwt_extended import JWTManager
 from dotenv import load_dotenv
 
 # 加载.env文件
@@ -39,6 +40,9 @@ def create_app(config_name=None):
     
     # 初始化扩展
     db.init_app(app)
+
+    # 初始化 JWT
+    jwt = JWTManager(app)
 
     # 初始化CORS（开发环境必需，生产环境可选）
     CORS(app,
@@ -132,12 +136,28 @@ def register_blueprints(app):
             message='API service is healthy'
         ).to_response()
     
-    # 注册API蓝图 - 只注册auth蓝图用于游客登录
+    # 注册API蓝图
     from api.auth import auth_bp
+    from api.tasks_split import tasks_bp
+    from api.projects import projects_bp
+    from api.pins import pins_bp
+    from api.dashboard import dashboard_bp
+    from api.user_settings import user_settings_bp
+    from api.interactive_tasks import interactive_bp
+    from api.mcp import mcp_bp
+    from api.organizations import organizations_bp
 
     app.register_blueprint(auth_bp, url_prefix='/todo-for-ai/api/v1/auth')
+    app.register_blueprint(tasks_bp, url_prefix='/todo-for-ai/api/v1/tasks')
+    app.register_blueprint(projects_bp, url_prefix='/todo-for-ai/api/v1/projects')
+    app.register_blueprint(pins_bp, url_prefix='/todo-for-ai/api/v1/pins')
+    app.register_blueprint(dashboard_bp, url_prefix='/todo-for-ai/api/v1/dashboard')
+    app.register_blueprint(user_settings_bp, url_prefix='/todo-for-ai/api/v1/user-settings')
+    app.register_blueprint(interactive_bp, url_prefix='/todo-for-ai/api/v1/interactive')
+    app.register_blueprint(mcp_bp, url_prefix='/todo-for-ai/api/v1/mcp')
+    app.register_blueprint(organizations_bp, url_prefix='/todo-for-ai/api/v1/organizations')
 
-    app.logger.info("Registered auth blueprint only (minimal configuration for guest login)")
+    app.logger.info("Registered all API blueprints")
 
 
 

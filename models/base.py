@@ -30,14 +30,16 @@ class BaseModel(db.Model):
         """转换为字典格式"""
         exclude = exclude or []
         result = {}
-        
+
         for column in self.__table__.columns:
             if column.name not in exclude:
                 value = getattr(self, column.name)
                 if isinstance(value, datetime):
                     value = value.isoformat()
+                elif hasattr(value, 'value'):  # 处理枚举类型
+                    value = value.value
                 result[column.name] = value
-                
+
         return result
     
     def update_from_dict(self, data, exclude=None):

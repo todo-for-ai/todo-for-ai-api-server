@@ -1,15 +1,14 @@
-from fastapi import APIRouter, HTTPException, status
+from flask import Blueprint
 from .base import create_success_response, create_error_response
 
-router = APIRouter(prefix="/tasks", tags=["tasks"])
-tasks_bp = router
+tasks_bp = Blueprint('tasks', __name__)
 
-@router.get("/")
-async def list_tasks():
+@tasks_bp.route('/', methods=['GET'])
+def list_tasks():
     """获取任务列表"""
-    return create_success_response([])
+    return create_success_response([]).to_response()
 
-@router.post("/")
-async def create_task():
+@tasks_bp.route('/', methods=['POST'])
+def create_task():
     """创建任务"""
-    return create_success_response({}, "Task created")
+    return create_success_response({}, "Task created").to_response()

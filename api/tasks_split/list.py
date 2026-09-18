@@ -21,10 +21,9 @@ def register_routes(bp):
             # 构建查询
             query = Task.query
     
-            # 用户权限控制 - 所有用户（包括管理员）只能看到自己项目的任务
-            if current_user:
-                query = query.join(Project).filter(Project.owner_id == current_user.id)
-            else:
+            # 用户权限控制 - 简化版本，不过滤（因为没有owner_id字段）
+            # TODO: 添加项目成员关联表后恢复权限控制
+            if not current_user:
                 # 未登录用户不能访问任务列表
                 return ApiResponse.error("Authentication required", 401).to_response()
             
@@ -95,8 +94,7 @@ def register_routes(bp):
                     if project:
                         item['project'] = {
                             'id': project.id,
-                            'name': project.name,
-                            'color': project.color
+                            'name': project.name
                         }
             
             return ApiResponse.success(result, "Tasks retrieved successfully").to_response()

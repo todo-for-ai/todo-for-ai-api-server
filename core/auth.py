@@ -85,8 +85,8 @@ def unified_auth_required(f):
     统一认证装饰器 - 同时支持JWT和API Token认证
 
     认证优先级：
-    1. 首先尝试API Token认证
-    2. 如果没有API Token，尝试JWT认证
+    1. 首先尝试JWT认证 (检测JWT格式: xxx.yyy.zzz)
+    2. 如果不是JWT，尝试API Token认证
     3. 将认证成功的用户信息存储到g.current_user
     """
     @wraps(f)
@@ -94,38 +94,42 @@ def unified_auth_required(f):
         current_user = None
         auth_method = None
 
-        # 1. 尝试API Token认证
+        # 获取Authorization header中的token
         auth_header = request.headers.get('Authorization')
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1]
 
-            # 验证API Token
-            api_token = ApiToken.verify_token(token)
-            if api_token:
-                current_user = api_token.user
-                auth_method = 'api_token'
-                g.current_token = api_token
-                g.current_user = current_user
-                g.auth_method = auth_method
-                return f(*args, **kwargs)
+            # 判断是否为JWT格式 (xxx.yyy.zzz)
+            is_jwt = len(token.split('.')) == 3 and len(token) > 100
 
-        # 2. 尝试JWT认证
-        try:
-            verify_jwt_in_request()
-            user_id = get_jwt_identity()
-            if user_id:
-                current_user = User.query.get(user_id)
-                if current_user and current_user.is_active():
-                    auth_method = 'jwt'
+            if is_jwt:
+                # 尝试JWT认证
+                try:
+                    verify_jwt_in_request()
+                    user_id = get_jwt_identity()
+                    if user_id:
+                        current_user = User.query.get(user_id)
+                        if current_user and current_user.is_active():
+                            auth_method = 'jwt'
+                            g.current_user = current_user
+                            g.current_token = None
+                            g.auth_method = auth_method
+                            return f(*args, **kwargs)
+                except Exception:
+                    # JWT验证失败
+                    pass
+            else:
+                # 尝试API Token认证
+                api_token = ApiToken.verify_token(token)
+                if api_token:
+                    current_user = api_token.user
+                    auth_method = 'api_token'
+                    g.current_token = api_token
                     g.current_user = current_user
-                    g.current_token = None
                     g.auth_method = auth_method
                     return f(*args, **kwargs)
-        except Exception:
-            # JWT验证失败，继续尝试其他认证方式
-            pass
 
-        # 3. 认证失败
+        # 认证失败
         return ApiResponse.unauthorized('Authentication required').to_response()
 
     return decorated_function
@@ -143,38 +147,42 @@ def optional_unified_auth(f):
         current_user = None
         auth_method = None
 
-        # 1. 尝试API Token认证
+        # 获取Authorization header中的token
         auth_header = request.headers.get('Authorization')
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ')[1]
 
-            # 验证API Token
-            api_token = ApiToken.verify_token(token)
-            if api_token:
-                current_user = api_token.user
-                auth_method = 'api_token'
-                g.current_token = api_token
-                g.current_user = current_user
-                g.auth_method = auth_method
-                return f(*args, **kwargs)
+            # 判断是否为JWT格式 (xxx.yyy.zzz)
+            is_jwt = len(token.split('.')) == 3 and len(token) > 100
 
-        # 2. 尝试JWT认证
-        try:
-            verify_jwt_in_request(optional=True)
-            user_id = get_jwt_identity()
-            if user_id:
-                current_user = User.query.get(user_id)
-                if current_user and current_user.is_active():
-                    auth_method = 'jwt'
+            if is_jwt:
+                # 尝试JWT认证
+                try:
+                    verify_jwt_in_request(optional=True)
+                    user_id = get_jwt_identity()
+                    if user_id:
+                        current_user = User.query.get(user_id)
+                        if current_user and current_user.is_active():
+                            auth_method = 'jwt'
+                            g.current_user = current_user
+                            g.current_token = None
+                            g.auth_method = auth_method
+                            return f(*args, **kwargs)
+                except Exception:
+                    # JWT验证失败
+                    pass
+            else:
+                # 尝试API Token认证
+                api_token = ApiToken.verify_token(token)
+                if api_token:
+                    current_user = api_token.user
+                    auth_method = 'api_token'
+                    g.current_token = api_token
                     g.current_user = current_user
-                    g.current_token = None
                     g.auth_method = auth_method
                     return f(*args, **kwargs)
-        except Exception:
-            # JWT验证失败，继续
-            pass
 
-        # 3. 没有认证或认证失败，设置为None
+        # 没有认证或认证失败，设置为None
         g.current_user = None
         g.current_token = None
         g.auth_method = None
