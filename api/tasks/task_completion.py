@@ -433,26 +433,37 @@ def task_comment_sentiment_trend():
     comments = (
         TaskEvent.query
         .filter(
-            TaskEvent.owner_id == user.id,
+            TaskEvent.actor_user_id == user.id,
             TaskEvent.event_type == "comment",
             TaskEvent.created_at >= since,
         )
         .with_entities(
             func.date(TaskEvent.created_at).label("event_date"),
-            TaskEvent.content,
+            TaskEvent.payload,
         )
         .all()
     )
+    # TaskEvent 没有独立 content 列，评论文本在 payload JSON 里
+    def _comment_text(payload):
+        if isinstance(payload, str):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("content", "comment", "text"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    return value
+        return None
 
     positive_words = {"完成", "成功", "好", "赞", "解决", "通过", "修复", "合并", "上线", "搞定"}
     negative_words = {"失败", "问题", "bug", "错", "崩溃", "超时", "拒绝", "阻塞", "错误", "异常", "报错"}
 
     day_data = {}  # date -> {positive, negative, neutral}
-    for event_date, content in comments:
+    for event_date, payload in comments:
         date_str = event_date.isoformat() if hasattr(event_date, 'isoformat') else str(event_date)
         if date_str not in day_data:
             day_data[date_str] = {"positive": 0, "negative": 0, "neutral": 0}
 
+        content = _comment_text(payload)
         if not content:
             day_data[date_str]["neutral"] += 1
             continue

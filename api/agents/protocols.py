@@ -64,13 +64,13 @@ def list_protocols():
         )
 
     query = query.order_by(CollaborationProtocol.created_at.desc())
-    result = paginate_query(query, default_per_page=30)
-    protocols = [p.to_dict() for p in result.items]
+    args = get_request_args()
+    result = paginate_query(query, args["page"], args["per_page"])
     return ApiResponse.success({
-        "items": protocols,
-        "total": result.total,
-        "page": result.page,
-        "per_page": result.per_page,
+        "items": result["items"],
+        "total": result["pagination"]["total"],
+        "page": result["pagination"]["page"],
+        "per_page": result["pagination"]["per_page"],
     }).to_response()
 
 
@@ -227,7 +227,7 @@ def protocol_analytics():
     """
     user = get_current_user()
     args = get_request_args()
-    days = args.get("days", 30, type=int)
+    days = request.args.get("days", 30, type=int)
     since = datetime.utcnow() - timedelta(days=max(1, min(days, 365)))
 
     # Get user's protocols (via initiator agent ownership)

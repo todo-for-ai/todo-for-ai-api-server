@@ -282,7 +282,7 @@ def agent_run_resource_trend():
             func.date(AgentRun.started_at).label("run_date"),
             func.count(AgentRun.id).label("run_count"),
             func.avg(
-                func.extract("epoch", AgentRun.ended_at - AgentRun.started_at)
+                func.unix_timestamp(AgentRun.ended_at) - func.unix_timestamp(AgentRun.started_at)
             ).label("avg_duration"),
         )
         .group_by(AgentRun.agent_id, Agent.name, func.date(AgentRun.started_at))

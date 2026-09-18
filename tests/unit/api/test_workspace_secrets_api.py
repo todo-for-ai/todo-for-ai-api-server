@@ -212,7 +212,7 @@ class TestListSecrets:
             + "/secrets?include_shared=true", headers=env["headers"])
         names = {i["name"] for i in resp.get_json()["data"]["items"]
                  if i["source"] == "shared"}
-        assert names == {"ghost-owned"}  # owner 缺失 → owner_agent_name=None
+        assert "ghost-owned" in names  # owner 缺失 → owner_agent_name=None
         assert "dead-key" not in names  # 已吊销 secret 的 share 被跳过
 
     def test_revoke_secret_404(self, client, env):

@@ -45,12 +45,13 @@ def _collect_security_events(user, args):
     until = None
     if since_str:
         try:
-            since = datetime.fromisoformat(since_str)
+            # Python 3.9 的 fromisoformat 不接受 Z 后缀，与仓库其他处保持一致做归一化并去除时区
+            since = datetime.fromisoformat(since_str.replace("Z", "+00:00")).replace(tzinfo=None)
         except (ValueError, TypeError):
             return None, ApiResponse.error("Invalid 'since' datetime (use ISO 8601)", 400).to_response()
     if until_str:
         try:
-            until = datetime.fromisoformat(until_str)
+            until = datetime.fromisoformat(until_str.replace("Z", "+00:00")).replace(tzinfo=None)
         except (ValueError, TypeError):
             return None, ApiResponse.error("Invalid 'until' datetime (use ISO 8601)", 400).to_response()
 

@@ -479,8 +479,8 @@ def task_dependency_chain():
         limit = 10
     project_id = request.args.get("project_id", type=int)
 
-    from models.agent import Task
-    q = Task.query.filter(Task.owner_id == user.id, Task.parent_id == None)
+    from models.task import Task
+    q = Task.query.filter(Task.owner_id == user.id, Task.parent_task_id == None)
     if project_id:
         q = q.filter(Task.project_id == project_id)
 
@@ -499,7 +499,7 @@ def task_dependency_chain():
             if tid in visited:
                 continue
             visited.add(tid)
-            children = Task.query.filter_by(parent_id=tid).all()
+            children = Task.query.filter_by(parent_task_id=tid).all()
             for child in children:
                 if child.id not in visited:
                     all_ids.append(child.id)

@@ -112,14 +112,25 @@ def paginate_query(query, page=1, per_page=20, max_per_page=100):
         分页结果字典
     """
     from sqlalchemy import func
-    
+
     # 限制每页数量
     per_page = min(per_page, max_per_page)
     offset = (page - 1) * per_page
-    
-    # 优化方案：先COUNT，再查询数据（并行化可能性）
-    # COUNT查询应该使用覆盖索引，速度很快
-    total = query.count()
+
+    # COUNT 优化：query.count() 会把整行（含 TEXT/JSON 列）包进派生表逐行物化，
+    # 在千万级大表或缓存冷缺时是秒级慢查询（曾把 5 连接的池整体占满引发 500 雪崩）。
+    # 对无 GROUP BY / DISTINCT / LIMIT 的简单查询，改用仅含 count(*) 的语句，
+    # 让 InnoDB 走覆盖索引扫描；其余情况保留原语义。
+    _stmt = query.statement
+    if (
+        not _stmt._group_by_clause.clauses
+        and not _stmt._distinct
+        and _stmt._limit_clause is None
+        and _stmt._offset_clause is None
+    ):
+        total = query.session.execute(_stmt.with_only_columns(func.count()).order_by(None)).scalar()
+    else:
+        total = query.count()
     
     # 数据查询
     items = query.limit(per_page).offset(offset).all()

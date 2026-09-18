@@ -252,7 +252,7 @@ def agent_task_handoff_stats():
     handoffs = (
         AuditLog.query
         .filter(
-            AuditLog.owner_id == user.id,
+            AuditLog.actor_user_id == user.id,
             AuditLog.action == "agent.handoff",
             AuditLog.created_at >= since,
         )
@@ -262,7 +262,7 @@ def agent_task_handoff_stats():
 
     pair_data = {}  # (from, to) -> {count, durations}
     for h in handoffs:
-        details = h.details if isinstance(h.details, dict) else {}
+        details = h.detail if isinstance(h.detail, dict) else {}
         from_agent = details.get("from_agent", "unknown")
         to_agent = details.get("to_agent", "unknown")
         dur = details.get("duration_seconds")

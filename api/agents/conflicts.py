@@ -350,9 +350,9 @@ def list_conflicts():
             ConflictStatus.DETECTED, ConflictStatus.ACKNOWLEDGED, ConflictStatus.RESOLVING
         ]))
     q = q.order_by(AgentConflict.created_at.desc())
-    page, per_page, pag = paginate_query(q, default_per_page=20)
-    items = [c.to_dict() for c in pag.items]
-    return ApiResponse.success({"items": items, **page}).to_response()
+    args = get_request_args()
+    result = paginate_query(q, args["page"], args["per_page"])
+    return ApiResponse.success({"items": result["items"], **result["pagination"]}).to_response()
 
 
 @agents_bp.route("/conflicts/<int:conflict_id>", methods=["GET"])

@@ -161,14 +161,14 @@ def agent_workload_forecast():
     rows = (
         TaskAssignment.query
         .join(Agent, TaskAssignment.agent_id == Agent.id)
-        .filter(Agent.owner_id == user.id, TaskAssignment.assigned_at >= since)
+        .filter(Agent.owner_id == user.id, TaskAssignment.created_at >= since)
         .with_entities(
             TaskAssignment.agent_id,
             Agent.name,
-            func.date(TaskAssignment.assigned_at).label("d"),
+            func.date(TaskAssignment.created_at).label("d"),
             func.count(TaskAssignment.id).label("c"),
         )
-        .group_by(TaskAssignment.agent_id, Agent.name, func.date(TaskAssignment.assigned_at))
+        .group_by(TaskAssignment.agent_id, Agent.name, func.date(TaskAssignment.created_at))
         .all()
     )
 

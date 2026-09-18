@@ -25,6 +25,7 @@ from ._shared import (
     AuditLog,
     get_request_args,
     paginate_query,
+    paginate_serialized,
     parse_enum,
 )
 
@@ -173,9 +174,9 @@ def list_sandboxes():
         q = q.filter_by(is_active=True)
     include_stats = request.args.get("include_stats", "true").lower() == "true"
     q = q.order_by(AgentSandbox.created_at.desc())
-    page, per_page, pag = paginate_query(q, default_per_page=20)
-    items = [s.to_dict(include_stats=include_stats) for s in pag.items]
-    return ApiResponse.success({"items": items, **page}).to_response()
+    args = get_request_args()
+    result = paginate_serialized(q, args["page"], args["per_page"], lambda s: s.to_dict(include_stats=include_stats))
+    return ApiResponse.success({"items": result["items"], **result["pagination"]}).to_response()
 
 
 @agents_bp.route("/sandboxes", methods=["POST"])
@@ -365,9 +366,9 @@ def list_sandbox_executions(sandbox_id):
     if agent_id:
         q = q.filter_by(agent_id=agent_id)
     q = q.order_by(SandboxExecution.started_at.desc())
-    page, per_page, pag = paginate_query(q, default_per_page=20)
-    items = [e.to_dict(include_violations=False) for e in pag.items]
-    return ApiResponse.success({"items": items, **page}).to_response()
+    args = get_request_args()
+    result = paginate_serialized(q, args["page"], args["per_page"], lambda e: e.to_dict(include_violations=False))
+    return ApiResponse.success({"items": result["items"], **result["pagination"]}).to_response()
 
 
 @agents_bp.route("/executions/<int:execution_id>", methods=["GET"])
@@ -547,9 +548,9 @@ def list_execution_violations(execution_id):
     if not sandbox or sandbox.owner_id != user.id:
         return ApiResponse.error("Execution not found", 404).to_response()
     q = SandboxViolation.query.filter_by(execution_id=execution_id).order_by(SandboxViolation.blocked_at.desc())
-    page, per_page, pag = paginate_query(q, default_per_page=50)
-    items = [v.to_dict() for v in pag.items]
-    return ApiResponse.success({"items": items, **page}).to_response()
+    args = get_request_args()
+    result = paginate_query(q, args["page"], args["per_page"])
+    return ApiResponse.success({"items": result["items"], **result["pagination"]}).to_response()
 
 
 @agents_bp.route("/sandboxes/dashboard", methods=["GET"])

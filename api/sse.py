@@ -94,6 +94,8 @@ def collaboration_stream():
     current_user = get_current_user()
     user_id = current_user.id
 
+    last_event_id = request.args.get("last_event_id", type=int)
+
     # No seeding — the client already has the since_id polling fallback
     # for catching up on missed events.  SSE is purely for real-time push.
 

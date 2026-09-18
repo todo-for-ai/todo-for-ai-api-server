@@ -15,5 +15,7 @@ from . import routes_delegation  # noqa: E402,F401
 from . import routes_review  # noqa: E402,F401
 from . import routes_agent_chat  # noqa: E402,F401
 from . import routes_help_request  # noqa: E402,F401
+from . import task_analytics  # noqa: E402,F401
+from . import task_completion  # noqa: E402,F401
 
 __all__ = ['tasks_bp', 'tasks_list_fallback_cache']

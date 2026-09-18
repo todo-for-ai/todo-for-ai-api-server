@@ -33,14 +33,15 @@ def list_workflows():
     """List workflow definitions owned by the current user."""
     user = get_current_user()
     args = get_request_args()
-    is_active = args.get("is_active", type=bool)
+    # get_request_args() 返回普通 dict，不支持的过滤参数须从 request.args 读取
+    is_active = request.args.get("is_active")
     query = Workflow.query.filter_by(owner_id=user.id)
     if is_active is not None:
-        query = query.filter_by(is_active=is_active)
+        query = query.filter_by(is_active=is_active.lower() == "true")
     query = query.order_by(Workflow.updated_at.desc())
-    result = paginate_query(query, args)
-    items = [w.to_dict(include_steps=True) for w in result["items"]]
-    return ApiResponse.paginated(items, result["pagination"]).to_response()
+    result = paginate_query(query, args["page"], args["per_page"])
+    result["items"] = [w.to_dict(include_steps=True) for w in result["items"]]
+    return ApiResponse.success(result).to_response()
 
 
 @agents_bp.route("/workflows", methods=["POST"])

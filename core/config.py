@@ -81,7 +81,9 @@ class Config:
         'pool_pre_ping': True,
         'pool_recycle': 300,
         'pool_timeout': 20,
-        'max_overflow': 0
+        # 工作流等页面一次并发十余个请求，5+0 的池在出现慢查询时会整体饿死
+        'pool_size': 10,
+        'max_overflow': 20
     }
     
     # 文件上传配置

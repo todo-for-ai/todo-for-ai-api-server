@@ -263,7 +263,7 @@ def find_capable_agents_cross_project():
     ))
 
     # Filter by specific project if requested
-    filter_project_id = args.get("project_id", type=int)
+    filter_project_id = args.get("project_id")
     if filter_project_id:
         if filter_project_id not in project_ids:
             return ApiResponse.error("No access to specified project").to_response()
@@ -417,7 +417,7 @@ def find_cross_project_tasks(agent_id):
         return ApiResponse.not_found("Agent not found").to_response()
 
     args = get_request_args()
-    limit = args.get("limit", 20, type=int)
+    limit = request.args.get("limit", 20, type=int)
 
     # Get cross-project authorizations
     cross_auths = CrossProjectAgent.get_active_for_agent(agent.id)

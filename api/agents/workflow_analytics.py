@@ -9,7 +9,7 @@ import io
 from datetime import datetime, timedelta
 
 from flask import make_response, request
-from sqlalchemy import false as sa_false
+from sqlalchemy import false as sa_false, func
 
 from ._shared import (
     agents_bp,
@@ -123,7 +123,8 @@ def workflow_run_duration_percentiles():
             WorkflowRun.started_at,
         )
         .filter(
-            WorkflowRun.status == WorkflowStatus.COMPLETED,
+            WorkflowRun.owner_id == user.id,
+            WorkflowRun.status == WorkflowStatus.SUCCEEDED,
             WorkflowRun.finished_at >= cutoff,
             WorkflowRun.started_at.isnot(None),
             WorkflowRun.finished_at.isnot(None),

@@ -132,6 +132,16 @@ def unified_auth_required(f):
         except Exception:
             # JWT验证失败，继续尝试其他认证方式
             user_id = None
+        if not user_id and token and not (auth_header and auth_header.startswith('Bearer ')):
+            # EventSource/SSE 无法携带 Authorization 头，只传了 ?token=JWT。
+            # query token 不是 API Token 时，再按 JWT 解析一次（仅接受 access 类型）。
+            try:
+                from flask_jwt_extended import decode_token
+                claims = decode_token(token)
+                if claims.get('type') == 'access':
+                    user_id = coerce_user_identity(claims.get('sub'))
+            except Exception:
+                user_id = None
         if user_id:
             current_user = db.session.get(User, user_id)
             if current_user and current_user.is_active():

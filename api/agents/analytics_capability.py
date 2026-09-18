@@ -184,16 +184,23 @@ def agent_skill_matching():
     except (TypeError, ValueError):
         limit = 10
 
-    from models.agent import Task, TaskAssignment
+    from models import Task, TaskStatus
+    from models.agent import TaskAssignment
+    from models.agent_core import LEASED_EXECUTION_STATES, TaskAssignmentState
     # Find unassigned in-progress tasks
+    live_states = [s.value for s in LEASED_EXECUTION_STATES]
     unassigned_tasks = (
         Task.query
         .filter(
             Task.owner_id == user.id,
-            Task.status == "in_progress",
+            Task.status == TaskStatus.IN_PROGRESS,
             ~Task.id.in_(
                 TaskAssignment.query
-                .filter(TaskAssignment.status == "active")
+                .filter(
+                    TaskAssignment.state.in_(
+                        [TaskAssignmentState(s) for s in live_states]
+                    )
+                )
                 .with_entities(TaskAssignment.task_id)
             ),
         )
@@ -219,8 +226,8 @@ def agent_skill_matching():
 
     results = []
     for task in unassigned_tasks:
-        # Extract keywords from task title and description
-        text = (task.title or "") + " " + (task.description or "")
+        # Extract keywords from task title and content
+        text = (task.title or "") + " " + (task.content or "")
         keywords = set(w.lower() for w in text.split() if len(w) > 2)
         if not keywords:
             continue

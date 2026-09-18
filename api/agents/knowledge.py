@@ -19,6 +19,7 @@ from ._shared import (
     AuditLog,
     get_request_args,
     paginate_query,
+    paginate_serialized,
     parse_enum,
 )
 
@@ -61,14 +62,14 @@ def list_knowledge_entries(agent_id):
 
     include_content = request.args.get("include_content", "true").lower() == "true"
     query = query.order_by(KnowledgeEntry.updated_at.desc())
-    result = paginate_query(query, default_per_page=50)
+    args = get_request_args()
+    result = paginate_serialized(query, args["page"], args["per_page"], lambda e: e.to_dict(include_content=include_content))
 
-    entries = [e.to_dict(include_content=include_content) for e in result.items]
     return ApiResponse.success({
-        "items": entries,
-        "total": result.total,
-        "page": result.page,
-        "per_page": result.per_page,
+        "items": result["items"],
+        "total": result["pagination"]["total"],
+        "page": result["pagination"]["page"],
+        "per_page": result["pagination"]["per_page"],
     }).to_response()
 
 
@@ -267,13 +268,13 @@ def list_shared_knowledge():
         )
 
     query = query.order_by(KnowledgeEntry.updated_at.desc())
-    result = paginate_query(query, default_per_page=50)
-    entries = [e.to_dict(include_content=False) for e in result.items]
+    args = get_request_args()
+    result = paginate_serialized(query, args["page"], args["per_page"], lambda e: e.to_dict(include_content=False))
     return ApiResponse.success({
-        "items": entries,
-        "total": result.total,
-        "page": result.page,
-        "per_page": result.per_page,
+        "items": result["items"],
+        "total": result["pagination"]["total"],
+        "page": result["pagination"]["page"],
+        "per_page": result["pagination"]["per_page"],
     }).to_response()
 
 

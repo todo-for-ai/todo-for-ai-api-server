@@ -153,7 +153,7 @@ def workflow_step_duration_histogram():
     Buckets completed step durations into time ranges per step_key.
     Reveals whether step durations are normal or long-tailed.
 
-    Buckets: 0-10s, 10-30s, 30-60s, 60-120s, 120-300s, 300s+
+    Buckets: 0-30s, 30-120s, 2-5m, 5-15m, 15-30m, 30m+
 
     Query params:
     - days: lookback window (1-90, default 30)
@@ -170,58 +170,65 @@ def workflow_step_duration_histogram():
     since = datetime.utcnow() - timedelta(days=days)
 
     # Get completed steps with duration
-    from models.agent import WorkflowRunStep
     steps = (
-        WorkflowRunStep.query
-        .join(AgentRun, WorkflowRunStep.run_id == AgentRun.id)
-        .join(Agent, AgentRun.agent_id == Agent.id)
+        WorkflowStepRun.query
+        .join(WorkflowRun, WorkflowStepRun.run_id == WorkflowRun.id)
         .filter(
-            Agent.owner_id == user.id,
-            WorkflowRunStep.completed_at >= since,
-            WorkflowRunStep.completed_at != None,
-            WorkflowRunStep.started_at != None,
+            WorkflowRun.owner_id == user.id,
+            WorkflowStepRun.finished_at >= since,
+            WorkflowStepRun.finished_at != None,
+            WorkflowStepRun.started_at != None,
         )
         .with_entities(
-            WorkflowRunStep.step_key,
-            WorkflowRunStep.started_at,
-            WorkflowRunStep.completed_at,
+            WorkflowStepRun.step_key,
+            WorkflowStepRun.started_at,
+            WorkflowStepRun.finished_at,
         )
         .all()
     )
 
-    bucket_ranges = ["0-10s", "10-30s", "30-60s", "60-120s", "120-300s", "300s+"]
-    bucket_thresholds = [0, 10, 30, 60, 120, 300]
+    bucket_labels = ["0-30s", "30-120s", "2-5m", "5-15m", "15-30m", "30m+"]
+    bucket_thresholds = [0, 30, 120, 300, 900, 1800]
 
-    step_data = {}  # step_key -> [count per bucket]
-    for step_key, started_at, completed_at in steps:
-        if not step_key or not started_at or not completed_at:
+    step_durations = {}  # step_key -> list of durations in seconds
+    for step_key, started_at, finished_at in steps:
+        if not step_key or not started_at or not finished_at:
             continue
-        dur = (completed_at - started_at).total_seconds()
+        dur = (finished_at - started_at).total_seconds()
         if dur < 0:
             continue
 
-        if step_key not in step_data:
-            step_data[step_key] = [0] * 6
+        step_durations.setdefault(step_key, []).append(dur)
 
-        # Find bucket
-        for i in range(len(bucket_thresholds) - 1, -1, -1):
-            if dur >= bucket_thresholds[i]:
-                step_data[step_key][i] += 1
-                break
+    # Sort by sample count descending
+    sorted_steps = sorted(step_durations.items(), key=lambda kv: len(kv[1]), reverse=True)[:limit]
 
-    # Sort by total count descending
-    sorted_steps = sorted(step_data.items(), key=lambda kv: sum(kv[1]), reverse=True)[:limit]
+    def _percentile(sorted_vals, pct):
+        if not sorted_vals:
+            return 0
+        idx = min(len(sorted_vals) - 1, int(pct * (len(sorted_vals) - 1)))
+        return round(sorted_vals[idx], 1)
 
-    results = []
-    for step_key, counts in sorted_steps:
-        buckets = [{"range": bucket_ranges[i], "count": counts[i]} for i in range(6)]
-        results.append({
+    items = []
+    for step_key, durations in sorted_steps:
+        counts = [0] * len(bucket_thresholds)
+        for dur in durations:
+            for i in range(len(bucket_thresholds) - 1, -1, -1):
+                if dur >= bucket_thresholds[i]:
+                    counts[i] += 1
+                    break
+        sorted_durs = sorted(durations)
+        items.append({
             "step_key": step_key,
-            "buckets": buckets,
-            "total": sum(counts),
+            "bins": {bucket_labels[i]: counts[i] for i in range(len(bucket_labels))},
+            "sample_size": len(durations),
+            "median_seconds": _percentile(sorted_durs, 0.50),
+            "p95_seconds": _percentile(sorted_durs, 0.95),
+            "min_seconds": round(sorted_durs[0], 1),
+            "max_seconds": round(sorted_durs[-1], 1),
         })
 
-    return ApiResponse.success({"steps": results, "days": days}).to_response()
+    return ApiResponse.success({"items": items, "bin_labels": bucket_labels, "days": days}).to_response()
 
 
 @agents_bp.route("/workflows/step-bottleneck-timeline", methods=["GET"])
