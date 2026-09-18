@@ -1,0 +1,48 @@
+分层违规: core 层不得 import api 层 — core/agent_cron_scheduler.py:122 → api.agent_trigger_engine
+分层违规: core 层不得 import api 层 — core/agent_cron_scheduler.py:146 → api.agent_automation
+分层违规: core 层不得 import api 层 — core/agent_cron_scheduler.py:46 → api.agent_common
+分层违规: core 层不得 import api 层 — core/auth.py:9 → api.base
+分层违规: core 层不得 import api 层 — core/cache_invalidation.py:37 → api.dashboard
+分层违规: core 层不得 import api 层 — core/cache_invalidation.py:46 → api.projects
+分层违规: core 层不得 import api 层 — core/cache_invalidation.py:55 → api.tasks
+分层违规: core 层不得 import api 层 — core/cache_invalidation.py:64 → api.pins
+分层违规: core 层不得 import api 层 — core/cache_invalidation.py:73 → api.context_rules
+分层违规: core 层不得 import api 层 — core/cache_invalidation.py:82 → api.mcp
+分层违规: core 层不得 import api 层 — core/middleware.py:140 → api.base
+分层违规: core 层不得 import api 层 — core/middleware.py:150 → api.base
+分层违规: core 层不得 import api 层 — core/middleware.py:159 → api.base
+分层违规: core 层不得 import api 层 — core/middleware.py:168 → api.base
+分层违规: core 层不得 import api 层 — core/middleware.py:177 → api.base
+分层违规: core 层不得 import api 层 — core/middleware.py:187 → api.base
+分层违规: core 层不得 import api 层 — core/middleware.py:198 → api.base
+分层违规: core 层不得 import api 层 — core/orchestrator_scheduler.py:26 → api.agents
+分层违规: core 层不得 import services 层 — core/goal_loop_watchdog.py:33 → services.goal_loop_service
+分层违规: core 层不得 import services 层 — core/goal_loop_watchdog.py:41 → services.workspace_runtime_policy
+分层违规: core 层不得 import services 层 — core/goal_loop_watchdog.py:42 → services.agent_runtime_controller
+分层违规: models 层不得 import services 层 — models/system_settings.py:210 → services.ai_service
+分层违规: services 层不得 import api 层 — services/agent_runtime_controller.py:471 → api.agent_common
+分层违规: services 层不得 import api 层 — services/agent_runtime_controller.py:589 → api.agent_runtime_websocket
+分层违规: services 层不得 import api 层 — services/budget_service.py:193 → api.agent_common
+分层违规: services 层不得 import api 层 — services/deploy_check.py:283 → api.agent_runtime_websocket
+分层违规: services 层不得 import api 层 — services/goal_decomposition.py:63 → api.ai_task_split
+分层违规: services 层不得 import api 层 — services/goal_loop/dispatch.py:156 → api.agent_common
+分层违规: services 层不得 import api 层 — services/goal_loop/dispatch.py:157 → api.agent_runtime_websocket
+分层违规: services 层不得 import api 层 — services/runtime_env/remote_provider.py:45 → api.agent_runtime_websocket
+分层违规: services 层不得 import api 层 — services/runtime_env/remote_provider.py:89 → api.agent_runtime_websocket
+分层违规: services 层不得 import api 层 — services/system_monitor.py:164 → api.agent_runtime_websocket
+分层违规: services 层不得 import api 层 — services/task_handoff.py:71 → api.agent_runtime_pull
+文件超硬上限 807 行（>800）: api/agents/conflicts.py
+文件超硬上限 837 行（>800）: api/agents/sandboxes.py
+文件超硬上限 857 行（>800）: api/mcp/handlers/task_tools.py
+文件超硬上限 899 行（>800）: api/tasks/routes_tasks.py
+文件超硬上限 916 行（>800）: api/agents/_shared.py
+文件超硬上限 948 行（>800）: api/agents/workflow/analytics.py
+顶层包循环依赖: api → api
+顶层包循环依赖: api → core → api
+顶层包循环依赖: api → core → models → services → api
+顶层包循环依赖: core → core
+顶层包循环依赖: core → models → core
+顶层包循环依赖: core → models → services → core
+顶层包循环依赖: models → models
+顶层包循环依赖: models → services → models
+顶层包循环依赖: services → services
