@@ -18,7 +18,7 @@ import os
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from models import TaskLog, TaskLogActorType, Task, Agent, User, Organization, db
+from models import TaskLog, TaskLogActorType, Task, Agent, User, Organization, Project, OrganizationMember, db
 from app import create_app
 
 
@@ -46,39 +46,65 @@ def seed_interactions_data(workspace_id: int = 5, agent_id: int = 1, num_records
             print(f"❌ Organization {workspace_id} 不存在")
             return
 
-        # 获取该组织下的所有用户
-        users = User.query.filter(
-            User.organization_id == workspace_id
+        # 获取该组织下的所有用户 (通过 OrganizationMember 关联)
+        user_ids = db.session.query(OrganizationMember.user_id).filter(
+            OrganizationMember.organization_id == workspace_id
         ).limit(10).all()
+        user_ids = [u[0] for u in user_ids]
+
+        users = User.query.filter(User.id.in_(user_ids)).all() if user_ids else []
+
+        # 如果没有找到用户，使用现有的前几个用户
+        if not users:
+            print(f"⚠️ Organization {workspace_id} 下没有成员，使用现有用户...")
+            users = User.query.limit(5).all()
 
         if not users:
-            print(f"❌ Organization {workspace_id} 下没有用户")
+            print(f"❌ 数据库中没有用户，请先创建用户")
             return
 
-        # 获取该组织下的任务
+        # 获取该组织下的项目
+        projects = Project.query.filter(
+            Project.organization_id == workspace_id
+        ).limit(10).all()
+
+        if not projects:
+            print(f"⚠️ Organization {workspace_id} 下没有项目，创建一个默认项目...")
+            project = Project(
+                organization_id=workspace_id,
+                name=f"Test Project for Agent {agent_id}",
+                description="Test project for interactions",
+                status='ACTIVE',
+                created_by=users[0].id,
+            )
+            db.session.add(project)
+            db.session.commit()
+            projects = [project]
+
+        # 获取这些项目下的任务
         tasks = Task.query.filter(
-            Task.organization_id == workspace_id
+            Task.project_id.in_([p.id for p in projects])
         ).limit(20).all()
 
         if not tasks:
-            print(f"⚠️ Organization {workspace_id} 下没有任务，创建一些任务...")
+            print(f"⚠️ 没有任务，创建一些任务...")
             # 创建一些测试任务
             for i in range(5):
                 task = Task(
-                    organization_id=workspace_id,
+                    project_id=projects[0].id,
                     title=f"Test Task {i+1} for Agent {agent_id}",
-                    description=f"This is a test task for interactions",
+                    description="This is a test task for interactions",
                     status='in_progress',
                     priority='medium',
-                    created_by=users[0].id if users else 1,
+                    created_by=users[0].id,
                 )
                 db.session.add(task)
             db.session.commit()
             tasks = Task.query.filter(
-                Task.organization_id == workspace_id
+                Task.project_id.in_([p.id for p in projects])
             ).limit(20).all()
 
-        print(f"✅ 找到 {len(users)} 个用户和 {len(tasks)} 个任务")
+        print(f"✅ 找到 {len(users)} 个用户, {len(projects)} 个项目和 {len(tasks)} 个任务")
 
         # 删除该 agent 在指定 workspace 下的现有 task logs（避免重复）
         existing_logs = TaskLog.query.filter(
