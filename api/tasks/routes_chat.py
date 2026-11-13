@@ -13,6 +13,10 @@ from . import tasks_bp
 @unified_auth_required
 def get_task_chat(task_id):
     """Get threaded chat messages for a task."""
+    from models import Task
+    task = db.session.get(Task, task_id)
+    if not task or not get_current_user().can_access_project(task.project):
+        return ApiResponse.error('Access denied', 403).to_response()
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 20, type=int)
 
@@ -50,6 +54,11 @@ def send_task_chat(task_id):
 
     content = data['content']
     parent_id = data.get('parent_id')
+
+    from models import Task
+    task = db.session.get(Task, task_id)
+    if not task or not get_current_user().can_access_project(task.project):
+        return ApiResponse.error('Access denied', 403).to_response()
 
     # If replying, verify parent belongs to same task
     if parent_id is not None:

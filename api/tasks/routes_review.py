@@ -17,7 +17,10 @@ def list_pending_reviews(workspace_id):
     The workspace is represented by the Organization model. We find all
     projects owned by the organization, then filter tasks by REVIEW status.
     """
-    from models import Project
+    from models import Project, Organization
+    workspace = db.session.get(Organization, workspace_id)
+    if not workspace or not get_current_user().can_access_organization(workspace):
+        return ApiResponse.error('Access denied', 403).to_response()
 
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 20, type=int)
@@ -57,6 +60,8 @@ def submit_review(task_id):
     task = db.session.get(Task, task_id)
     if not task:
         return ApiResponse.error('Task not found', 404).to_response()
+    if not get_current_user().can_access_project(task.project):
+        return ApiResponse.error('Access denied', 403).to_response()
 
     if task.status != TaskStatus.REVIEW:
         return ApiResponse.error('Task is not in REVIEW status', 400).to_response()

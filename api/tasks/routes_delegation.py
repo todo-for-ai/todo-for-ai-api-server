@@ -21,6 +21,8 @@ def delegate_task(task_id):
     task = db.session.get(Task, task_id)
     if not task:
         return ApiResponse.error('Task not found', 404).to_response()
+    if not get_current_user().can_access_project(task.project):
+        return ApiResponse.error('Access denied', 403).to_response()
 
     agent = db.session.get(Agent, agent_id)
     if not agent or agent.status != AgentStatus.ACTIVE:
@@ -83,6 +85,8 @@ def reclaim_task(task_id):
     task = db.session.get(Task, task_id)
     if not task:
         return ApiResponse.error('Task not found', 404).to_response()
+    if not get_current_user().can_access_project(task.project):
+        return ApiResponse.error('Access denied', 403).to_response()
 
     user = get_current_user()
 
@@ -118,6 +122,10 @@ def reclaim_task(task_id):
 @unified_auth_required
 def list_delegatable_agents(workspace_id):
     """List active agents in a workspace available for delegation."""
+    from models import Organization
+    workspace = db.session.get(Organization, workspace_id)
+    if not workspace or not get_current_user().can_access_organization(workspace):
+        return ApiResponse.error('Access denied', 403).to_response()
     agents = (
         Agent.query
         .filter(Agent.workspace_id == workspace_id, Agent.status == AgentStatus.ACTIVE)

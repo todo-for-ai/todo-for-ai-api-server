@@ -2,7 +2,7 @@
 
 from flask import g, request
 
-from models import db, TaskLog, TaskLogActorType
+from models import db, TaskLog, TaskLogActorType, Task, Project
 from api.base import ApiResponse
 from api.agent_common import agent_session_required
 
@@ -14,6 +14,12 @@ from . import tasks_bp
 def send_agent_chat(task_id):
     """Agent sends a chat message or reply on a task."""
     agent = g.current_agent
+    task = db.session.get(Task, task_id)
+    if not task:
+        return ApiResponse.error('Task not found', 404).to_response()
+    project = db.session.get(Project, task.project_id)
+    if not project or project.organization_id != agent.workspace_id:
+        return ApiResponse.error('Access denied', 403).to_response()
     data = request.get_json()
     if not data or not data.get('content'):
         return ApiResponse.error('content is required').to_response()
@@ -59,6 +65,13 @@ def get_agent_chat(task_id):
     交互式会话的读取半边：daemon 在每次 attempt 构建 prompt 时带
     after_id（上次已读游标，存工作区锚点）拉取新增留言，把用户在
     平台上的追问注入引擎 prompt。返回按 id 升序。"""
+    agent = g.current_agent
+    task = db.session.get(Task, task_id)
+    if not task:
+        return ApiResponse.error('Task not found', 404).to_response()
+    project = db.session.get(Project, task.project_id)
+    if not project or project.organization_id != agent.workspace_id:
+        return ApiResponse.error('Access denied', 403).to_response()
     after_id = request.args.get('after_id', 0, type=int)
     limit = min(max(request.args.get('limit', 100, type=int), 1), 200)
 
