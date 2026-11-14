@@ -4,7 +4,7 @@ from flask import request
 
 from models import db, Task, TaskStatus
 from api.base import ApiResponse
-from core.auth import unified_auth_required
+from core.auth import unified_auth_required, get_current_user
 from services.task_graph import find_dependency_cycle
 from api.user_websocket import notify_task_graph_changed
 
@@ -51,6 +51,8 @@ def batch_update_status():
         return ApiResponse.error(f'Invalid status: {new_status}').to_response()
 
     tasks = db.session.query(Task).filter(Task.id.in_(task_ids)).all()
+    current_user = get_current_user()
+    tasks = [t for t in tasks if current_user.can_access_project(t.project)]
     for task in tasks:
         task.status = status_enum
     db.session.commit()
@@ -89,6 +91,8 @@ def batch_update_priority():
         return ApiResponse.error(f'Max {MAX_BATCH_SIZE} tasks per batch').to_response()
 
     tasks = db.session.query(Task).filter(Task.id.in_(task_ids)).all()
+    current_user = get_current_user()
+    tasks = [t for t in tasks if current_user.can_access_project(t.project)]
     for task in tasks:
         task.priority = new_priority
     db.session.commit()
@@ -107,7 +111,12 @@ def batch_delete():
     if len(task_ids) > MAX_BATCH_SIZE:
         return ApiResponse.error(f'Max {MAX_BATCH_SIZE} tasks per batch').to_response()
 
-    deleted = db.session.query(Task).filter(Task.id.in_(task_ids)).delete(synchronize_session=False)
+    current_user = get_current_user()
+    candidates = db.session.query(Task).filter(Task.id.in_(task_ids)).all()
+    allowed_ids = [t.id for t in candidates if current_user.can_access_project(t.project)]
+    deleted = 0
+    if allowed_ids:
+        deleted = db.session.query(Task).filter(Task.id.in_(allowed_ids)).delete(synchronize_session=False)
     db.session.commit()
 
     return ApiResponse.success(data={'deleted': deleted}).to_response()
@@ -126,6 +135,8 @@ def batch_assign():
         return ApiResponse.error(f'Max {MAX_BATCH_SIZE} tasks per batch').to_response()
 
     tasks = db.session.query(Task).filter(Task.id.in_(task_ids)).all()
+    current_user = get_current_user()
+    tasks = [t for t in tasks if current_user.can_access_project(t.project)]
     for task in tasks:
         task.assignees = assignees
     db.session.commit()
@@ -139,6 +150,8 @@ def get_dependencies(task_id):
     task = db.session.query(Task).get(task_id)
     if not task:
         return ApiResponse.error('Task not found', 404).to_response()
+    if not get_current_user().can_access_project(task.project):
+        return ApiResponse.error('Access denied', 403).to_response()
     return ApiResponse.success(data={
         'blocking': task.blocking_task_ids or [],
         'blocked_by': task.blocked_by_task_ids or [],
@@ -155,6 +168,8 @@ def update_dependencies(task_id):
     task = db.session.query(Task).get(task_id)
     if not task:
         return ApiResponse.error('Task not found', 404).to_response()
+    if not get_current_user().can_access_project(task.project):
+        return ApiResponse.error('Access denied', 403).to_response()
 
     # 防环：依赖门语义下环 = 互相等待、永久无法派发，写侧直接拒绝。
     # 自依赖与传递成环同拦；失效引用（已删任务）由派发门容忍，不在此校验。
